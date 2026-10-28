@@ -8,7 +8,7 @@ pub fn render_image(frame: Frame) -> Arc<RenderImage> {
         .expect("internally sized BGRA image");
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
 }
-fn pixel(x: usize, y: usize, scale: usize) -> [u8; 4] {
+pub(crate) fn pixel(x: usize, y: usize, scale: usize) -> [u8; 4] {
     if x < 64 * scale {
         return [(y & 255) as u8, ((y >> 8) & 255) as u8, 173, 255];
     }

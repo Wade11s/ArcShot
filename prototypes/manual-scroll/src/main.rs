@@ -3,6 +3,8 @@ mod capture;
 mod fixture;
 mod geometry;
 mod native;
+mod pixel_diagnostics;
+mod pixels;
 mod stitch;
 
 use anyhow::{Result, ensure};
@@ -290,6 +292,9 @@ fn main() -> Result<()> {
         );
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--probe-color") {
+        return pixels::probe();
+    }
     if args.iter().any(|a| a == "--probe-text") {
         let application = Application::new();
         let text_system = application.text_system();

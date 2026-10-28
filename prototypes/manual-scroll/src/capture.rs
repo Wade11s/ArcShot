@@ -278,8 +278,38 @@ fn collect_inner(
         };
         let compute = Instant::now();
         // Fixture-only source validation, not a candidate-offset generator.
+        let valid = crate::fixture::oracle(&frame, scale as usize);
+        if !valid {
+            println!(
+                "snapshot_metadata bits_per_component={} bits_per_pixel={} bytes_per_row={}",
+                image.bits_per_component(),
+                image.bits_per_pixel(),
+                image.bytes_per_row()
+            );
+            println!(
+                "pixel_diagnostic_DeviceRGB={:?}",
+                crate::pixel_diagnostics::report(&frame, scale as usize)
+            );
+            // Diagnose another extraction of the SAME owned CGImage, not another
+            // screenshot. Neither transform search nor normalization admits the frame.
+            if let Ok(normalized) = crate::pixels::srgb_bgra(&image) {
+                let normalized = Frame {
+                    width,
+                    height,
+                    pixels: normalized,
+                };
+                println!(
+                    "pixel_diagnostic_named_sRGB={:?}",
+                    crate::pixel_diagnostics::report(&normalized, scale as usize)
+                );
+                println!(
+                    "pixel_diagnostic_named_sRGB_oracle={}",
+                    crate::fixture::oracle(&normalized, scale as usize)
+                );
+            }
+        }
         ensure!(
-            crate::fixture::oracle(&frame, scale as usize),
+            valid,
             "fixture ground truth mismatch: source, crop, color, exclusion or mutation; validation failed"
         );
         if let Some(stitch) = stitched {

@@ -141,6 +141,7 @@ name = "arcshot-scroll-prototype"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apple-cf",
  "cocoa",
  "env_logger",
  "gpui",
