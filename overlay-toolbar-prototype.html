@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>ArcShot · 覆盖层与工具栏原型</title>
+<!-- THROWAWAY: Three structurally different layouts on one standalone page,
+     switchable via ?variant=A|B|C. No application page exists yet.
+     Issue: https://github.com/Wade11s/ArcShot/issues/7
+     Browser interaction is illustrative, not a GPUI/macOS feasibility test. -->
+<style>
+*{box-sizing:border-box}body{margin:0;background:#edf0f5;color:#202733;font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,select,input,textarea{font:inherit}button,select{cursor:pointer}button:focus-visible,select:focus-visible{outline:3px solid #679cff;outline-offset:2px}button{border:0}header{max-width:1448px;margin:auto;padding:18px 24px 12px;display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:19px;margin:0 0 5px;letter-spacing:-.3px}.sub{font-size:12px;color:#6d7785}.badge{display:inline-block;font-size:10px;letter-spacing:1px;color:#456080;background:#dfe8f4;padding:4px 7px;border-radius:5px;margin-right:10px;vertical-align:2px}.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.controls button,.controls select{background:white;border:1px solid #d6dce5;border-radius:7px;padding:8px 10px;color:#344154}.controls label{font-size:12px;color:#667181}.meta{max-width:1448px;margin:auto;padding:0 24px 12px;display:flex;gap:16px;justify-content:space-between;font-size:12px;color:#677486}.meta strong{color:#38495d;font-weight:500}#viewport{position:relative;margin:0 auto;overflow:hidden;border-radius:10px;box-shadow:0 12px 40px #24345329;background:#87a1c2}#screen{width:1200px;height:720px;position:absolute;transform-origin:top left;overflow:hidden;user-select:none;touch-action:none;background:radial-gradient(ellipse at 5% 100%,#6582a8 0,transparent 50%),radial-gradient(ellipse at 85% 5%,#b4c9d1,transparent 55%),linear-gradient(125deg,#ced8d2,#7996b9);cursor:crosshair}
+.menubar{position:absolute;top:0;left:0;right:0;height:28px;background:#e5edf380;display:flex;justify-content:space-between;align-items:center;padding:0 19px;font-size:12px}.desktop-window{position:absolute;left:112px;top:75px;width:970px;height:560px;border-radius:12px;background:#fafbfc;box-shadow:0 25px 60px #26374e40;overflow:hidden}.window-top{height:45px;background:#f1f3f6;border-bottom:1px solid #e2e6ec;display:flex;align-items:center;padding:0 17px;gap:7px}.dot{width:11px;height:11px;border-radius:50%;background:#ff6258}.dot:nth-child(2){background:#ffbd2e}.dot:nth-child(3){background:#27c840}.window-title{margin-left:300px;font-size:12px;color:#687486}.doc-nav{position:absolute;top:45px;bottom:0;width:190px;background:#f0f3f7;padding:28px 20px}.doc-nav b{font-size:12px;letter-spacing:1px;color:#8894a3}.nav-item{padding:12px 8px;border-radius:6px;color:#6c7988;margin-top:8px}.nav-item.active{background:#e0e7f0;color:#355d89}.document{position:absolute;left:190px;right:0;padding:36px 55px}.eyebrow{font-size:11px;color:#8493a5;letter-spacing:2px}.document h2{font-size:34px;letter-spacing:-1px;margin:14px 0 8px}.document p{color:#8490a0;margin-bottom:24px}.doc-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.doc-card{padding:19px;border:1px solid #e1e6ed;border-radius:9px;background:white;height:138px}.doc-card b{font-size:16px}.doc-card p{font-size:13px;line-height:1.7;margin-top:10px}.chip{background:#e2efe9;color:#428b68;border-radius:5px;padding:4px 7px;font-size:10px;float:right}.doc-row{display:flex;justify-content:space-between;border-bottom:1px solid #e8ebf0;padding:15px 0;color:#6f7e91;font-size:12px}.fake-dock{position:absolute;bottom:12px;left:450px;display:flex;gap:10px;padding:8px 12px;background:#e1eaf66b;border:1px solid #fff8;border-radius:15px}.fake-dock span{width:33px;height:33px;background:#e6edf5;border-radius:8px;display:grid;place-items:center;color:#5d80aa}
+#shade{position:absolute;inset:0;pointer-events:none}#selection{position:absolute;border:1.5px solid #f4f8ff;box-shadow:0 0 0 9999px #10182882,0 0 0 1px #457fe7;pointer-events:none}#selection.empty{inset:0!important;border:0;box-shadow:none;background:#10182882}.region-handle{position:absolute;width:9px;height:9px;background:white;border:1px solid #407be0;border-radius:1px;pointer-events:auto;transform:translate(-50%,-50%);cursor:nwse-resize}.region-label{position:absolute;white-space:nowrap;left:0;top:-26px;padding:4px 7px;background:#172337d9;color:white;font:11px ui-monospace,monospace;border-radius:4px}.move-region{position:absolute;top:0;left:50%;transform:translate(-50%,-100%);height:22px;padding:3px 12px;background:#eff5ff;color:#335a90;white-space:nowrap;font-size:10px;border-radius:5px 5px 0 0;pointer-events:auto;cursor:move}
+#art{position:absolute;inset:0;width:1200px;height:720px;pointer-events:none;overflow:visible}#art [data-id]{pointer-events:all;cursor:move}#art [data-point]{pointer-events:all;cursor:crosshair}#chrome{position:absolute;inset:0;pointer-events:none}.panel{position:absolute;pointer-events:auto;background:#242a35f7;border:1px solid #ffffff29;border-radius:11px;box-shadow:0 8px 24px #07101e50;color:#e5edf9;padding:6px;backdrop-filter:blur(18px)}.toolrow{display:flex;align-items:center;gap:3px}.tool{width:38px;height:36px;border-radius:6px;background:transparent;color:#cdd5e4;display:grid;place-items:center}.tool svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.tool:hover,.action:hover{background:#ffffff1c}.tool.active{background:#4c83ed;color:white}.separator{width:1px;height:22px;background:#ffffff25;margin:0 5px}.action{height:36px;padding:0 12px;border-radius:6px;background:transparent;color:#dce7f7;font-size:12px;white-space:nowrap}.action.primary{background:#4d85f2;color:white}.action.primary:hover{background:#6699ff}.action.danger{color:#f7acb8}.properties{display:flex;gap:9px;align-items:center;padding:5px 9px;min-height:37px;font-size:11px;color:#adbcd0}.properties select{background:#353f50;color:white;border:1px solid #536078;border-radius:4px;padding:3px;font-size:11px;max-width:160px}.swatch{height:16px;width:16px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 2px #567db5;background:#ff6069}.property-title{color:#ebf1fa;margin-right:7px}.ribbon-head{font-size:10px;letter-spacing:1px;padding:5px 8px 8px;color:#8294af}.ribbon{padding:9px 13px}.ribbon .toolrow{justify-content:center}.ribbon .properties{border-top:1px solid #ffffff15;margin-top:7px;justify-content:center}.vertical .toolrow{flex-direction:column}.vertical .separator{width:22px;height:1px;margin:7px}.inspector{width:184px;padding:16px}.inspector .properties{display:flex;flex-wrap:wrap;padding:0;gap:14px}.inspector h3{font-size:12px;margin:0 0 18px}.inspector p{font-size:11px;color:#8798b1;line-height:1.7;margin:18px 0 0}.hint{position:absolute;top:45px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:12px;border:1px solid #ffffff38;border-radius:22px;background:#1b2639cf;color:#e4edfc;padding:9px 17px;pointer-events:none}
+#editor{position:absolute;pointer-events:auto;z-index:5;background:#fcfdff;color:#26354c;border:2px solid #4e8df9;box-shadow:0 0 0 4px #5392ff2a;border-radius:5px;padding:0;overflow:hidden}#editor textarea{display:block;border:0;outline:0;background:transparent;width:100%;resize:none;min-height:76px;padding:12px;font-size:20px;color:#df505a;line-height:1.4;user-select:text}#editor .edit-footer{display:flex;align-items:center;justify-content:space-between;background:#edf3ff;color:#5c739c;padding:6px 9px;font-size:10px}#editor button{font-size:11px;color:#3973d7;background:white;border-radius:4px;padding:4px 7px}.toast{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);background:#f6f9ff;color:#344d72;border:1px solid #dae4f2;border-radius:8px;padding:10px 16px;box-shadow:0 6px 20px #101b3940;font-size:12px;max-width:850px;text-align:center;pointer-events:none;z-index:10}
+#description{max-width:1200px;padding:10px 16px;margin:auto;display:flex;justify-content:space-between;font-size:12px;gap:20px;color:#68768a}#description strong{color:#314d76}details{max-width:1200px;margin:0 auto 100px;padding:0 16px;font-size:11px;color:#8792a2}pre{white-space:pre-wrap;background:#e5eaf2;border-radius:6px;padding:12px;color:#4e617c}.switcher{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;background:#16243d;color:#eff5ff;border:1px solid #ffffff3d;box-shadow:0 10px 30px #17243e38;padding:6px;border-radius:13px;z-index:20}.switcher button{background:#ffffff12;color:white;border-radius:8px;width:35px;height:34px;font-size:18px}.switcher button:hover{background:#ffffff30}.switcher div{min-width:250px;text-align:center;font-size:12px}.switcher small{display:block;font-size:9px;color:#a6b6d3;margin-top:3px;letter-spacing:.5px}.output{position:absolute;inset:0;z-index:30;background:#152038b8;display:grid;place-items:center;pointer-events:auto}.output>div{background:#f8faff;border-radius:16px;width:440px;padding:30px;box-shadow:0 18px 60px #0004}.output h2{font-size:22px;color:#1e3457}.output p{font-size:13px;line-height:1.8;color:#70809a}.output button{padding:10px 16px;border-radius:7px;background:#427be4;color:white}.output .stamp{display:inline-block;border:1px dashed #abc0df;padding:22px;color:#627fa9;border-radius:8px;width:100%;text-align:center}
+@media(max-width:800px){header{align-items:flex-start;flex-direction:column;gap:8px;padding-top:10px}.meta{display:none}#description{flex-direction:column;gap:4px}.switcher{bottom:10px}}
+</style>
+</head>
+<body>
+<header>
+ <div><h1><span class="badge">PROTOTYPE · 07</span>选区与工具栏，哪种距离刚好？</h1><div class="sub">布局决策用 · 虚构桌面 · 不读取屏幕、不写剪贴板、不保存文件、不发网络请求</div></div>
+ <div class="controls">
+  <label for="scenario">体验场景</label>
+  <select id="scenario">
+   <option value="center">普通选区</option><option value="initial">尚未框选</option>
+   <option value="bottom">贴右下角</option><option value="top">贴左上角</option>
+   <option value="tiny">小选区</option><option value="full">近全屏选区</option>
+   <option value="objects">对象编辑</option><option value="text">文本输入</option>
+  </select>
+  <button id="reset">重置场景</button>
+ </div>
+</header>
+<div class="meta"><span>三种布局共享同一个选区与标注；切换时保留内容。</span><strong id="placement"></strong></div>
+<div id="viewport"><main id="screen" aria-label="模拟截图屏幕">
+ <div class="menubar"><span>◆ &nbsp; ArcShot &nbsp;&nbsp; 文件 &nbsp;&nbsp; 编辑 &nbsp;&nbsp; 视图</span><span>◉ &nbsp; Wi-Fi &nbsp; 100% &nbsp; 周三 10:24</span></div>
+ <div class="desktop-window">
+  <div class="window-top"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span class="window-title">工作笔记 / ArcShot</span></div>
+  <aside class="doc-nav"><b>WORKSPACE</b><div class="nav-item">⌂ &nbsp; 工作台</div><div class="nav-item active">▣ &nbsp; 产品笔记</div><div class="nav-item">◇ &nbsp; 设计资源</div><div class="nav-item">☰ &nbsp; 每周记录</div></aside>
+  <article class="document"><div class="eyebrow">PRODUCT / WORK IN PROGRESS</div><h2>让想法，一目了然。</h2><p>选中有用的部分，把注意力留给真正重要的事。</p>
+   <div class="doc-grid"><div class="doc-card"><span class="chip">已整理</span><b>01 &nbsp; Capture</b><p>框选桌面上的一个区域。<br>保持专注，留下必要的信息。</p></div><div class="doc-card"><span class="chip">讨论中</span><b>02 &nbsp; Annotate</b><p>高亮重点，隐藏敏感内容。<br>用简洁的标注表达你的想法。</p></div></div>
+   <div class="doc-row"><span>本周设计讨论</span><span>覆盖层 · 工具栏 · 编辑</span></div><div class="doc-row"><span>下一步</span><span>选择一种自然的交互布局</span></div><div class="doc-row"><span>备注</span><span>此页面内容仅为视觉占位</span></div>
+  </article>
+ </div><div class="fake-dock"><span>◒</span><span>▧</span><span>◈</span><span>✎</span><span>⌘</span><span>▥</span></div>
+ <div id="shade"><div id="selection"></div></div>
+ <svg id="art" viewBox="0 0 1200 720" aria-label="标注画布"></svg>
+ <div id="chrome"></div>
+</main></div>
+<div id="description"><span id="variant-description"></span><span id="status"></span></div>
+<details><summary>查看原型状态 / 假设与限制</summary><p>下方数值是模拟屏幕坐标，不是 Retina 像素。手势、属性默认值、尺寸与边距只是演示假设；会话快捷键、滚动流程和精确工具行为由后续决策确定。方格仅表示马赛克占位，不执行脱敏。浏览器文本输入不验证 GPUI / macOS IME。</p><pre id="state"></pre></details>
+<nav class="switcher" id="prototype-switcher" aria-label="原型布局切换">
+ <button id="prev" aria-label="上一个布局">←</button><div><span id="variant-name"></span><small>原型控制器 · 非产品 UI · ← → 切换布局</small></div><button id="next" aria-label="下一个布局">→</button>
+</nav>
+<script>
+const W=1200,H=720,$=s=>document.querySelector(s),screen=$('#screen'),art=$('#art'),chrome=$('#chrome');
+const variants={
+ A:{name:'A · 选区旁浮动',description:'跟着选区走。优先下方 → 上方 → 选区内，属性在工具条第二行。'},
+ B:{name:'B · 底部固定工具带',description:'工具与属性固定在屏幕底部，选区移动不改变操作位置。'},
+ C:{name:'C · 工具坞 + 属性面板',description:'左侧选工具、右侧改属性、右上角完成；控件位置固定。'}
+};
+const toolNames={select:'选择',rect:'矩形',line:'Line',arrow:'Arrow',mosaic:'马赛克',text:'文本'};
+const icons={
+ select:'<path d="M5 3v16l4-5 5 5 3-3-5-5 6-2z"/>',
+ rect:'<rect x="4" y="5" width="16" height="14" rx="1"/>',
+ line:'<path d="M4 19 20 5"/><circle cx="4" cy="19" r="1"/><circle cx="20" cy="5" r="1"/>',
+ arrow:'<path d="m4 19 15-14M10 5h9v9"/>',
+ mosaic:'<path d="M4 4h16v16H4zM4 10h16M4 15h16M10 4v16M15 4v16"/>',
+ text:'<path d="M4 5h16M12 5v15M8 20h8M4 5v3M20 5v3"/>',
+ scroll:'<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 7v10m-3-3 3 3 3-3"/>'
+};
+const clamp=(v,a,b)=>Math.max(a,Math.min(v,b)),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let variant=new URLSearchParams(location.search).get('variant')||'A';
+if(!variants[variant])variant='A';
+let region=null,objects=[],selected=null,editing=null,tool='select',drag=null,scale=1,serial=0,placement='',notice='',lineStyle='solid',arrowStyle='flat',fontSize=22;
+const points=r=>[[r.x,r.y],[r.x+r.w/2,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h/2],[r.x+r.w,r.y+r.h/2],[r.x,r.y+r.h],[r.x+r.w/2,r.y+r.h],[r.x+r.w,r.y+r.h]];
+const corners=r=>[[r.x,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h],[r.x+r.w,r.y+r.h]];
+function fit(){
+ scale=Math.max(.25,Math.min((innerWidth-48)/W,(innerHeight-(innerWidth<800?270:225))/H,1.25));
+ $('#viewport').style.width=W*scale+'px';$('#viewport').style.height=H*scale+'px';screen.style.transform='scale('+scale+')';
+}
+function pos(e){const r=screen.getBoundingClientRect();return {x:clamp((e.clientX-r.left)/scale,0,W),y:clamp((e.clientY-r.top)/scale,0,H)}}
+function inside(p,r){return r&&p.x>=r.x&&p.y>=r.y&&p.x<=r.x+r.w&&p.y<=r.y+r.h}
+function inRegion(p){return {x:clamp(p.x,region.x,region.x+region.w),y:clamp(p.y,region.y,region.y+region.h)}}
+function box(a,b){return {x:Math.min(a.x,b.x),y:Math.min(a.y,b.y),w:Math.max(1,Math.abs(b.x-a.x)),h:Math.max(1,Math.abs(b.y-a.y))}}
+function bounds(o){return o.kind==='line'||o.kind==='arrow'?box({x:o.x,y:o.y},{x:o.x2,y:o.y2}):o}
+function newObject(kind,p){return {id:++serial,kind,x:p.x,y:p.y,w:1,h:1,x2:p.x,y2:p.y,text:'',lineStyle,arrowStyle,fontSize}}
+function scenario(){
+ editing=null;selected=null;objects=[];tool='select';notice='';
+ const name=$('#scenario').value;
+ region=({center:{x:300,y:177,w:590,h:348},bottom:{x:645,y:397,w:550,h:318},top:{x:5,y:5,w:550,h:320},tiny:{x:575,y:338,w:92,h:62},full:{x:5,y:5,w:1190,h:710},objects:{x:290,y:160,w:660,h:430},text:{x:290,y:160,w:660,h:430}})[name]||null;
+ if(name==='objects'||name==='text'){
+  const r={...newObject('rect',{x:348,y:318}),w:244,h:112};
+  const a={...newObject('arrow',{x:725,y:473}),x2:636,y2:387};
+  const t={...newObject('text',{x:374,y:232}),w:290,h:70,text:'把重点留在这里',fontSize:22};
+  objects=[r,a,t];selected=name==='text'?t.id:r.id;
+  if(name==='text'){tool='text';editing=t.id}
+ }
+ render();if(editing)$('#editor textarea').focus();
+}
+function renderRegion(){
+ const el=$('#selection');
+ if(!region){el.className='empty';el.style.cssText='';el.innerHTML='';return}
+ el.className='';el.style.cssText='left:'+region.x+'px;top:'+region.y+'px;width:'+region.w+'px;height:'+region.h+'px';
+ el.innerHTML='<span class="region-label" style="top:'+(region.y<28?6:-26)+'px">'+Math.round(region.w)+' × '+Math.round(region.h)+'</span>'+
+ '<button class="move-region" data-region-move style="'+(region.y<25?'transform:translateX(-50%);top:0;border-radius:0 0 5px 5px':'')+'" title="拖动以移动整个选区">⋮⋮ 移动选区</button>'+
+ points({x:0,y:0,w:region.w,h:region.h}).map(([x,y],i)=>'<i class="region-handle" data-region-point="'+i+'" style="left:'+x+'px;top:'+y+'px;cursor:'+(['nwse','ns','nesw','ew','ew','nesw','ns','nwse'][i])+'-resize"></i>').join('');
+}
+function objectMarkup(o){
+ const attrs='data-id="'+o.id+'"',color='#ff6069';
+ if(o.kind==='rect')return '<rect '+attrs+' x="'+o.x+'" y="'+o.y+'" width="'+o.w+'" height="'+o.h+'" fill="#ff606922" stroke="'+color+'" stroke-width="3"/>';
+ if(o.kind==='mosaic')return '<rect '+attrs+' x="'+o.x+'" y="'+o.y+'" width="'+o.w+'" height="'+o.h+'" fill="url(#mosaic)" stroke="#c7d2e7"/>';
+ if(o.kind==='text')return '<g '+attrs+'><rect x="'+o.x+'" y="'+o.y+'" width="'+o.w+'" height="'+o.h+'" fill="transparent"/><text x="'+o.x+'" y="'+(o.y+o.fontSize)+'" fill="'+color+'" font-size="'+o.fontSize+'">'+o.text.split('\n').map((t,i)=>'<tspan x="'+o.x+'" dy="'+(i?o.fontSize*1.4:0)+'">'+esc(t)+'</tspan>').join('')+'</text></g>';
+ if(o.kind==='arrow'){
+  const dx=o.x2-o.x,dy=o.y2-o.y,len=Math.hypot(dx,dy)||1,ux=dx/len,uy=dy/len,head=Math.min(19,len*.42),shaft=o.arrowStyle==='inward'?5:2;
+  const bx=o.x2-ux*head,by=o.y2-uy*head,tail=o.arrowStyle==='inward'?0:2;
+  const notch=o.arrowStyle==='inward'?head*.35:0,nx=bx+ux*notch,ny=by+uy*notch;
+  return '<path '+attrs+' fill="'+color+'" d="M '+(o.x-uy*tail)+' '+(o.y+ux*tail)+' L '+(nx-uy*shaft)+' '+(ny+ux*shaft)+' L '+(bx-uy*10)+' '+(by+ux*10)+' L '+o.x2+' '+o.y2+' L '+(bx+uy*10)+' '+(by-ux*10)+' L '+(nx+uy*shaft)+' '+(ny-ux*shaft)+' L '+(o.x+uy*tail)+' '+(o.y-ux*tail)+' Z"/>';
+ }
+ return '<g '+attrs+'><path d="M '+o.x+' '+o.y+' L '+o.x2+' '+o.y2+'" stroke="transparent" stroke-width="16"/><path d="M '+o.x+' '+o.y+' L '+o.x2+' '+o.y2+'" fill="none" stroke="'+color+'" stroke-width="3" '+(o.lineStyle==='dash'?'stroke-dasharray="10 7"':'')+'/></g>';
+}
+function renderArt(){
+ // Preserve unchanged object nodes so pointer selection does not break double-click.
+ if(!$('#art-objects'))art.innerHTML='<defs id="art-defs"></defs><g id="art-objects" clip-path="url(#crop)"></g><g id="art-handles"></g>';
+ $('#art-defs').innerHTML='<pattern id="mosaic" width="18" height="18" patternUnits="userSpaceOnUse"><rect width="18" height="18" fill="#71859b"/><rect width="9" height="9" fill="#b5bfcc"/><rect x="9" y="9" width="9" height="9" fill="#8d9aab"/></pattern>'+
+ (region?'<clipPath id="crop"><rect x="'+region.x+'" y="'+region.y+'" width="'+region.w+'" height="'+region.h+'"/></clipPath>':'');
+ const layer=$('#art-objects'),markup=region?objects.filter(o=>o.id!==editing).map(objectMarkup).join(''):'';
+ if(layer._markup!==markup){layer.innerHTML=markup;layer._markup=markup}
+ const handles=$('#art-handles');handles.innerHTML='';
+ if(!region)return;
+ const o=objects.find(o=>o.id===selected);
+ if(o&&o.id!==editing){
+  const b=bounds(o),ends=o.kind==='line'||o.kind==='arrow';
+  const p=ends?[[o.x,o.y],[o.x2,o.y2]]:corners(b);
+  handles.innerHTML='<rect x="'+(b.x-5)+'" y="'+(b.y-5)+'" width="'+(b.w+10)+'" height="'+(b.h+10)+'" fill="none" stroke="#91b9ff" stroke-dasharray="3 3"/>'+p.map(([x,y],i)=>'<circle data-point="'+i+'" data-object="'+o.id+'" cx="'+x+'" cy="'+y+'" r="5" fill="white" stroke="#4385f5" stroke-width="2"/>').join('');
+ }
+}
+function toolButtons(){
+ return Object.entries(toolNames).map(([key,name])=>'<button class="tool '+(tool===key?'active':'')+'" data-tool="'+key+'" title="'+name+'" aria-label="'+name+'" aria-pressed="'+(tool===key)+'"><svg viewBox="0 0 24 24">'+icons[key]+'</svg></button>').join('')+
+ '<span class="separator"></span><button class="tool" data-scroll title="Scroll Capture（仅入口）" aria-label="滚动截图入口"><svg viewBox="0 0 24 24">'+icons.scroll+'</svg></button>';
+}
+function actions(){return '<button class="action" data-reselect>重选</button><button class="action" data-save title="另存为 PNG（模拟）">↓ 保存</button><button class="action primary" data-finish>✓ 完成</button><button class="action danger" data-cancel title="取消（模拟）">×</button>'}
+function properties(){
+ const o=objects.find(o=>o.id===selected),kind=o?.kind||tool;
+ let config='<span>拖动框选 / 选择对象</span>';
+ if(kind!=='select'){
+  config='<i class="swatch" title="演示色；颜色选择不在本次原型范围"></i>';
+  if(kind==='line')config+='<select aria-label="线条样式" data-property="lineStyle"><option value="solid" '+((o?.lineStyle||lineStyle)==='solid'?'selected':'')+'>实线</option><option value="dash" '+((o?.lineStyle||lineStyle)==='dash'?'selected':'')+'>虚线</option></select>';
+  else if(kind==='arrow')config+='<select aria-label="箭头样式" data-property="arrowStyle"><option value="flat" '+((o?.arrowStyle||arrowStyle)==='flat'?'selected':'')+'>Flat Arrow</option><option value="inward" '+((o?.arrowStyle||arrowStyle)==='inward'?'selected':'')+'>Inward Arrow</option></select>';
+  else if(kind==='text')config+='<select aria-label="字号" data-property="fontSize">'+[18,22,28].map(n=>'<option '+((o?.fontSize||fontSize)===n?'selected':'')+'>'+n+'</option>').join('')+'</select><span>点击输入 · 双击编辑</span>';
+  else config+='<span>'+(kind==='mosaic'?'方格占位 · 不执行脱敏':'高亮样式示意')+'</span>';
+ }
+ return '<div class="properties"><span class="property-title">'+(toolNames[kind]||'选择')+'</span>'+config+(o?'<button class="action" data-delete title="删除所选对象">删除</button>':'')+'</div>';
+}
+function syncState(){
+ const o=objects.find(o=>o.id===selected);
+ $('#status').textContent=editing?'文本输入中 · Enter 换行；点「收起编辑」看控件变化':o?'已选 '+toolNames[o.kind]+' · 拖动对象或蓝色控制点':region?'选工具后在选区内拖动；拖「移动选区」与边框控制点':'在模拟屏幕拖动，创建一个选区';
+ $('#placement').textContent=placement;
+ $('#state').textContent=JSON.stringify({prototype:true,variant,placement,region,tool,selected,editing,objects},null,2);
+}
+function renderChrome(){
+ chrome.innerHTML='';
+ const hint=document.createElement('div');hint.className='hint';
+ hint.textContent=region?(tool==='select'?'选择对象或拖动控制点 · 白色控制点调整选区':'当前工具：'+toolNames[tool]+' · '+(tool==='text'?'在选区内点击输入文字':'在选区内拖动创建')):'拖动以框选区域 · 工具在选区建立后出现';
+ chrome.append(hint);
+ if(!region){placement='尚未框选 · 隐藏工具栏';syncState();return}
+ if(variant==='A'){
+  const panel=document.createElement('div');panel.className='panel';panel.id='toolbar';
+  panel.innerHTML='<div class="toolrow">'+toolButtons()+'<span class="separator"></span>'+actions()+'</div>'+properties();chrome.append(panel);
+  const w=panel.offsetWidth,h=panel.offsetHeight;
+  let y=region.y+region.h+12;
+  placement='选区外 · 下方';
+  if(y+h>H-10){y=region.y-h-12;placement='选区外 · 上方'}
+  if(y<10){y=clamp(region.y+region.h-h-12,10,H-h-10);placement='选区内 · 底部（空间不足）'}
+  panel.style.left=clamp(region.x+region.w-w,10,W-w-10)+'px';panel.style.top=y+'px';
+ }else if(variant==='B'){
+  chrome.innerHTML+='<div class="panel ribbon" id="toolbar" style="left:50%;bottom:14px;transform:translateX(-50%)"><div class="ribbon-head">CAPTURE SESSION <span style="float:right">固定在屏幕底部</span></div><div class="toolrow">'+toolButtons()+'<span class="separator"></span>'+actions()+'</div>'+properties()+'</div>';
+  placement='屏幕底部固定 · 可能覆盖选区';
+ }else{
+  chrome.innerHTML+='<div class="panel vertical" id="toolbar" style="left:18px;top:50%;transform:translateY(-50%)"><div class="toolrow">'+toolButtons()+'</div></div><div class="panel" id="actions" style="right:18px;top:45px"><div class="toolrow">'+actions()+'</div></div><div class="panel inspector" id="inspector" style="right:18px;top:112px"><h3>对象与工具属性</h3>'+properties()+'<p>固定面板，避免追着选区找工具。小选区也有完整编辑空间；代价是遮挡右侧画面。</p></div>';
+  placement='左侧工具坞 + 右侧属性 + 右上操作';
+ }
+ if(editing){
+  const o=objects.find(o=>o.id===editing);
+  const editor=document.createElement('div');editor.id='editor';
+  const width=Math.max(180,Math.min(o.w,360));
+  editor.style.cssText='left:'+clamp(o.x,8,W-width-8)+'px;top:'+clamp(o.y,32,H-150)+'px;width:'+width+'px';
+  editor.innerHTML='<textarea aria-label="标注文本" rows="3" spellcheck="false" style="font-size:'+o.fontSize+'px">'+esc(o.text)+'</textarea><div class="edit-footer"><span>编辑框 / IME 候选窗位置仅示意</span><button data-commit>收起编辑</button></div>';
+  chrome.append(editor);
+  editor.querySelector('textarea').addEventListener('input',e=>{o.text=e.target.value;syncState()});
+ }
+ if(notice){const n=document.createElement('div');n.className='toast';n.textContent=notice;chrome.append(n)}
+ syncState();
+}
+function render(){renderRegion();renderArt();renderChrome()}
+function commitText(){editing=null;renderArt()}
+function switchVariant(delta,key){
+ variant=key||['A','B','C'][(['A','B','C'].indexOf(variant)+delta+3)%3];
+ const url=new URL(location.href);url.searchParams.set('variant',variant);history.replaceState({},'',url);
+ $('#variant-name').textContent=variants[variant].name;$('#variant-description').innerHTML='<strong>'+variants[variant].name+'</strong> &nbsp; '+variants[variant].description;
+ renderChrome();
+}
+function startText(p,id){
+ let o=objects.find(o=>o.id===id);
+ if(!o){o={...newObject('text',p),w:Math.min(300,region.x+region.w-p.x),h:90};objects.push(o)}
+ selected=o.id;editing=o.id;renderArt();renderChrome();$('#editor textarea').focus();
+}
+screen.addEventListener('pointerdown',e=>{
+ if(e.button!==0||e.target.closest('.panel,#editor,.output'))return;
+ const p=pos(e),h=e.target.closest('[data-region-point]'),move=e.target.closest('[data-region-move]'),point=e.target.closest('[data-point]'),hit=e.target.closest('[data-id]');
+ commitText();notice='';
+ if(h&&region){drag={type:'region-resize',index:+h.dataset.regionPoint,original:{...region}}}
+ else if(move&&region){drag={type:'region-move',start:p,original:{...region}}}
+ else if(point){selected=+point.dataset.object;drag={type:'object-resize',index:+point.dataset.point,original:{...objects.find(o=>o.id===selected)}}}
+ else if(hit&&tool==='select'){selected=+hit.dataset.id;drag={type:'object-move',start:p,original:{...objects.find(o=>o.id===selected)}}}
+ else if(region&&inside(p,region)&&tool!=='select'){
+  if(tool==='text'){startText(p);return}
+  const o=newObject(tool,p);objects.push(o);selected=o.id;drag={type:'draw',start:p};
+ }else if(region&&inside(p,region)){selected=null;render();return}
+ else {objects=[];selected=null;tool='select';region={x:p.x,y:p.y,w:1,h:1};drag={type:'region-draw',start:p}}
+ screen.setPointerCapture(e.pointerId);render();
+});
+function resizeBox(r,index,p,eight){
+ const old={...r},map=eight?[[0,0],[.5,0],[1,0],[0,.5],[1,.5],[0,1],[.5,1],[1,1]][index]:[[0,0],[1,0],[0,1],[1,1]][index];
+ let l=old.x,t=old.y,right=l+old.w,b=t+old.h;
+ if(map[0]===0)l=Math.min(p.x,right-12);if(map[0]===1)right=Math.max(p.x,l+12);
+ if(map[1]===0)t=Math.min(p.y,b-12);if(map[1]===1)b=Math.max(p.y,t+12);
+ return {x:l,y:t,w:right-l,h:b-t};
+}
+screen.addEventListener('pointermove',e=>{
+ if(!drag)return;
+ const p=pos(e),d=drag,o=objects.find(o=>o.id===selected);
+ if(d.type==='region-draw')region=box(d.start,p);
+ else if(d.type==='region-move'){region={...d.original,x:clamp(d.original.x+p.x-d.start.x,0,W-d.original.w),y:clamp(d.original.y+p.y-d.start.y,0,H-d.original.h)}}
+ else if(d.type==='region-resize')region=resizeBox(d.original,d.index,p,true);
+ else if(d.type==='draw'){
+  const q=inRegion(p);
+  if(o.kind==='line'||o.kind==='arrow'){o.x2=q.x;o.y2=q.y}else Object.assign(o,box(d.start,q));
+ }else if(d.type==='object-move'){
+  const r=d.original,dx=p.x-d.start.x,dy=p.y-d.start.y;Object.assign(o,{x:r.x+dx,y:r.y+dy,x2:r.x2+dx,y2:r.y2+dy});
+ }else if(d.type==='object-resize'){
+  if(o.kind==='line'||o.kind==='arrow'){if(d.index===0){o.x=p.x;o.y=p.y}else{o.x2=p.x;o.y2=p.y}}
+  else Object.assign(o,resizeBox(d.original,d.index,p,false));
+ }
+ renderRegion();renderArt();renderChrome();
+});
+function endDrag(){
+ if(!drag)return;
+ if(drag.type==='region-draw'&&(region.w<8||region.h<8))region=null;
+ if(drag.type==='draw'){
+  const o=objects.find(o=>o.id===selected),b=bounds(o);
+  if(b.w<3&&b.h<3){objects=objects.filter(x=>x!==o);selected=null}
+ }
+ drag=null;render();
+}
+screen.addEventListener('pointerup',endDrag);screen.addEventListener('pointercancel',endDrag);
+screen.addEventListener('dblclick',e=>{
+ if(e.target.closest('.panel,#editor,.output'))return;
+ // Pointer capture may retarget the double-click to the screen.
+ const hit=e.target.closest('[data-id]'),o=objects.find(o=>o.id===+(hit?.dataset.id||selected||0));
+ if(o?.kind==='text'&&inside(pos(e),o))startText({x:o.x,y:o.y},o.id);
+});
+function output(save){
+ commitText();render();
+ const modal=document.createElement('div');modal.className='output';
+ modal.innerHTML='<div><span class="badge">仅演示出口位置</span><h2>'+(save?'另存为 PNG':'Finish · 完成')+'</h2><div class="stamp">'+Math.round(region.w)+' × '+Math.round(region.h)+' · '+objects.length+' 个标注</div><p>这是布局原型，没有生成 PNG、写入剪贴板或打开保存对话框。完成 / 保存后的会话状态与反馈方式仍待单独决策。</p><button data-return>返回原型</button></div>';
+ chrome.append(modal);modal.querySelector('button').focus();
+}
+chrome.addEventListener('click',e=>{
+ const b=e.target.closest('button');if(!b)return;
+ if(b.hasAttribute('data-return')){b.closest('.output').remove();return}
+ if(b.dataset.tool){commitText();tool=b.dataset.tool;selected=null;notice='';render();return}
+ if(b.hasAttribute('data-commit')){commitText();render();return}
+ if(b.hasAttribute('data-finish')||b.hasAttribute('data-save')){output(b.hasAttribute('data-save'));return}
+ if(b.hasAttribute('data-reselect')||b.hasAttribute('data-cancel')){region=null;objects=[];selected=null;editing=null;tool='select';render();return}
+ if(b.hasAttribute('data-delete')){objects=objects.filter(o=>o.id!==selected);selected=null;editing=null;render();return}
+ if(b.hasAttribute('data-scroll')){notice='仅展示 Scroll Capture 的入口；自动滚动、进度与失败恢复不在本次原型范围。';renderChrome()}
+});
+chrome.addEventListener('change',e=>{
+ const prop=e.target.dataset.property;if(!prop)return;
+ const value=prop==='fontSize'?+e.target.value:e.target.value,o=objects.find(o=>o.id===selected);
+ if(prop==='lineStyle')lineStyle=value;if(prop==='arrowStyle')arrowStyle=value;if(prop==='fontSize')fontSize=value;
+ if(o)o[prop]=value;renderArt();renderChrome();
+});
+$('#scenario').addEventListener('change',scenario);$('#reset').addEventListener('click',scenario);
+$('#prev').addEventListener('click',()=>switchVariant(-1));$('#next').addEventListener('click',()=>switchVariant(1));
+document.addEventListener('keydown',e=>{
+ if(e.isComposing||e.target.closest('input,textarea,select,[contenteditable]'))return;
+ if($('#chrome .output'))return;
+ if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();switchVariant(e.key==='ArrowLeft'?-1:1)}
+ if((e.key==='Delete'||e.key==='Backspace')&&selected){e.preventDefault();objects=objects.filter(o=>o.id!==selected);selected=null;render()}
+});
+window.addEventListener('resize',fit);
+window.addEventListener('popstate',()=>switchVariant(0,variants[new URLSearchParams(location.search).get('variant')]?new URLSearchParams(location.search).get('variant'):'A'));
+fit();scenario();switchVariant(0);
+// This file is never bundled into the product. The switcher is prototype-only;
+// no production route or application build exists in this repository yet.
+</script>
+</body>
+</html>
