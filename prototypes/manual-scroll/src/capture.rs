@@ -1,5 +1,6 @@
 //! One outstanding SCK screenshot request at a time; no persistent SCStream.
 use crate::{
+    geometry,
     native::{self, Input, Rect},
     stitch::{Frame, MAX_IMAGE_BYTES, Stitch},
 };
@@ -20,6 +21,7 @@ use std::{
 pub struct Shared {
     pub status: String,
     pub preview: Option<Frame>,
+    pub selection: Option<Rect>,
     pub result: Option<Frame>,
     pub png: Option<Vec<u8>>,
     pub restart: bool,
@@ -27,10 +29,10 @@ pub struct Shared {
 }
 pub type State = Arc<Mutex<Shared>>;
 
-pub fn run(shared: State, input: Arc<Input>, rect: Rect, target_pid: u32) {
+pub fn run(shared: State, input: Arc<Input>, target_pid: u32) {
     let started = Instant::now();
     let mut stitched = None;
-    let result = collect(&shared, &input, rect, target_pid, &mut stitched);
+    let result = collect(&shared, &input, target_pid, &mut stitched);
     let command = input.command.load(Ordering::SeqCst);
     let completed = result.is_ok() && command == 1 && !input.protection_lost.load(Ordering::SeqCst);
     println!("process_peak_rss_bytes={}", native::peak_rss_bytes());
@@ -62,9 +64,12 @@ pub fn run(shared: State, input: Arc<Input>, rect: Rect, target_pid: u32) {
                 state.result = stitched.map(|s: Stitch| s.image);
             }
             Err(error) => {
-                state.status =
-                    format!("STOPPED: {error:#}. Use verified partial explicitly, or discard.");
                 state.result = stitched.map(|s: Stitch| s.image);
+                state.status = if state.result.is_some() {
+                    format!("STOPPED: {error:#}. Use verified partial explicitly, or discard.")
+                } else {
+                    format!("STOPPED: {error:#}. No verified image; nothing copied.")
+                };
             }
         }
     }
@@ -109,16 +114,10 @@ pub fn encode(shared: &State) {
         state.result = Some(image);
     }
 }
-fn collect(
-    shared: &State,
-    input: &Input,
-    rect: Rect,
-    pid: u32,
-    stitched: &mut Option<Stitch>,
-) -> Result<()> {
+fn collect(shared: &State, input: &Input, pid: u32, stitched: &mut Option<Stitch>) -> Result<()> {
     // Terminal results are fenced outside request/processing scopes. A request racing
     // cancellation cannot publish a late image into a new generation.
-    let outcome = collect_inner(shared, input, rect, pid, stitched);
+    let outcome = collect_inner(shared, input, pid, stitched);
     let _ = input
         .command
         .compare_exchange(0, 4, Ordering::SeqCst, Ordering::SeqCst);
@@ -127,11 +126,11 @@ fn collect(
 fn collect_inner(
     shared: &State,
     input: &Input,
-    rect: Rect,
     pid: u32,
     stitched: &mut Option<Stitch>,
 ) -> Result<()> {
     let (display_id, bounds) = native::display()?;
+    let (content, target, rect) = wait_for_target(shared, input, pid)?;
     ensure!(
         bounds.contains(rect.origin)
             && bounds.contains(native::Point {
@@ -140,7 +139,6 @@ fn collect_inner(
             }),
         "selection outside built-in display"
     );
-    let (content, target) = wait_for_target(shared, input, pid, rect)?;
     let displays = content.displays();
     let display = displays
         .iter()
@@ -180,10 +178,31 @@ fn collect_inner(
         .with_pixel_format(PixelFormat::BGRA)
         .with_shows_cursor(false)
         .with_color_space_name(color_space::SRGB)?;
+    {
+        let mut state = shared.lock().expect("prototype state poisoned");
+        state.selection = Some(rect);
+        state.status = "PREPARING — synchronizing measured selection with input and preview".into();
+    }
+    let handshake = Instant::now();
+    while !input.selection_ready.load(Ordering::SeqCst) {
+        ensure!(
+            input.command.load(Ordering::SeqCst) == 0,
+            "selection preparation interrupted"
+        );
+        ensure!(
+            handshake.elapsed() < Duration::from_secs(3),
+            "selection/input handoff timed out"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    ensure!(
+        input.command.load(Ordering::SeqCst) == 0,
+        "selection preparation interrupted"
+    );
     println!(
         "candidate=SCScreenshotManager.capture_image rect={rect:?} pixels={width}x{height} scale={scale} display={display_id} target={target_id}"
     );
-    let mut last_source_check = Instant::now();
+    let mut last_source_check = Instant::now() - Duration::from_secs(1);
     let mut last_preview = Instant::now() - Duration::from_secs(1);
     let mut sequence = 0u64;
     loop {
@@ -293,9 +312,11 @@ fn collect_inner(
         thread::sleep(Duration::from_millis(50));
     }
 }
-pub fn probe_target(pid: u32, rect: Rect) -> Result<()> {
+pub fn probe_target(pid: u32) -> Result<()> {
     let content = SCShareableContent::get()?;
-    let target = find_target(&content, pid, rect)?;
+    let target = find_target(&content, pid)?;
+    let rect = fixture_rect(target.frame())?;
+    println!("measured_fixture_selection={rect:?}");
     println!(
         "target_check=pass window={} rect={:?}",
         target.window_id(),
@@ -307,8 +328,7 @@ fn wait_for_target(
     shared: &State,
     input: &Input,
     pid: u32,
-    rect: Rect,
-) -> Result<(SCShareableContent, SCWindow)> {
+) -> Result<(SCShareableContent, SCWindow, Rect)> {
     let started = Instant::now();
     let mut previous = None;
     let mut pinned_id = None;
@@ -326,9 +346,9 @@ fn wait_for_target(
         );
         ensure!(
             started.elapsed() < Duration::from_secs(3),
-            "target did not become ready within preparation budget; selection unchanged"
+            "target did not become ready within preparation budget; no selection accepted"
         );
-        match find_target(&content, pid, rect) {
+        match find_target(&content, pid) {
             Ok(target) => {
                 let current = (target.window_id(), target.frame());
                 if let Some(id) = pinned_id {
@@ -346,7 +366,8 @@ fn wait_for_target(
                         current.1,
                         started.elapsed().as_millis()
                     );
-                    return Ok((content, target));
+                    let rect = fixture_rect(target.frame())?;
+                    return Ok((content, target, rect));
                 }
                 previous = Some(current);
             }
@@ -355,7 +376,7 @@ fn wait_for_target(
         thread::sleep(Duration::from_millis(80));
     }
 }
-fn find_target(content: &SCShareableContent, pid: u32, rect: Rect) -> Result<SCWindow> {
+fn find_target(content: &SCShareableContent, pid: u32) -> Result<SCWindow> {
     let candidates: Vec<_> = content
         .windows()
         .into_iter()
@@ -364,10 +385,7 @@ fn find_target(content: &SCShareableContent, pid: u32, rect: Rect) -> Result<SCW
                 .is_some_and(|a| a.process_id() == pid as i32)
         })
         .collect();
-    println!(
-        "target_probe pid={pid} selection={rect:?} candidates={}",
-        candidates.len()
-    );
+    println!("target_probe pid={pid} candidates={}", candidates.len());
     for w in &candidates {
         println!(
             "target_probe window={} on_screen={} frame={:?}",
@@ -378,12 +396,18 @@ fn find_target(content: &SCShareableContent, pid: u32, rect: Rect) -> Result<SCW
     }
     candidates
         .into_iter()
-        .find(|w| w.window_layer() == 0 && w.is_on_screen() && contains(w.frame(), rect))
-        .context("test target not visible / selection not inside target window")
+        .find(|w| w.window_layer() == 0 && w.is_on_screen() && fixture_rect(w.frame()).is_ok())
+        .context("full-sized fixture window not visible")
 }
-fn contains(frame: CGRect, rect: Rect) -> bool {
-    rect.origin.x >= frame.origin.x
-        && rect.origin.y >= frame.origin.y
-        && rect.origin.x + rect.size.width <= frame.origin.x + frame.size.width
-        && rect.origin.y + rect.size.height <= frame.origin.y + frame.size.height
+fn fixture_rect(frame: CGRect) -> Result<Rect> {
+    geometry::fixture_selection(Rect {
+        origin: native::Point {
+            x: frame.origin.x,
+            y: frame.origin.y,
+        },
+        size: native::Size {
+            width: frame.size.width,
+            height: frame.size.height,
+        },
+    })
 }

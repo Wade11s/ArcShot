@@ -11,6 +11,7 @@ gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 image = { version = "0.25", default-features = false }
 screencapturekit = { version = "11.1", features = ["macos_14_0"] }
 objc = "0.2"
+cocoa = "0.26"
 raw-window-handle = "0.6"
 png = "0.18"
 libc = "0.2"

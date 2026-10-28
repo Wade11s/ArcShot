@@ -86,6 +86,7 @@ pub struct Input {
     /// 0 running, 1 Finish, 2 cancel, 3 restart, 4 processing failure, 5 lost tap, 6 focus lost.
     pub command: AtomicU8,
     pub protection_lost: AtomicBool,
+    pub selection_ready: AtomicBool,
     pub scrolls: AtomicU64,
     pub clicks: AtomicU64,
 }
@@ -139,7 +140,7 @@ pub fn display() -> Result<(u32, Rect)> {
 
 struct TapState {
     input: Arc<Input>,
-    rect: Rect,
+    rect: Option<Rect>,
     held_mouse: u64,
     held_keys: u128,
 }
@@ -150,7 +151,7 @@ pub struct Tap {
 }
 
 impl Tap {
-    pub fn new(input: Arc<Input>, rect: Rect) -> Result<Self> {
+    pub fn new(input: Arc<Input>) -> Result<Self> {
         let (screen, listen, ax) = permissions();
         ensure!(
             screen && listen && ax,
@@ -169,7 +170,7 @@ impl Tap {
         }
         let mut state = Box::new(TapState {
             input,
-            rect,
+            rect: None,
             held_mouse: 0,
             held_keys: 0,
         });
@@ -210,6 +211,13 @@ impl Tap {
         }
         Ok(tap)
     }
+    pub fn prepare_selection(&mut self, rect: Rect) {
+        self.state.rect = Some(rect);
+        self.state
+            .input
+            .selection_ready
+            .store(true, Ordering::SeqCst);
+    }
     pub fn drained(&mut self) -> bool {
         let command = self.state.input.command.load(Ordering::SeqCst);
         // A disabled tap cannot receive releases: explicitly lost protection, not a
@@ -249,7 +257,7 @@ unsafe extern "C" fn callback(_proxy: Ref, ty: u32, event: Ref, info: Ref) -> Re
             } // release-only draining does not seize new input
             // SAFETY: Quartz borrows a live scroll event for this callback.
             let point = unsafe { CGEventGetLocation(event) };
-            if state.rect.contains(point) {
+            if state.rect.is_some_and(|rect| rect.contains(point)) {
                 state.input.scrolls.fetch_add(1, Ordering::Relaxed);
                 event // preserve original phase/momentum, never repost
             } else {
@@ -356,6 +364,32 @@ pub fn preview_window(window: &Window, passthrough: bool) -> Result<()> {
         ensure!(!ns_window.is_null(), "preview has no NSWindow");
         let _: () = msg_send![ns_window, setIgnoresMouseEvents: if passthrough { objc::runtime::YES } else { objc::runtime::NO }];
         let _: () = msg_send![ns_window, setLevel: 3isize];
+    }
+    Ok(())
+}
+pub fn move_preview(window: &mut Window, frame: Rect) -> Result<()> {
+    let (_, screen) = display()?;
+    window.resize(gpui::size(
+        gpui::px(frame.size.width as f32),
+        gpui::px(frame.size.height as f32),
+    ));
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|e| anyhow::anyhow!("native handle unavailable: {e}"))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        bail!("not an AppKit window");
+    };
+    // SAFETY: Borrowed live GPUI NSView and NSWindow, on main thread. NSPoint is the
+    // AppKit binding's correctly encoded argument; the single active built-in screen
+    // has Quartz top-left vs AppKit bottom-left origins. This does not activate a window.
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<objc::runtime::Object>();
+        let ns_window: *mut objc::runtime::Object = msg_send![view, window];
+        ensure!(!ns_window.is_null(), "preview has no NSWindow");
+        let top_left = cocoa::foundation::NSPoint::new(
+            frame.origin.x,
+            screen.origin.y + screen.size.height - frame.origin.y,
+        );
+        let _: () = msg_send![ns_window, setFrameTopLeftPoint:top_left];
     }
     Ok(())
 }

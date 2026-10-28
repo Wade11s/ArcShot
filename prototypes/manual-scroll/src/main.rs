@@ -1,12 +1,14 @@
 //! THROWAWAY native feasibility probe. No production modules, no screenshot files.
 mod capture;
 mod fixture;
+mod geometry;
 mod native;
 mod stitch;
 
 use anyhow::{Result, ensure};
+use geometry::PreviewPlacement;
 use gpui::{prelude::*, *};
-use native::{Input, Point, Rect, Size as NativeSize, Tap};
+use native::{Input, Tap};
 use std::{
     sync::{Arc, Mutex, atomic::Ordering},
     thread,
@@ -16,7 +18,7 @@ actions!(scroll_probe, [Quit]);
 
 struct Controller {
     pid: u32,
-    rect: Rect,
+    placement: PreviewPlacement,
     shared: capture::State,
     input: Arc<Input>,
     tap: Option<Tap>,
@@ -27,7 +29,12 @@ struct Controller {
     since: Option<Instant>,
 }
 impl Controller {
-    fn new(pid: u32, rect: Rect, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        pid: u32,
+        placement: PreviewPlacement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         println!(
             "controller_window={:?} bounds={:?}",
             native::window_number(window),
@@ -46,7 +53,7 @@ impl Controller {
         })
         .detach();
         Self {
-            pid, rect, shared: Arc::new(Mutex::new(capture::Shared::default())),
+            pid, placement, shared: Arc::new(Mutex::new(capture::Shared::default())),
             input: Arc::new(Input::default()), tap: None, worker: None, image: None,
             message: "PREPARED — no capture yet.\n1. Grant permissions in Settings.\n2. Start; pointer over target.\n3. Scroll down/up, then Enter.\nM/B/R/J in target inject failures.".into(),
             encoding: false, since: None,
@@ -70,17 +77,14 @@ impl Controller {
         }
         self.shared = Arc::new(Mutex::new(capture::Shared::default()));
         self.input = Arc::new(Input::default());
-        let tap = Tap::new(self.input.clone(), self.rect)?;
+        let tap = Tap::new(self.input.clone())?;
         native::activate_target(self.pid)?;
         native::preview_window(window, true)?;
         self.tap = Some(tap);
         let shared = self.shared.clone();
         let input = self.input.clone();
-        let rect = self.rect;
         let pid = self.pid;
-        self.worker = Some(thread::spawn(move || {
-            capture::run(shared, input, rect, pid)
-        }));
+        self.worker = Some(thread::spawn(move || capture::run(shared, input, pid)));
         self.since = Some(Instant::now());
         self.message = "Starting capture; Esc cancels".into();
         Ok(())
@@ -136,6 +140,37 @@ impl Controller {
             self.tap = None;
             if let Err(e) = native::preview_window(window, false) {
                 self.message = e.to_string();
+            }
+        }
+        let selection = self
+            .shared
+            .lock()
+            .expect("prototype state poisoned")
+            .selection
+            .take();
+        if let Some(rect) = selection
+            && self.input.command.load(Ordering::SeqCst) == 0
+            && let Some(tap) = &mut self.tap
+        {
+            let position = native::display()
+                .and_then(|(_, screen)| geometry::preview_frame(rect, screen, self.placement))
+                .and_then(|frame| native::move_preview(window, frame));
+            match position {
+                Ok(()) => {
+                    if self.input.command.load(Ordering::SeqCst) == 0 {
+                        tap.prepare_selection(rect);
+                        println!("input_and_capture_selection={rect:?}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("selection preparation failed: {error:#}");
+                    let _ = self.input.command.compare_exchange(
+                        0,
+                        4,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                }
             }
         }
         let mut state = self.shared.lock().expect("prototype state poisoned");
@@ -281,22 +316,19 @@ fn main() -> Result<()> {
     let left = args.iter().any(|a| a == "--left");
     let inside = args.iter().any(|a| a == "--inside");
     let fixture_x = if left { 340.0 } else { 60.0 };
-    let rect = Rect {
-        origin: Point {
-            x: fixture_x + 16.0,
-            y: 116.0,
-        },
-        size: NativeSize {
-            width: 680.0,
-            height: 540.0,
-        },
+    let placement = if inside {
+        PreviewPlacement::Inside
+    } else if left {
+        PreviewPlacement::Left
+    } else {
+        PreviewPlacement::Right
     };
     if let Some(index) = args.iter().position(|arg| arg == "--probe-target") {
         let pid: u32 = args
             .get(index + 1)
             .ok_or_else(|| anyhow::anyhow!("missing target pid"))?
             .parse()?;
-        return capture::probe_target(pid, rect);
+        return capture::probe_target(pid);
     }
     let mut child = if is_fixture {
         None
@@ -364,7 +396,7 @@ fn main() -> Result<()> {
                 cx.quit();
             }
         } else if let Err(e) = cx.open_window(options, |window, cx| {
-            cx.new(|cx| Controller::new(pid, rect, window, cx))
+            cx.new(|cx| Controller::new(pid, placement, window, cx))
         }) {
             eprintln!("controller window: {e:#}");
             cx.quit();
