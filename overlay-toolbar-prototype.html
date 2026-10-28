@@ -16,6 +16,7 @@
 #art{position:absolute;inset:0;width:1200px;height:720px;pointer-events:none;overflow:visible}#art [data-id]{pointer-events:all;cursor:move}#art [data-point]{pointer-events:all;cursor:crosshair}#chrome{position:absolute;inset:0;pointer-events:none}.panel{position:absolute;pointer-events:auto;background:#242a35f7;border:1px solid #ffffff29;border-radius:11px;box-shadow:0 8px 24px #07101e50;color:#e5edf9;padding:6px;backdrop-filter:blur(18px)}.toolrow{display:flex;align-items:center;gap:3px}.tool{width:38px;height:36px;border-radius:6px;background:transparent;color:#cdd5e4;display:grid;place-items:center}.tool svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.tool:hover,.action:hover{background:#ffffff1c}.tool.active{background:#4c83ed;color:white}.separator{width:1px;height:22px;background:#ffffff25;margin:0 5px}.action{height:36px;padding:0 12px;border-radius:6px;background:transparent;color:#dce7f7;font-size:12px;white-space:nowrap}.action.primary{background:#4d85f2;color:white}.action.primary:hover{background:#6699ff}.action.danger{color:#f7acb8}.properties{display:flex;gap:9px;align-items:center;padding:5px 9px;min-height:37px;font-size:11px;color:#adbcd0}.properties select{background:#353f50;color:white;border:1px solid #536078;border-radius:4px;padding:3px;font-size:11px;max-width:160px}.swatch{height:16px;width:16px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 2px #567db5;background:#ff6069}.property-title{color:#ebf1fa;margin-right:7px}.ribbon-head{font-size:10px;letter-spacing:1px;padding:5px 8px 8px;color:#8294af}.ribbon{padding:9px 13px}.ribbon .toolrow{justify-content:center}.ribbon .properties{border-top:1px solid #ffffff15;margin-top:7px;justify-content:center}.vertical .toolrow{flex-direction:column}.vertical .separator{width:22px;height:1px;margin:7px}.tool.peek:not(.active){background:#ffffff20;box-shadow:inset 2px 0 #a7c6ff}.flyout{width:250px;padding:14px;z-index:8;border-radius:12px}.flyout::before{content:'';position:absolute;left:-15px;top:0;width:15px;height:100%;pointer-events:auto}.flyout::after{content:'';position:absolute;left:-5px;top:var(--tip-y,18px);width:8px;height:8px;transform:rotate(45deg);background:#2a303a;border-left:1px solid #ffffff29;border-bottom:1px solid #ffffff29;pointer-events:none}.flyout-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;font-size:12px}.flyout-head small{font-size:9px;color:#8f9fb7}.option-group+.option-group{margin-top:12px}.option-label{font-size:10px;color:#92a3be;margin-bottom:7px}.option-row{display:flex;gap:7px}.icon-option{position:relative;display:grid;place-items:center;width:68px;height:48px;border:1px solid #ffffff1a;border-radius:7px;background:#ffffff05;color:#c8d7ef}.icon-option svg{width:54px;height:32px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.icon-option:hover{background:#ffffff16;border-color:#9ab8e3}.icon-option[aria-pressed=true]{background:#477fe92e;color:#aacbff;border-color:#689eff;box-shadow:inset 0 0 0 1px #689eff44}.icon-option[aria-pressed=true]::after{content:'';position:absolute;width:4px;height:4px;border-radius:50%;right:4px;top:4px;background:#9dc3ff}.icon-option:disabled{opacity:.3;cursor:default}.color-option{width:30px;height:30px;border-radius:50%;background:transparent}.color-option span{width:17px;height:17px;border-radius:50%;background:var(--color);box-shadow:inset 0 0 0 1px #fff4}.color-option[aria-pressed=true]{outline:2px solid #9dc3ff;outline-offset:0;border-color:transparent;background:transparent}.color-option[aria-pressed=true]::after{display:none}.option-help{margin-top:12px;padding-top:10px;border-top:1px solid #ffffff13;min-height:25px;font-size:10px;line-height:1.5;color:#9aacc8}.hint{position:absolute;top:45px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:12px;border:1px solid #ffffff38;border-radius:22px;background:#1b2639cf;color:#e4edfc;padding:9px 17px;pointer-events:none}
 #editor{position:absolute;pointer-events:auto;z-index:5;background:#fcfdff;color:#26354c;border:2px solid #4e8df9;box-shadow:0 0 0 4px #5392ff2a;border-radius:5px;padding:0;overflow:hidden}#editor textarea{display:block;border:0;outline:0;background:transparent;width:100%;resize:none;min-height:76px;padding:12px;font-size:20px;color:#df505a;line-height:1.4;user-select:text}#editor .edit-footer{display:flex;align-items:center;justify-content:space-between;background:#edf3ff;color:#5c739c;padding:6px 9px;font-size:10px}#editor button{font-size:11px;color:#3973d7;background:white;border-radius:4px;padding:4px 7px}.toast{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);background:#f6f9ff;color:#344d72;border:1px solid #dae4f2;border-radius:8px;padding:10px 16px;box-shadow:0 6px 20px #101b3940;font-size:12px;max-width:850px;text-align:center;pointer-events:none;z-index:10}
 #description{max-width:1200px;padding:10px 16px;margin:auto;display:flex;justify-content:space-between;font-size:12px;gap:20px;color:#68768a}#description strong{color:#314d76}details{max-width:1200px;margin:0 auto 100px;padding:0 16px;font-size:11px;color:#8792a2}pre{white-space:pre-wrap;background:#e5eaf2;border-radius:6px;padding:12px;color:#4e617c}.switcher{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:14px;background:#16243d;color:#eff5ff;border:1px solid #ffffff3d;box-shadow:0 10px 30px #17243e38;padding:6px;border-radius:13px;z-index:20}.switcher button{background:#ffffff12;color:white;border-radius:8px;width:35px;height:34px;font-size:18px}.switcher button:hover{background:#ffffff30}.switcher div{min-width:250px;text-align:center;font-size:12px}.switcher small{display:block;font-size:9px;color:#a6b6d3;margin-top:3px;letter-spacing:.5px}.output{position:absolute;inset:0;z-index:30;background:#152038b8;display:grid;place-items:center;pointer-events:auto}.output>div{background:#f8faff;border-radius:16px;width:440px;padding:30px;box-shadow:0 18px 60px #0004}.output h2{font-size:22px;color:#1e3457}.output p{font-size:13px;line-height:1.8;color:#70809a}.output button{padding:10px 16px;border-radius:7px;background:#427be4;color:white}.output .stamp{display:inline-block;border:1px dashed #abc0df;padding:22px;color:#627fa9;border-radius:8px;width:100%;text-align:center}
+.density-switch{display:flex;gap:2px;padding:3px;border:1px solid #d6dce5;background:#dfe5ee;border-radius:8px}.controls .density-switch button{border:0;background:transparent;padding:5px 9px;font-size:12px;border-radius:5px;color:#6b7a90}.controls .density-switch button[aria-pressed=true]{background:white;color:#2c528c;box-shadow:0 1px 4px #22385a1a}.flyout.compact{width:max-content;padding:8px;border-radius:9px}.flyout.compact .flyout-head,.flyout.compact .option-label,.flyout.compact .option-help{display:none}.flyout.compact .option-group+.option-group{margin-top:6px;padding-top:6px;border-top:1px solid #ffffff19}.flyout.compact .option-row{gap:4px}.flyout.compact .icon-option{width:48px;height:34px;border-radius:5px}.flyout.compact .icon-option svg{width:40px;height:24px}.flyout.compact .color-option{width:26px;height:26px;border-radius:50%}.flyout.compact .color-option span{width:15px;height:15px}
 @media(max-width:800px){header{align-items:flex-start;flex-direction:column;gap:8px;padding-top:10px}.meta{display:none}#description{flex-direction:column;gap:4px}.switcher{bottom:10px}}
 </style>
 </head>
@@ -23,6 +24,11 @@
 <header>
  <div><h1><span class="badge">PROTOTYPE · 07</span>选区与工具栏，哪种距离刚好？</h1><div class="sub">布局决策用 · 虚构桌面 · 不读取屏幕、不写剪贴板、不保存文件、不发网络请求</div></div>
  <div class="controls">
+  <span class="sub">选项密度</span>
+  <div class="density-switch" role="group" aria-label="C 布局选项密度（原型控制）">
+   <button data-density="standard" aria-pressed="true" title="Standard：完整分组与图标">Standard</button>
+   <button data-density="compact" aria-pressed="false" title="Compact：紧凑图标，选项不减少">Compact</button>
+  </div>
   <label for="scenario">体验场景</label>
   <select id="scenario">
    <option value="center">普通选区</option><option value="initial">尚未框选</option>
@@ -33,7 +39,7 @@
   <button id="reset">重置场景</button>
  </div>
 </header>
-<div class="meta"><span>C 按反馈调整：悬停显示图标选项；A / B 保留用于对照。</span><strong id="placement"></strong></div>
+<div class="meta"><span>C：悬停图标选项，支持 Standard / Compact；两种密度共享工具与标注状态。</span><strong id="placement"></strong></div>
 <div id="viewport"><main id="screen" aria-label="模拟截图屏幕">
  <div class="menubar"><span>◆ &nbsp; ArcShot &nbsp;&nbsp; 文件 &nbsp;&nbsp; 编辑 &nbsp;&nbsp; 视图</span><span>◉ &nbsp; Wi-Fi &nbsp; 100% &nbsp; 周三 10:24</span></div>
  <div class="desktop-window">
@@ -73,6 +79,7 @@ const icons={
 const clamp=(v,a,b)=>Math.max(a,Math.min(v,b)),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let variant=new URLSearchParams(location.search).get('variant')||'C';
 if(!variants[variant])variant='C';
+let density=new URLSearchParams(location.search).get('density')==='compact'?'compact':'standard';
 let region=null,objects=[],selected=null,editing=null,tool='select',drag=null,scale=1,serial=0,placement='',notice='',lineStyle='solid',arrowStyle='flat',fontSize=22;
 let hoverTool=null,closeTimer=null,rectStyle='highlight',mosaicSize=12;
 const appearance=Object.fromEntries(['rect','line','arrow','text'].map(kind=>[kind,{color:'#ff6069',width:3}]));
@@ -146,7 +153,7 @@ function optionIcon(body){return '<svg viewBox="0 0 64 36" aria-hidden="true">'+
 function optionButton(kind,prop,value,label,body,current){
  return '<button class="icon-option" data-option="'+prop+'" data-kind="'+kind+'" data-value="'+value+'" aria-label="'+label+'" title="'+label+'" aria-pressed="'+(String(current)===String(value))+'">'+optionIcon(body)+'</button>';
 }
-function optionGroup(label,content){return '<div class="option-group"><div class="option-label">'+label+'</div><div class="option-row">'+content+'</div></div>'}
+function optionGroup(label,content){return '<div class="option-group" role="group" aria-label="'+label+'"><div class="option-label">'+label+'</div><div class="option-row">'+content+'</div></div>'}
 function optionMarkup(kind){
  const selectedObject=objects.find(o=>o.id===selected),o=selectedObject?.kind===kind?selectedObject:null;
  const val=key=>o?.[key]??({lineStyle,arrowStyle,fontSize,rectStyle,mosaicSize,...appearance[kind]})[key];
@@ -194,13 +201,24 @@ function showOptions(kind,force=false){
  $('#tool-options')?.remove();
  hoverTool=kind;
  chrome.querySelectorAll('#toolbar .tool').forEach(el=>{el.classList.toggle('peek',el===anchor);el.setAttribute('aria-controls','tool-options');el.setAttribute('aria-expanded',String(el===anchor))});
- const panel=document.createElement('div');panel.id='tool-options';panel.className='panel flyout';
+ const panel=document.createElement('div');panel.id='tool-options';panel.className='panel flyout '+density;
  panel.setAttribute('role','group');panel.setAttribute('aria-label',(toolNames[kind]||'滚动截图')+'选项');
  panel.innerHTML=optionMarkup(kind);chrome.append(panel);
  const s=screen.getBoundingClientRect(),a=anchor.getBoundingClientRect(),dock=$('#toolbar').getBoundingClientRect();
- const y=clamp((a.top-s.top)/scale-12,36,H-panel.offsetHeight-12);
+ const y=clamp((a.top-s.top)/scale-(density==='compact'?8:12),36,H-panel.offsetHeight-12);
  panel.style.left=(dock.right-s.left)/scale+12+'px';panel.style.top=y+'px';
  panel.style.setProperty('--tip-y',clamp((a.top+a.height/2-s.top)/scale-y-4,10,panel.offsetHeight-18)+'px');
+ syncState();
+}
+function setDensity(value){
+ density=value==='compact'?'compact':'standard';
+ const url=new URL(location.href);url.searchParams.set('density',density);history.replaceState({},'',url);
+ document.querySelectorAll('[data-density]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.density===density)));
+ // Only rebuild the option flyout, never the editor or the annotation document.
+ if(hoverTool){
+  showOptions(hoverTool,true);
+  if(!chrome.querySelector('#toolbar:hover,#tool-options:hover'))closeOptionsSoon();
+ }
  syncState();
 }
 function closeOptionsSoon(){clearTimeout(closeTimer);closeTimer=setTimeout(hideOptions,180)}
@@ -231,8 +249,8 @@ function properties(){
 function syncState(){
  const o=objects.find(o=>o.id===selected);
  $('#status').textContent=editing?'文本输入中 · Enter 换行；点「收起编辑」看控件变化':o?'已选 '+toolNames[o.kind]+' · 拖动对象或蓝色控制点':region?'选工具后在选区内拖动；拖「移动选区」与边框控制点':'在模拟屏幕拖动，创建一个选区';
- $('#placement').textContent=placement;
- $('#state').textContent=JSON.stringify({prototype:true,variant,placement,region,tool,hoverTool,defaults:{lineStyle,arrowStyle,fontSize,rectStyle,mosaicSize,appearance},selected,editing,objects},null,2);
+ $('#placement').textContent=placement+(variant==='C'&&region?' · '+(density==='compact'?'Compact':'Standard'):'');
+ $('#state').textContent=JSON.stringify({prototype:true,variant,density,placement,region,tool,hoverTool,defaults:{lineStyle,arrowStyle,fontSize,rectStyle,mosaicSize,appearance},selected,editing,objects},null,2);
 }
 function renderChrome(){
  chrome.innerHTML='';
@@ -380,6 +398,7 @@ chrome.addEventListener('change',e=>{
  if(prop==='lineStyle')lineStyle=value;if(prop==='arrowStyle')arrowStyle=value;if(prop==='fontSize')fontSize=value;
  if(o)o[prop]=value;renderArt();renderChrome();
 });
+document.querySelectorAll('[data-density]').forEach(button=>button.addEventListener('click',()=>setDensity(button.dataset.density)));
 $('#scenario').addEventListener('change',scenario);$('#reset').addEventListener('click',scenario);
 $('#prev').addEventListener('click',()=>switchVariant(-1));$('#next').addEventListener('click',()=>switchVariant(1));
 document.addEventListener('keydown',e=>{
@@ -396,8 +415,12 @@ document.addEventListener('keydown',e=>{
  if((e.key==='Delete'||e.key==='Backspace')&&selected){e.preventDefault();objects=objects.filter(o=>o.id!==selected);selected=null;render()}
 });
 window.addEventListener('resize',fit);
-window.addEventListener('popstate',()=>switchVariant(0,variants[new URLSearchParams(location.search).get('variant')]?new URLSearchParams(location.search).get('variant'):'C'));
-fit();scenario();switchVariant(0);
+window.addEventListener('popstate',()=>{
+ const params=new URLSearchParams(location.search);
+ switchVariant(0,variants[params.get('variant')]?params.get('variant'):'C');
+ setDensity(params.get('density'));
+});
+fit();scenario();switchVariant(0);setDensity(density);
 // This file is never bundled into the product. The switcher is prototype-only;
 // no production route or application build exists in this repository yet.
 </script>
