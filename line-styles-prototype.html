@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ArcShot 原型：Line 与 Arrow</title>
+<style>
+:root{font:15px -apple-system,BlinkMacSystemFont,sans-serif;color:#e6eaf1;background:#15171c}body{margin:0;padding:24px}main{max-width:1050px;margin:auto}h1{font-size:23px;margin:0 0 8px}p{color:#adb6c5;line-height:1.5}.panel{background:#232833;border:1px solid #3c4554;border-radius:14px;padding:18px;margin:14px 0}.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center}button,input{font:inherit}button{background:#303a4a;color:white;border:1px solid #536278;border-radius:8px;padding:8px 12px;cursor:pointer}button.active{background:#1768d1;border-color:#63a5ff}label{display:flex;gap:8px;align-items:center}input[type=range]{width:125px}svg{display:block;width:100%;height:auto;background:linear-gradient(130deg,#eef3f8,#d6e4eb);border-radius:10px;touch-action:none;user-select:none}.handle{fill:#fff;stroke:#1768d1;stroke-width:3;cursor:grab}.handle:active{cursor:grabbing}.meta,.legend{font-size:13px;color:#bac4d2}
+</style></head><body><main>
+<h1>ArcShot · Line 与 Arrow 原型</h1>
+<p>根据你的反馈：仅保留 Line 与 Arrow。蓝白端点可拖动；虚线辅助线不是最终图像的一部分。<strong>这是用于讨论的临时原型。</strong></p>
+<div class="panel controls" id="tools"><button data-tool="line">Line</button><button data-tool="arrow">Arrow</button><span>样式：</span><span id="styles"></span>
+<label>线宽 <input id="width" type="range" min="2" max="16" value="6"><span id="widthValue"></span></label><label>颜色 <input id="color" type="color" value="#ed4245"></label><button id="reset">重置端点</button></div>
+<div class="panel"><svg id="canvas" viewBox="0 0 900 370" role="img" aria-label="可拖动端点的标注原型"><rect x="28" y="28" width="844" height="314" rx="8" fill="#fff" stroke="#aebbc8" stroke-dasharray="8 5"/><text x="46" y="55" font-size="15" fill="#6c7b89">选区示意 · 起点（尾部）→ 终点（尖端）</text><line id="guide" stroke="#4a9df5" stroke-dasharray="6 6" stroke-width="1.5"/><g id="shape"></g><circle id="start" class="handle" r="9"/><circle id="end" class="handle" r="9"/><text id="startLabel" font-size="13" fill="#1768d1">起点 / 尾部</text><text id="endLabel" font-size="13" fill="#1768d1">终点 / 尖端</text></svg></div>
+<div class="panel"><strong id="title"></strong><p id="description"></p><div class="meta" id="state"></div><p class="legend">Flat Arrow 和 Inward Arrow 分别参考你提供的两张示例图。比例仍可调整；拖动端点会改变方向和长度。</p></div>
+</main><script>
+let tool='line',styles={line:'solid',arrow:'uniform'},start={x:180,y:245},end={x:700,y:120},drag=null;
+const descriptions={solid:'Line · Solid：从起点到终点的连续实线。',dash:'Line · Dash：从起点到终点的等宽虚线。',uniform:'Flat Arrow：线身等粗，方形尾端，连接实心三角箭头。',tapered:'Inward Arrow：线身从尖细尾部向箭头方向逐渐加宽，箭头后缘向内凹。'};
+const svg=document.getElementById('canvas'),shape=document.getElementById('shape'),width=document.getElementById('width'),color=document.getElementById('color');
+function el(id){return document.getElementById(id)}function ns(tag,attrs){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e}
+function polygon(points,c){shape.appendChild(ns('polygon',{points:points.map(p=>p.x+','+p.y).join(' '),fill:c}))}
+function draw(){shape.replaceChildren();let w=Number(width.value),c=color.value,style=styles[tool],dx=end.x-start.x,dy=end.y-start.y,len=Math.hypot(dx,dy)||1,ux=dx/len,uy=dy/len,px=-uy,py=ux;
+if(tool==='line'){const attrs={x1:start.x,y1:start.y,x2:end.x,y2:end.y,stroke:c,'stroke-width':w,'stroke-linecap':'round'};if(style==='dash')attrs['stroke-dasharray']=(w*3)+' '+(w*2);shape.appendChild(ns('line',attrs))}
+else{let head=Math.min(Math.max(32,w*7),len*.3),wing={x:end.x-ux*head,y:end.y-uy*head},neck={x:end.x-ux*head*.84,y:end.y-uy*head*.84},headHalf=head*.42;
+if(style==='uniform'){let shaftHalf=w/2;polygon([{x:start.x+px*shaftHalf,y:start.y+py*shaftHalf},{x:wing.x+px*shaftHalf,y:wing.y+py*shaftHalf},{x:wing.x+px*headHalf,y:wing.y+py*headHalf},end,{x:wing.x-px*headHalf,y:wing.y-py*headHalf},{x:wing.x-px*shaftHalf,y:wing.y-py*shaftHalf},{x:start.x-px*shaftHalf,y:start.y-py*shaftHalf}],c)}
+else{let shaftHalf=head*.16,tailHalf=Math.min(.25,w*.04);polygon([{x:start.x+px*tailHalf,y:start.y+py*tailHalf},{x:neck.x+px*shaftHalf,y:neck.y+py*shaftHalf},{x:wing.x+px*headHalf,y:wing.y+py*headHalf},end,{x:wing.x-px*headHalf,y:wing.y-py*headHalf},{x:neck.x-px*shaftHalf,y:neck.y-py*shaftHalf},{x:start.x-px*tailHalf,y:start.y-py*tailHalf}],c)}}
+for(const [id,p] of [['start',start],['end',end]]){el(id).setAttribute('cx',p.x);el(id).setAttribute('cy',p.y);el(id+'Label').setAttribute('x',p.x+14);el(id+'Label').setAttribute('y',p.y-12)}
+for(const [k,v] of Object.entries({x1:start.x,y1:start.y,x2:end.x,y2:end.y}))el('guide').setAttribute(k,v);
+document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===tool));
+let choices=tool==='line'?[['solid','Solid 实线'],['dash','Dash 虚线']]:[['uniform','Flat Arrow'],['tapered','Inward Arrow']];
+el('styles').replaceChildren(...choices.map(([value,label])=>{let b=document.createElement('button');b.textContent=label;b.className=value===style?'active':'';b.onclick=()=>{styles[tool]=value;draw()};return b}));
+el('widthValue').textContent=w+' px';el('title').textContent=tool==='line'?'Line':'Arrow';el('description').textContent=descriptions[style];el('state').textContent='线宽：'+w+' px　|　起点：('+Math.round(start.x)+', '+Math.round(start.y)+')　|　终点：('+Math.round(end.x)+', '+Math.round(end.y)+')'}
+document.querySelectorAll('[data-tool]').forEach(b=>b.onclick=()=>{tool=b.dataset.tool;draw()});width.oninput=draw;color.oninput=draw;el('reset').onclick=()=>{start={x:180,y:245};end={x:700,y:120};draw()};
+for(const id of ['start','end'])el(id).addEventListener('pointerdown',e=>{drag=id;svg.setPointerCapture(e.pointerId);e.preventDefault()});
+svg.addEventListener('pointermove',e=>{if(!drag)return;let p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;p=p.matrixTransform(svg.getScreenCTM().inverse());let dest=drag==='start'?start:end;dest.x=Math.max(28,Math.min(872,p.x));dest.y=Math.max(28,Math.min(342,p.y));draw()});svg.addEventListener('pointerup',()=>drag=null);svg.addEventListener('pointercancel',()=>drag=null);draw();
+</script></body></html>
