@@ -328,6 +328,21 @@ unsafe extern "C" fn callback(_proxy: Ref, ty: u32, event: Ref, info: Ref) -> Re
     }
 }
 
+pub fn window_number(window: &Window) -> Result<u32> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|e| anyhow::anyhow!("native handle unavailable: {e}"))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        bail!("not an AppKit window");
+    };
+    // SAFETY: Borrowed live GPUI NSView and its owning window; main-thread only.
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<objc::runtime::Object>();
+        let ns_window: *mut objc::runtime::Object = msg_send![view, window];
+        ensure!(!ns_window.is_null(), "view has no NSWindow");
+        let number: isize = msg_send![ns_window, windowNumber];
+        Ok(number.try_into()?)
+    }
+}
 pub fn preview_window(window: &Window, passthrough: bool) -> Result<()> {
     let handle = HasWindowHandle::window_handle(window)
         .map_err(|e| anyhow::anyhow!("native handle unavailable: {e}"))?;

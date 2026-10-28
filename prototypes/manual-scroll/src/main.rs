@@ -28,6 +28,11 @@ struct Controller {
 }
 impl Controller {
     fn new(pid: u32, rect: Rect, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        println!(
+            "controller_window={:?} bounds={:?}",
+            native::window_number(window),
+            window.bounds()
+        );
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(100)).await;
@@ -220,7 +225,10 @@ impl Render for Controller {
                     .on_click(|_, _, _| native::request_permissions()))
                 .child(div().id("start").p_2().bg(rgb(0x176e52)).child("Start / new session")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if let Err(e) = this.start(window) { this.message = format!("{e:#}"); }
+                        if let Err(e) = this.start(window) {
+                            eprintln!("capture_start_rejected: {e:#}");
+                            this.message = format!("{e:#}");
+                        }
                         cx.notify();
                     })))
                 .when(can_copy, |d| d
@@ -237,6 +245,9 @@ impl Render for Controller {
     }
 }
 fn main() -> Result<()> {
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Warn)
+        .init();
     if let Ok(value) = std::env::var("SCREENCAPTUREKIT_COMPLETION_TIMEOUT_SECS") {
         ensure!(
             value.parse::<u64>().is_ok_and(|n| (1..=60).contains(&n)),
@@ -244,6 +255,19 @@ fn main() -> Result<()> {
         );
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--probe-text") {
+        let application = Application::new();
+        let text_system = application.text_system();
+        let id = text_system.resolve_font(&font("Helvetica"));
+        let narrow = text_system.advance(id, px(16.), 'i')?.width;
+        let wide = text_system.advance(id, px(16.), 'W')?.width;
+        println!("text_backend Helvetica i={narrow:?} W={wide:?}");
+        ensure!(
+            wide > narrow,
+            "inactive/synthetic text backend: enable GPUI font-kit"
+        );
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--preflight") {
         println!(
             "permissions={:?} display={:?}",
@@ -267,6 +291,13 @@ fn main() -> Result<()> {
             height: 540.0,
         },
     };
+    if let Some(index) = args.iter().position(|arg| arg == "--probe-target") {
+        let pid: u32 = args
+            .get(index + 1)
+            .ok_or_else(|| anyhow::anyhow!("missing target pid"))?
+            .parse()?;
+        return capture::probe_target(pid, rect);
+    }
     let mut child = if is_fixture {
         None
     } else {

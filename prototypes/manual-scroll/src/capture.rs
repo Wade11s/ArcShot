@@ -116,8 +116,8 @@ fn collect(
     pid: u32,
     stitched: &mut Option<Stitch>,
 ) -> Result<()> {
-    // The result fence is outside all request/processing scopes. No request is issued
-    // after cancellation and a late result never enters a new generation.
+    // Terminal results are fenced outside request/processing scopes. A request racing
+    // cancellation cannot publish a late image into a new generation.
     let outcome = collect_inner(shared, input, rect, pid, stitched);
     let _ = input
         .command
@@ -140,22 +140,12 @@ fn collect_inner(
             }),
         "selection outside built-in display"
     );
-    let content = SCShareableContent::get()?;
+    let (content, target) = wait_for_target(shared, input, pid, rect)?;
     let displays = content.displays();
     let display = displays
         .iter()
         .find(|d| d.display_id() == display_id)
         .context("built-in display absent")?;
-    let target = content
-        .windows()
-        .into_iter()
-        .find(|w| {
-            w.owning_application()
-                .is_some_and(|a| a.process_id() == pid as i32)
-                && w.is_on_screen()
-                && contains(w.frame(), rect)
-        })
-        .context("test target not visible / selection not inside target window")?;
     let target_id = target.window_id();
     let target_frame = target.frame();
     let apps = content.applications();
@@ -302,6 +292,94 @@ fn collect_inner(
         // overlap verification rather than being inferred from event deltas.
         thread::sleep(Duration::from_millis(50));
     }
+}
+pub fn probe_target(pid: u32, rect: Rect) -> Result<()> {
+    let content = SCShareableContent::get()?;
+    let target = find_target(&content, pid, rect)?;
+    println!(
+        "target_check=pass window={} rect={:?}",
+        target.window_id(),
+        target.frame()
+    );
+    Ok(())
+}
+fn wait_for_target(
+    shared: &State,
+    input: &Input,
+    pid: u32,
+    rect: Rect,
+) -> Result<(SCShareableContent, SCWindow)> {
+    let started = Instant::now();
+    let mut previous = None;
+    let mut pinned_id = None;
+    shared.lock().expect("prototype state poisoned").status =
+        "PREPARING — waiting for target window geometry; Esc cancels".into();
+    loop {
+        ensure!(
+            input.command.load(Ordering::SeqCst) == 0,
+            "preparation interrupted"
+        );
+        let content = SCShareableContent::get()?;
+        ensure!(
+            input.command.load(Ordering::SeqCst) == 0,
+            "preparation interrupted"
+        );
+        ensure!(
+            started.elapsed() < Duration::from_secs(3),
+            "target did not become ready within preparation budget; selection unchanged"
+        );
+        match find_target(&content, pid, rect) {
+            Ok(target) => {
+                let current = (target.window_id(), target.frame());
+                if let Some(id) = pinned_id {
+                    ensure!(
+                        current.0 == id,
+                        "target window identity changed during preparation"
+                    );
+                } else {
+                    pinned_id = Some(current.0);
+                }
+                if previous == Some(current) {
+                    println!(
+                        "target_ready window={} frame={:?} preparation_ms={}",
+                        current.0,
+                        current.1,
+                        started.elapsed().as_millis()
+                    );
+                    return Ok((content, target));
+                }
+                previous = Some(current);
+            }
+            Err(_) => previous = None,
+        }
+        thread::sleep(Duration::from_millis(80));
+    }
+}
+fn find_target(content: &SCShareableContent, pid: u32, rect: Rect) -> Result<SCWindow> {
+    let candidates: Vec<_> = content
+        .windows()
+        .into_iter()
+        .filter(|w| {
+            w.owning_application()
+                .is_some_and(|a| a.process_id() == pid as i32)
+        })
+        .collect();
+    println!(
+        "target_probe pid={pid} selection={rect:?} candidates={}",
+        candidates.len()
+    );
+    for w in &candidates {
+        println!(
+            "target_probe window={} on_screen={} frame={:?}",
+            w.window_id(),
+            w.is_on_screen(),
+            w.frame()
+        );
+    }
+    candidates
+        .into_iter()
+        .find(|w| w.window_layer() == 0 && w.is_on_screen() && contains(w.frame(), rect))
+        .context("test target not visible / selection not inside target window")
 }
 fn contains(frame: CGRect, rect: Rect) -> bool {
     rect.origin.x >= frame.origin.x

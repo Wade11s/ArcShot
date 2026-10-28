@@ -40,6 +40,11 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        println!(
+            "fixture_window={:?} bounds={:?}",
+            crate::native::window_number(window),
+            window.bounds()
+        );
         let focus = cx.focus_handle();
         window.focus(&focus);
         println!(

@@ -119,12 +119,36 @@ GPUI 使用 Metal shader 原生编译；大量传递依赖含 HTTP 能力，但�
 后续验证需确认原生 ABI、桥接维护与生命周期；GPUI 传递依赖
 block 0.1.6 / proc-macro-error2 2.0.1 有 future-incompat 警告。
 
+## 首轮真人反馈与原型修正
+
+- 用户提供的控制面板截图显示：背景和按钮色块正常，所有文字均未显示。该截图仅在本机诊断，
+  不随原型提交或上传公开票据。
+- 已确认配置根因：关闭 GPUI 默认 features 也关闭了 macOS 的 `font-kit`，
+  使框架选中 NoopTextSystem。现仅显式开启 `font-kit`，仍不启用无关平台默认项。
+- 可运行的后端诊断：`./run.sh --probe-text`，不创建窗口/截图。用实际 Helvetica 的
+  `i` / `W` advance 区分真实后端与空实现；修正前为 9.6 / 9.6 px，修正后为
+  3.5546875 / 15.1015625 px。字体名称数量不是有效判据（GPUI 会追加 fallback 名称）。
+  此诊断只证明选中了真实字体度量后端，最终文字绘制仍待用户复核。
+- 用户实际尝试启动时，日志多次出现目标不可见/选区不在目标窗口内，未进入采样；
+  Esc 到达了夹具，而不是取消了 Capture Session。本轮滚动、Esc 不能算通过。
+- 按同一 native window ID 比对，观察到 GPUI 正常逻辑 bounds 与 SCK 瞬时屏外缩略 frame
+  不同；另一已激活窗口则两者一致。激活/桌面窗口管理过渡是候选解释，不宣称已证明 OS 根因。
+- 准备阶段现等待相同 PID、layer 0、on-screen、包含固定选区的同一 window ID+frame
+  连续两次稳定才进入采样；采样等待预算 3 秒，单次系统查询仍受既有有限 completion timeout
+  限制，不把 3 秒宣传为硬墙钟上限。取消/输入失败会中止；超时不移动选区或改选目标。
+  此改动能否解决真人启动失败尚待复测。
+- `./run.sh --probe-target <fixture-pid>` 只查询该夹具的窗口元数据并检查固定选区，
+  不激活窗口、不截图；目标未处于正常可见状态时应失败。程序启动也记录本身的 native window ID。
+  Warn 日志写终端，无自动图像落盘。
+- 之前运行日志还记录过一次 cocoa 空引用崩溃；尚未建立稳定复现或证明修复，仍列为限制。
+
 ## 本轮事实与未验证矩阵
 
 环境：Mac14,2；macOS 27.0.1 (26A434)；arm64；Rust/Cargo 1.99.1；
 Apple Swift 6.4 / Xcode SDK 27；单内屏逻辑 1470×956。
 `--preflight`：screen=false、listen=true、AX=true；这是本次启动上下文的 preflight，
-不是完整权限/热键 mask 通过证据。未替用户授权，未启动屏幕采集。
+不是完整权限/热键 mask 通过证据。用户随后自行授权，复检变为三项 true；
+尚未成功进入原型截图采样。授权开关不是由代理修改。
 
 | 项目 | 本轮结果 |
 |---|---|
