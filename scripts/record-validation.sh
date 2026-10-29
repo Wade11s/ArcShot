@@ -75,8 +75,12 @@ require_nonempty() {
 }
 
 commit_sha=$(git rev-parse --verify HEAD)
+if ! status_output=$(git status --porcelain 2>&1); then
+    printf 'validation recording failed: git status failed:\n%s\n' "$status_output" >&2
+    exit 1
+fi
 worktree_dirty=false
-if [ -n "$(git status --porcelain)" ]; then
+if [ -n "$status_output" ]; then
     worktree_dirty=true
 fi
 timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)

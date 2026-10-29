@@ -56,6 +56,22 @@ if PATH="$temporary/fail-bin:$PATH" scripts/record-validation.sh \
     printf 'validation tools test failed: empty toolchain output was accepted\n' >&2
     exit 1
 fi
+rm "$temporary/fail-bin/xcodebuild"
+real_git=$(command -v git)
+cat >"$temporary/fail-bin/git" <<EOF
+#!/bin/sh
+if [ "\$1" = status ]; then
+    exit 128
+fi
+exec $real_git "\$@"
+EOF
+chmod +x "$temporary/fail-bin/git"
+if PATH="$temporary/fail-bin:$PATH" scripts/record-validation.sh \
+    --configuration debug --logs "$log" >/dev/null 2>&1; then
+    printf 'validation tools test failed: git status failure was accepted as clean\n' >&2
+    exit 1
+fi
+rm "$temporary/fail-bin/git"
 
 mkdir "$temporary/good" "$temporary/complete" "$temporary/missing-sha" "$temporary/placeholder"
 cp docs/validation/19-startup.md "$temporary/good/report.md"
@@ -116,6 +132,27 @@ done
 grep -v '| Pass |' "$temporary/complete/report.md" >"$temporary/missing-field/report.md"
 if scripts/check-validation.sh "$temporary/missing-field" >/dev/null 2>&1; then
     printf 'validation tools test failed: missing test result was accepted\n' >&2
+    exit 1
+fi
+
+for field in build_configuration rustc cargo xcode macos_sdk swift metal machine macos display permissions fixture log; do
+    sed "s|^$field=.*|$field=|" "$temporary/complete/report.md" >"$temporary/missing-field/report.md"
+    if scripts/check-validation.sh "$temporary/missing-field" >/dev/null 2>&1; then
+        printf 'validation tools test failed: empty field %s was accepted\n' "$field" >&2
+        exit 1
+    fi
+done
+sed 's/^build_configuration=release/build_configuration=unsupported/' \
+    "$temporary/complete/report.md" >"$temporary/missing-field/report.md"
+if scripts/check-validation.sh "$temporary/missing-field" >/dev/null 2>&1; then
+    printf 'validation tools test failed: unsupported build configuration was accepted\n' >&2
+    exit 1
+fi
+grep -v -e '^xcode=' -e '^macos_sdk=' -e '^swift=' -e '^metal=' \
+    "$temporary/complete/report.md" >"$temporary/missing-field/report.md"
+printf 'Xcode SDK Swift Metal\n' >>"$temporary/missing-field/report.md"
+if scripts/check-validation.sh "$temporary/missing-field" >/dev/null 2>&1; then
+    printf 'validation tools test failed: incidental toolchain prose was accepted\n' >&2
     exit 1
 fi
 
