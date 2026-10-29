@@ -53,6 +53,18 @@ open target/bundle/release/ArcShot.app
 检查：app → core/image/macos；image/macos → core；image 与 macos 不互依赖；
 core 无产品反向依赖或系统 I/O，GPUI 只在 app。
 
+### GPUI Kit 评估（本切片不引入）
+
+用户提出的 longbridge/gpui-kit 已按 v0.8.1 manifest 与 facade 源码核对。其默认
+上游后端锁定 `gpui-pre 0.3.9`，不是本切片已验证的 crates.io GPUI 0.2.2；即使
+关闭默认 component/assets，也仍引入 Base 层。它提供应用窗口与后续组件/测试
+facade，但不提供本票的 NSStatusItem 生命周期。本切片没有 GPUI 窗口或组件可复用，
+因此不迁移 GPUI、不形成两套后端，也不增加无实际职责的依赖。后续工具坞/标注 UI
+切片可在存在具体组件复用时重新评估并完整记录迁移风险。
+
+来源：https://github.com/longbridge/gpui-kit/tree/v0.8.1 （`crates/kit/Cargo.toml`、
+`crates/kit/src/lib.rs`、`crates/base/Cargo.toml`）。
+
 ## 重要传递原生/构建依赖
 
 - GPUI 0.2.2 带入 cocoa 0.26.0 / objc 0.2.7、metal 0.29.0、core-text 21.0.0、
