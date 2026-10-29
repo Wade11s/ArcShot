@@ -13,7 +13,7 @@
 - Xcode：27.0 (27A266a)。
 - SDK：macOS 27.0 (26A425)。
 - Swift：Apple Swift 6.4 (`swiftlang-6.4.0.34.1 clang-2100.3.34.1`)。
-- Metal/AIR-LLD：Apple metal 32023.921 (`metalfe-32023.921.6`)；本次未单独重测 AIR-LLD。
+- Metal/AIR-LLD：Apple metal 32023.921 / AIR-LLD 32023.921（均为 `metalfe-32023.921.6`）；补充运行 `xcrun -sdk macosx metallib --version` 确认 linker，无产品代码改动。
 - 机器：Mac14,2，arm64，Apple M2 / 16 GB（沿用本机 #19 硬件信息）。
 - macOS：27.2 (26B123)。
 - 显示器：本次原生 preflight：ID=1，global origin=(0,0)，1470×956 逻辑点，scale=2；预期捕获 2940×1912 物理像素，未实际捕获。
