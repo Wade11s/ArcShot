@@ -30,6 +30,7 @@ cargo test --locked --workspace --all-features
 cargo doc --locked --workspace --no-deps
 scripts/test-validation-tools.sh
 scripts/check-validation.sh
+scripts/test-dependency-inspection.py
 scripts/inspect-dependencies.py
 scripts/check-architecture.sh
 scripts/check-text-backend.sh
@@ -44,7 +45,7 @@ scripts/check-startup.sh --release
 | --- | --- | --- | --- |
 | ARCH-01 | `scripts/check-architecture.sh` | app → core/image/macos；image/macos → core；两者不互依赖；core 无反向产品依赖；GPUI 仅在 app | crate 内模块设计 |
 | EVIDENCE-01 | `scripts/test-validation-tools.sh` 与 `scripts/check-validation.sh` | 元数据记录字段完整；合法报告通过；缺 SHA、占位字段和非法配置均失败 | 证据内容本身是否正确 |
-| DEPENDENCY-01 | `scripts/inspect-dependencies.py` | 有界输出直接依赖与来源；仅允许 path/crates.io；重复版本只报数量，需显式展开 | 许可证、漏洞与所有传递非 Rust 风险 |
+| DEPENDENCY-01 | `scripts/test-dependency-inspection.py` 与 `scripts/inspect-dependencies.py` | normal/build/dev 直接依赖、来源与重复版本均通过确定性 fixtures；异常来源/畸形/缺失 metadata 失败；实际输出有界 | 许可证、漏洞与所有传递非 Rust 风险 |
 | TEXT-01 | `scripts/check-text-backend.sh` | GPUI `font-kit` 返回真实 Helvetica `i < W` advance，禁止 NoopTextSystem | 中文 IME、emoji、实际标注排版 |
 | MAC-START-01 | `scripts/check-startup.sh` | 正式 bundle 进入 run loop；Accessory 无 Dock 策略；真实可见 NSStatusItem、图像与菜单；`terminate:` 后 exit 0；5 秒看门狗 | 完整 MAC-START、Finder 人工视觉/点击 |
 | PRIVACY-01 | `scripts/check-no-network.sh` | 正常驻留至少 0.5 秒且 `lsof -i` 无网络/监听 socket；工具缺失/检查异常非零返回，不得假通过 | 后续功能与所有时刻的网络证明 |

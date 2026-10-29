@@ -29,6 +29,8 @@ jobs:
         run: cargo fetch --locked
       - name: Check crate direction
         run: scripts/check-architecture.sh
+      - name: Test dependency inspection
+        run: scripts/test-dependency-inspection.py
       - name: Inspect dependency sources and duplicates
         run: scripts/inspect-dependencies.py
       - name: Test validation tools

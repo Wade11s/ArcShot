@@ -41,17 +41,38 @@ for command_name in git date rustc cargo xcodebuild xcrun sw_vers sysctl uname a
     fi
 done
 
+# Split once, then reuse the same positional list for validation and emission.
 old_ifs=$IFS
 IFS=,
 set -f
-for log in $logs; do
+set -- $logs
+set +f
+IFS=$old_ifs
+[ "$#" -gt 0 ] || usage
+for log in "$@"; do
     if [ ! -f "$log" ]; then
         printf 'validation recording failed: log does not exist: %s\n' "$log" >&2
         exit 1
     fi
 done
-set +f
-IFS=$old_ifs
+
+capture() {
+    if ! captured=$("$@" 2>&1); then
+        printf 'validation recording failed: command failed: %s\n%s\n' "$1" "$captured" >&2
+        return 1
+    fi
+    if [ -z "$captured" ]; then
+        printf 'validation recording failed: empty command output: %s\n' "$1" >&2
+        return 1
+    fi
+}
+
+require_nonempty() {
+    if [ -z "$2" ]; then
+        printf 'validation recording failed: missing %s version\n' "$1" >&2
+        exit 1
+    fi
+}
 
 commit_sha=$(git rev-parse --verify HEAD)
 worktree_dirty=false
@@ -59,14 +80,43 @@ if [ -n "$(git status --porcelain)" ]; then
     worktree_dirty=true
 fi
 timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-rustc_version=$(rustc --version)
-cargo_version=$(cargo --version)
-xcode_version=$(xcodebuild -version | awk 'NR == 1 { print; exit }')
-xcode_build=$(xcodebuild -version | awk 'NR == 2 { print; exit }')
-sdk_version=$(xcrun --sdk macosx --show-sdk-version)
-sdk_build=$(xcrun --sdk macosx --show-sdk-build-version)
-swift_version=$(xcrun swift --version 2>&1 | awk '/Apple Swift version/ { print; exit }')
-metal_version=$(xcrun -sdk macosx metal --version 2>&1 | awk 'NR == 1 { print; exit }')
+
+capture rustc --version
+rustc_version=$captured
+capture cargo --version
+cargo_version=$captured
+capture xcodebuild -version
+xcode_output=$captured
+xcode_version=$(printf '%s\n' "$xcode_output" | awk 'NR == 1 { print; exit }')
+xcode_build=$(printf '%s\n' "$xcode_output" | awk 'NR == 2 { print; exit }')
+require_nonempty Xcode "$xcode_version"
+require_nonempty 'Xcode build' "$xcode_build"
+capture xcrun --sdk macosx --show-sdk-version
+sdk_version=$captured
+capture xcrun --sdk macosx --show-sdk-build-version
+sdk_build=$captured
+capture xcrun swift --version
+swift_output=$captured
+swift_version=$(printf '%s\n' "$swift_output" | awk '{
+    start = index($0, "Apple Swift version")
+    if (start > 0) {
+        print substr($0, start)
+        exit
+    }
+}')
+require_nonempty Swift "$swift_version"
+capture xcrun -sdk macosx metal --version
+metal_output=$captured
+metal_version=$(printf '%s\n' "$metal_output" | awk 'NR == 1 { print; exit }')
+require_nonempty Metal "$metal_version"
+case "$metal_version" in
+    *'metal version'*) ;;
+    *)
+        printf 'validation recording failed: unrecognized Metal version: %s\n' "$metal_version" >&2
+        exit 1
+        ;;
+esac
+
 machine=$(sysctl -n hw.model)
 macos_version=$(sw_vers -productVersion)
 macos_build=$(sw_vers -buildVersion)
@@ -85,12 +135,6 @@ printf 'xcode=%s (%s)\n' "$xcode_version" "$xcode_build"
 printf 'macos_sdk=%s (%s)\n' "$sdk_version" "$sdk_build"
 printf 'swift=%s\n' "$swift_version"
 printf 'metal=%s\n' "$metal_version"
-
-old_ifs=$IFS
-IFS=,
-set -f
-for log in $logs; do
+for log in "$@"; do
     printf 'log=%s\n' "$log"
 done
-set +f
-IFS=$old_ifs

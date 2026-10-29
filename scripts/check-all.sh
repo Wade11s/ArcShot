@@ -9,6 +9,7 @@ cargo test --locked --workspace --all-features
 cargo doc --locked --workspace --no-deps
 scripts/test-validation-tools.sh
 scripts/check-validation.sh
+scripts/test-dependency-inspection.py
 scripts/inspect-dependencies.py
 scripts/check-architecture.sh
 scripts/check-text-backend.sh
