@@ -44,3 +44,39 @@ fn app_async_08_old_escape_processed_after_restart_does_not_cancel_new_attempt()
     );
     assert_eq!(session.phase(), CapturePhase::Draining);
 }
+
+#[test]
+fn app_async_09_dismissed_preparing_overlay_cannot_erase_a_queued_restart() {
+    for completion in [Ok(()), Err(arcshot_core::CaptureFailure::NativeUncertain)] {
+        let mut session = CaptureSession::default();
+        let E::CheckPermission(old) = session.dispatch(A::Start)[0] else {
+            panic!("expected preflight");
+        };
+        session.dispatch(A::PermissionChecked {
+            ticket: old,
+            available: true,
+        });
+        session.dispatch(A::Start);
+        assert_eq!(session.phase(), CapturePhase::Draining);
+        assert!(session.dispatch(A::CancelAttempt(old)).is_empty());
+        let frame = || {
+            let g = ScreenGeometry::try_new(1, 0.0, 0.0, 1.0, 1.0, 2.0).unwrap();
+            CapturedFrame::try_from_srgb_bgra(g, 2, 2, 8, vec![255; 16]).unwrap()
+        };
+        let effects = session.dispatch(A::Completed {
+            ticket: old,
+            result: completion.map(|()| frame()),
+        });
+        if completion.is_ok() {
+            assert!(matches!(effects.as_slice(),[E::CheckPermission(new)] if *new!=old));
+            assert_eq!(session.phase(), CapturePhase::CheckingPermission);
+        } else {
+            assert_eq!(session.phase(), CapturePhase::RelaunchRequired);
+            assert!(
+                effects
+                    .iter()
+                    .all(|effect| !matches!(effect, E::Capture(_) | E::CheckPermission(_)))
+            );
+        }
+    }
+}

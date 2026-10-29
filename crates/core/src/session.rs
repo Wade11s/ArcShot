@@ -210,13 +210,12 @@ impl CaptureSession {
                 let current = match self.state {
                     State::Checking(current)
                     | State::Preparing(current)
-                    | State::Draining {
-                        ticket: current, ..
-                    }
                     | State::Frozen {
                         ticket: current, ..
                     } => current == ticket,
-                    State::Resident | State::Relaunch => false,
+                    // A draining ticket owns the worker result, not input from
+                    // its already-dismissed overlay. A queued restart must survive.
+                    State::Resident | State::Relaunch | State::Draining { .. } => false,
                 };
                 if current {
                     self.dispatch(CaptureAction::Cancel)

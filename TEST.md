@@ -77,7 +77,7 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | 文件 | 稳定 ID 与覆盖 | 不覆盖 |
 | --- | --- | --- |
 | `crates/core/tests/session.rs` | CORE-SESSION-01～05：权限先行、冻结/Esc、权限不可用、显示失效、普通失败重试；APP-ASYNC-01～04：取消 drain、串行重启、取消后不确定终态、过期 preflight | 真实 TCC/SCK/窗口 |
-| `crates/core/tests/stale_input.rs` | APP-ASYNC-08：旧覆盖层 Esc 晚于新菜单 Start 时，不能取消新会话 | 真实输入排队顺序 |
+| `crates/core/tests/stale_input.rs` | APP-ASYNC-08～09：旧覆盖层 Esc 晚于菜单 Start 时，不能取消新会话或抹掉排队重启 | 真实输入排队顺序 |
 | `crates/core/tests/frame.rs` | CORE-COORD-01～02：global/display-local 与物理尺寸、畸形几何；APP-FRAME-01～02：行 padding、尺寸/stride/字节数/溢出/alpha/预算 | 颜色来源；native 必须先转换 named sRGB |
 | `crates/app/tests/capture_tasks.rs` | APP-ASYNC-05～07：独立绝对期限、worker unwind、单在途与已知结果释放 | 真实原生请求退出确认 |
 | `crates/app/tests/permission_flow.rs` | APP-EFFECT-01～03：稍后及重启、设置返回重检、按需配置/取消 | 系统权限提示与真实持久偏好 |
