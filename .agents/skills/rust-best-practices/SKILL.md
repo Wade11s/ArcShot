@@ -283,7 +283,7 @@ Pick the mechanism by contract:
 input, never rely on `catch_unwind` for control flow (it does nothing under
 `panic = "abort"` and can leave state inconsistent), and never catch a panic and continue
 inside a library. Where a panicking convenience is justified, pair it with a fallible API
-(`get` / `get_unchecked`, `new` / `try_new`) and document it under `# Panics`.
+(`v[i]` / `v.get(i)`, `new` / `try_new`) and document it under `# Panics`.
 
 **Every intentional panic carries a message with the relevant values:**
 `assert!(buf.len() >= HEADER, "buffer too small: {} bytes", buf.len())`,
