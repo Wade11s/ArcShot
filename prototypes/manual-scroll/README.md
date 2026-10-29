@@ -19,7 +19,8 @@
 只面向当前 MacBook Air 单一内屏。不要打开真实敏感内容作测试。
 
 启动后是 PREPARED 状态，**按 Start 才创建事件拦截并开始捕获**。测试目标是另一个进程的
-原生 GPUI 窗口，不是浏览器/HTML，不是 ArcShot 的产品辅助进程。
+原生 GPUI 窗口，不是浏览器/HTML；测试窗口与预览位于同一进程，
+与既定单进程架构一致，不使用同 bundle ID 的辅助目标进程。
 固定目标窗口为 720×600 逻辑点，选区为其内部偏移 (16,40) 的 680×540 区域；
 开始前根据 SCK 测得的实际窗口位置计算屏幕选区，并将同一个矩形交给输入拦截和采样。
 窗口的请求初始位置不是捕获依据；采样开始后不跟随移动，位置/尺寸变化仍停止。
@@ -60,11 +61,13 @@ bundle ID 为 `dev.arcshot.scroll-prototype`。从终端直接运行，以保留
 期望显式停止；有已验证结果时只能由人按“Copy verified partial”输出。
 纯色/重复夹具在初始帧就应拒绝。测试这些键前必须保证目标确实具有键盘焦点。
 Esc/Enter 不应出现在目标键日志中。停止后单击控制面板、Cmd-Q 退出原型；
-采集中焦点在夹具，Cmd-Q 可能先关闭夹具，这应被识别为目标失效。
+采集中焦点在夹具，Q 只关闭夹具并应被识别为目标失效；控制面板保持运行以验证恢复。
+普通应用级 Cmd-Q 的退出行为另计，不作为目标关闭测试。
 
 ## 候选路径与刻意限制
 
-- 捕获：SCK display filter，排除 capture 进程的 application；显式 sRGB、
+- 捕获：SCK display filter，按精确 NSWindow/window ID 排除控制器预览，
+  不按 application/bundle identity 排除测试窗口；显式 sRGB、
   sourceRect 逻辑点 → 输出物理像素，关闭光标。用 SCScreenshotManager.capture_image
   单帧请求循环取得完整 CGImage，再转换 BGRA；**一次最多一个未完成请求，没有持久 SCStream**。
   请求之间实验性等待 50 ms，不承诺帧率。记录请求序号/耗时、配置与返回图像尺寸，
@@ -85,6 +88,9 @@ Esc/Enter 不应出现在目标键日志中。停止后单击控制面板、Cmd-
   新会话等待旧 worker 退出，旧请求不能输出。主线程写剪贴板。
   启动要求目标激活成功且是 foreground；主线程每 100 ms 检查焦点，丢失即停止。
   这是采样检查，不是系统路由的无竞态保证，仍须实机检验。
+  启动后先激活夹具，并以有界等待确认其实际 AppKit isKeyWindow 和前台状态；
+  丢失焦点或目标移动/消失显式停止。预览原生移动通过 libdispatch main queue 延后执行并独立 retain/release NSWindow，
+  不在 GPUI App/Window 借用内重入回调；完成后才把同一选区交给 tap 与采样。
   定期检查目标 ID、on-screen、窗口几何、权限和单内屏拓扑。
   内屏/拓扑变化丢弃整个会话；其他失败只保留之前已验证部分。
 - 实验上限：96 MiB 原始拼接图、180 秒；还存在请求/转换图、编码副本、预览、
@@ -122,6 +128,18 @@ GPUI 使用 Metal shader 原生编译；大量传递依赖含 HTTP 能力，但�
 后续验证需确认原生 ABI、桥接维护与生命周期；GPUI 传递依赖
 block 0.1.6 / proc-macro-error2 2.0.1 有 future-incompat 警告。
 
+## 当前候选：单进程 + 精确窗口排除
+
+原先双进程夹具与控制进程具有相同 bundle ID，按 application 排除的路径未能通过首帧校验。
+现已改为同一进程的两个原生窗口，并按控制窗口的精确 window ID 使用 display excluding-windows filter。
+自动 `--auto-cancel` 分别在外侧预览和 `--inside` 覆盖预览下通过 14 个连续完整 oracle 帧，
+两秒左右后以内部取消命令退出，未复制 PNG。这证明本机当前运行中的受控首帧/排除路径及取消边界，
+不是实际触控板/键盘输入或双向拼接通过证据；采样速率和资源预算也尚未定案。
+
+期间发现原生预览移动会在 GPUI 回调栈中重入 AppCell，并影响后续帧；现通过独立 native
+main-queue 调度完成 NSWindow setFrame，再交还输入/采样握手。后续外侧/内侧对照均不再出现该错误。
+本原型不使用产品代码，仍只保留于 prototype 分支。
+
 ## 首轮真人反馈与原型修正
 
 - 用户提供的控制面板截图显示：背景和按钮色块正常，所有文字均未显示。该截图仅在本机诊断，
@@ -149,6 +167,7 @@ block 0.1.6 / proc-macro-error2 2.0.1 有 future-incompat 警告。
 - `./run.sh --probe-target <fixture-pid>` 只查询该夹具的窗口元数据并报告按实际位置计算的相对选区，
   不激活窗口、不截图；目标未处于正常可见状态时应失败。程序启动也记录本身的 native window ID。
   Warn 日志写终端，无自动图像落盘。
+  `./run.sh --auto-cancel` 只验证程序化启动、受控帧与内部取消，不代表真人输入验收。
 - 之前运行日志还记录过一次 cocoa 空引用崩溃；尚未建立稳定复现或证明修复，仍列为限制。
 
 ## 首帧像素失败与夹具限定修正

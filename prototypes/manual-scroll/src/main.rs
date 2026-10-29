@@ -21,6 +21,8 @@ actions!(scroll_probe, [Quit]);
 
 struct Controller {
     pid: u32,
+    target: WindowHandle<fixture::Fixture>,
+    preview_id: u32,
     placement: PreviewPlacement,
     shared: capture::State,
     input: Arc<Input>,
@@ -30,19 +32,25 @@ struct Controller {
     message: String,
     encoding: bool,
     since: Option<Instant>,
+    preparing_selection: Option<native::Rect>,
+    pending_start: Option<Instant>,
 }
 impl Controller {
     fn new(
         pid: u32,
+        target: WindowHandle<fixture::Fixture>,
         placement: PreviewPlacement,
+        auto_cancel: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let preview_id = native::window_number(window).unwrap_or(0);
         println!(
-            "controller_window={:?} bounds={:?}",
-            native::window_number(window),
+            "controller_window={preview_id} bounds={:?}",
             window.bounds()
         );
+        let input = Arc::new(Input::default());
+        input.preview_id.store(preview_id, Ordering::SeqCst);
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(100)).await;
@@ -55,16 +63,36 @@ impl Controller {
             }
         })
         .detach();
+        if auto_cancel {
+            cx.spawn_in(window, async move |this, cx| {
+                Timer::after(Duration::from_secs(1)).await;
+                let started = this.update_in(cx, |this, window, cx| this.start(window, cx));
+                println!("auto_probe_start={started:?}");
+                if started.is_err() {
+                    let _ = cx.update(|_, cx| cx.quit());
+                    return;
+                }
+                Timer::after(Duration::from_secs(2)).await;
+                let _ = this.update(cx, |this, _| this.input.command.store(2, Ordering::SeqCst));
+                Timer::after(Duration::from_secs(1)).await;
+                let cancelled = this
+                    .update(cx, |this, _| this.message.starts_with("Cancelled"))
+                    .unwrap_or(false);
+                println!("auto_probe_cancelled={cancelled}");
+                let _ = cx.update(|_, cx| cx.quit());
+            })
+            .detach();
+        }
         Self {
-            pid, placement, shared: Arc::new(Mutex::new(capture::Shared::default())),
-            input: Arc::new(Input::default()), tap: None, worker: None, image: None,
+            pid, target, preview_id, placement, shared: Arc::new(Mutex::new(capture::Shared::default())),
+            input, tap: None, worker: None, image: None,
             message: "PREPARED — no capture yet.\n1. Grant permissions in Settings.\n2. Start; pointer over target.\n3. Scroll down/up, then Enter.\nM/B/R/J in target inject failures.".into(),
-            encoding: false, since: None,
+            encoding: false, since: None, preparing_selection: None, pending_start: None,
         }
     }
-    fn start(&mut self, window: &mut Window) -> Result<()> {
+    fn start<C: AppContext>(&mut self, window: &mut Window, cx: &mut C) -> Result<()> {
         ensure!(
-            self.worker.is_none() && !self.encoding,
+            self.worker.is_none() && self.pending_start.is_none() && !self.encoding,
             "wait for current cleanup/encoding"
         );
         ensure!(
@@ -80,23 +108,87 @@ impl Controller {
         }
         self.shared = Arc::new(Mutex::new(capture::Shared::default()));
         self.input = Arc::new(Input::default());
+        self.input
+            .preview_id
+            .store(self.preview_id, Ordering::SeqCst);
         let tap = Tap::new(self.input.clone())?;
         native::activate_target(self.pid)?;
+        self.target
+            .update(cx, |fixture, window, _| {
+                fixture.activate_for_capture(window)
+            })
+            .map_err(|error| anyhow::anyhow!("fixture window unavailable: {error}"))?;
         native::preview_window(window, true)?;
         self.tap = Some(tap);
-        let shared = self.shared.clone();
-        let input = self.input.clone();
-        let pid = self.pid;
-        self.worker = Some(thread::spawn(move || capture::run(shared, input, pid)));
+        self.pending_start = Some(Instant::now());
         self.since = Some(Instant::now());
-        self.message = "Starting capture; Esc cancels".into();
+        self.message = "Preparing fixture keyboard focus; Esc cancels".into();
         Ok(())
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.preview_placed.load(Ordering::SeqCst) {
+            if self.input.command.load(Ordering::SeqCst) == 0
+                && let Some(rect) = self.preparing_selection.take()
+                && let Some(tap) = &mut self.tap
+            {
+                tap.prepare_selection(rect);
+                println!("input_and_capture_selection={rect:?}");
+            }
+            self.preparing_selection = None;
+        }
+        if let Some(waiting) = self.pending_start {
+            if self.input.command.load(Ordering::SeqCst) != 0 {
+                self.pending_start = None;
+                self.since = None;
+                let command = self.input.command.load(Ordering::SeqCst);
+                let mut state = self.shared.lock().expect("prototype state poisoned");
+                state.restart = command == 3;
+                state.status = match command {
+                    2 | 3 => "Cancelled during focus preparation; no clipboard write.".into(),
+                    1 => "Stopped before first verified frame; no output.".into(),
+                    5 => "STOPPED: input protection lost during preparation; no output.".into(),
+                    _ => "Stopped during focus preparation; no output.".into(),
+                };
+            } else if self
+                .target
+                .update(cx, |_, window, _| {
+                    native::window_is_key(window).unwrap_or(false)
+                })
+                .unwrap_or(false)
+                && native::target_is_foreground(self.pid)
+            {
+                println!("fixture_key_window_ready");
+                let shared = self.shared.clone();
+                let input = self.input.clone();
+                let pid = self.pid;
+                self.worker = Some(thread::spawn(move || capture::run(shared, input, pid)));
+                self.pending_start = None;
+                self.message = "Preparing capture selection; Esc cancels".into();
+            } else if waiting.elapsed() > Duration::from_secs(3) {
+                eprintln!("fixture did not become key window during preparation");
+                self.pending_start = None;
+                self.since = None;
+                self.input.command.store(4, Ordering::SeqCst);
+                self.shared.lock().expect("prototype state poisoned").status =
+                    "STOPPED: fixture did not become key window during preparation; no verified image.".into();
+            }
+        }
         if self.tap.is_some()
+            && self.pending_start.is_none()
             && self.input.command.load(Ordering::SeqCst) == 0
-            && !native::target_is_foreground(self.pid)
+            && (!native::target_is_foreground(self.pid)
+                || !self
+                    .target
+                    .update(cx, |_, window, _| {
+                        native::window_is_key(window).unwrap_or(false)
+                    })
+                    .unwrap_or(false))
         {
+            println!(
+                "capture_focus_lost expected={} actual={:?}",
+                self.pid,
+                native::foreground_pid()
+            );
             self.input.command.store(6, Ordering::SeqCst);
         }
         let mut restart = self
@@ -153,28 +245,9 @@ impl Controller {
             .take();
         if let Some(rect) = selection
             && self.input.command.load(Ordering::SeqCst) == 0
-            && let Some(tap) = &mut self.tap
+            && self.tap.is_some()
         {
-            let position = native::display()
-                .and_then(|(_, screen)| geometry::preview_frame(rect, screen, self.placement))
-                .and_then(|frame| native::move_preview(window, frame));
-            match position {
-                Ok(()) => {
-                    if self.input.command.load(Ordering::SeqCst) == 0 {
-                        tap.prepare_selection(rect);
-                        println!("input_and_capture_selection={rect:?}");
-                    }
-                }
-                Err(error) => {
-                    eprintln!("selection preparation failed: {error:#}");
-                    let _ = self.input.command.compare_exchange(
-                        0,
-                        4,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                }
-            }
+            self.prepare_preview(rect, window);
         }
         let mut state = self.shared.lock().expect("prototype state poisoned");
         if matches!(self.input.command.load(Ordering::SeqCst), 2 | 3) {
@@ -215,11 +288,29 @@ impl Controller {
         if restart
             && self.worker.is_none()
             && self.tap.is_none()
-            && let Err(e) = self.start(window)
+            && let Err(e) = self.start(window, cx)
         {
             self.message = e.to_string();
         }
         cx.notify();
+    }
+    fn prepare_preview(&mut self, rect: native::Rect, window: &mut Window) {
+        if self.input.command.load(Ordering::SeqCst) != 0 {
+            return;
+        }
+        let position = native::display()
+            .and_then(|(_, screen)| geometry::preview_frame(rect, screen, self.placement))
+            .and_then(|frame| native::schedule_move_preview(window, frame, self.input.clone()));
+        match position {
+            Ok(()) => self.preparing_selection = Some(rect),
+            Err(error) => {
+                eprintln!("selection preparation failed: {error:#}");
+                let _ =
+                    self.input
+                        .command
+                        .compare_exchange(0, 4, Ordering::SeqCst, Ordering::SeqCst);
+            }
+        }
     }
     fn encode_partial(&mut self) {
         if self.worker.is_some() || self.tap.is_some() || self.encoding {
@@ -263,7 +354,7 @@ impl Render for Controller {
                     .on_click(|_, _, _| native::request_permissions()))
                 .child(div().id("start").p_2().bg(rgb(0x176e52)).child("Start / new session")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if let Err(e) = this.start(window) {
+                        if let Err(e) = this.start(window,cx) {
                             eprintln!("capture_start_rejected: {e:#}");
                             this.message = format!("{e:#}");
                         }
@@ -331,6 +422,7 @@ fn main() -> Result<()> {
         })
         .transpose()?
         .unwrap_or(40);
+    let auto_cancel = args.iter().any(|a| a == "--auto-cancel");
     let is_fixture = probe_pixels || args.iter().any(|a| a == "--fixture");
     let smoke = args.iter().any(|a| a == "--smoke");
     let left = args.iter().any(|a| a == "--left");
@@ -350,20 +442,7 @@ fn main() -> Result<()> {
             .parse()?;
         return capture::probe_target(pid);
     }
-    let mut child = if is_fixture {
-        None
-    } else {
-        let mut command = std::process::Command::new(std::env::current_exe()?);
-        command.arg("--fixture");
-        if smoke {
-            command.arg("--smoke");
-        }
-        if left {
-            command.arg("--left");
-        }
-        Some(command.spawn()?)
-    };
-    let pid = child.as_ref().map(|c| c.id()).unwrap_or(0);
+    let pid = std::process::id();
     println!(
         "THROWAWAY prototype pid={} target_pid={pid}; no networking and no image persistence requested by this program",
         std::process::id()
@@ -408,6 +487,28 @@ fn main() -> Result<()> {
             is_movable: false,
             ..Default::default()
         };
+        let mut target_window = None;
+        if !is_fixture {
+            let fixture_options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(fixture_x as f32), px(100.)),
+                    size(px(720.), px(600.)),
+                ))),
+                titlebar: None,
+                is_resizable: false,
+                is_movable: false,
+                ..Default::default()
+            };
+            match cx.open_window(fixture_options, |window, cx| {
+                cx.new(|cx| fixture::Fixture::new(window, cx))
+            }) {
+                Ok(handle) => target_window = Some(handle),
+                Err(e) => {
+                    eprintln!("controlled fixture window: {e:#}");
+                    cx.quit();
+                }
+            }
+        }
         if is_fixture {
             if let Err(e) = cx.open_window(options, |window, cx| {
                 if probe_pixels {
@@ -424,9 +525,11 @@ fn main() -> Result<()> {
                 eprintln!("fixture window: {e:#}");
                 cx.quit();
             }
-        } else if let Err(e) = cx.open_window(options, |window, cx| {
-            cx.new(|cx| Controller::new(pid, placement, window, cx))
-        }) {
+        } else if let Some(target) = target_window
+            && let Err(e) = cx.open_window(options, |window, cx| {
+                cx.new(|cx| Controller::new(pid, target, placement, auto_cancel, window, cx))
+            })
+        {
             eprintln!("controller window: {e:#}");
             cx.quit();
         }
@@ -440,10 +543,6 @@ fn main() -> Result<()> {
             result_exit.load(Ordering::SeqCst) == 0,
             "native pixel probe failed (see numeric diagnostics)"
         );
-    }
-    if let Some(child) = &mut child {
-        let _ = child.kill();
-        let _ = child.wait();
     }
     Ok(())
 }

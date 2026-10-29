@@ -146,14 +146,17 @@ fn collect_inner(
         .context("built-in display absent")?;
     let target_id = target.window_id();
     let target_frame = target.frame();
-    let apps = content.applications();
-    let this_app = apps
-        .iter()
-        .find(|a| a.process_id() == std::process::id() as i32)
-        .context("prototype process absent from SCK; cannot safely exclude preview")?;
+    let preview_id = input.preview_id.load(Ordering::SeqCst);
+    let preview = content
+        .windows()
+        .into_iter()
+        .find(|w| w.window_id() == preview_id && w.window_layer() >= 0)
+        .context("exact preview window absent; cannot safely exclude it")?;
+    // Exclude only this controller window, not the target that used to share its
+    // bundle identifier. This preserves display-composited content beneath preview.
     let filter = SCContentFilter::create()
         .with_display(display)
-        .with_excluding_applications(&[this_app], &[])
+        .with_excluding_windows(&[&preview])
         .build()?;
     let scale = f64::from(filter.point_pixel_scale());
     ensure!(
@@ -200,7 +203,7 @@ fn collect_inner(
         "selection preparation interrupted"
     );
     println!(
-        "candidate=SCScreenshotManager.capture_image rect={rect:?} pixels={width}x{height} scale={scale} display={display_id} target={target_id}"
+        "candidate=SCScreenshotManager.capture_image rect={rect:?} pixels={width}x{height} scale={scale} display={display_id} target={target_id} excluded_preview_id={preview_id}"
     );
     let mut last_source_check = Instant::now() - Duration::from_secs(1);
     let mut last_preview = Instant::now() - Duration::from_secs(1);

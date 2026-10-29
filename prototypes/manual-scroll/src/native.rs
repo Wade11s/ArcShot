@@ -8,7 +8,7 @@ use std::{
     ptr,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -78,6 +78,14 @@ unsafe extern "C" {
     fn CFMachPortCreateRunLoopSource(allocator: Ref, port: Ref, order: isize) -> Ref;
     fn CFRunLoopAddSource(runloop: Ref, source: Ref, mode: Ref);
     fn CFRunLoopRemoveSource(runloop: Ref, source: Ref, mode: Ref);
+}
+#[link(name = "System")]
+unsafe extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(queue: *const c_void, context: Ref, work: unsafe extern "C" fn(Ref));
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
     fn CFMachPortInvalidate(port: Ref);
     fn CFRelease(object: Ref);
 }
@@ -87,6 +95,9 @@ pub struct Input {
     pub command: AtomicU8,
     pub protection_lost: AtomicBool,
     pub selection_ready: AtomicBool,
+    /// Exact controller window to exclude, not its application or bundle identity.
+    pub preview_id: AtomicU32,
+    pub preview_placed: AtomicBool,
     pub scrolls: AtomicU64,
     pub clicks: AtomicU64,
 }
@@ -336,6 +347,21 @@ unsafe extern "C" fn callback(_proxy: Ref, ty: u32, event: Ref, info: Ref) -> Re
     }
 }
 
+pub fn window_is_key(window: &Window) -> Result<bool> {
+    let handle = HasWindowHandle::window_handle(window)
+        .map_err(|e| anyhow::anyhow!("native handle unavailable: {e}"))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        bail!("not an AppKit window");
+    };
+    // SAFETY: Borrowed live GPUI NSView/NSWindow on the AppKit main thread.
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<objc::runtime::Object>();
+        let ns_window: *mut objc::runtime::Object = msg_send![view, window];
+        ensure!(!ns_window.is_null(), "view has no NSWindow");
+        let key: objc::runtime::BOOL = msg_send![ns_window, isKeyWindow];
+        Ok(key == objc::runtime::YES)
+    }
+}
 pub fn window_number(window: &Window) -> Result<u32> {
     let handle = HasWindowHandle::window_handle(window)
         .map_err(|e| anyhow::anyhow!("native handle unavailable: {e}"))?;
@@ -367,31 +393,69 @@ pub fn preview_window(window: &Window, passthrough: bool) -> Result<()> {
     }
     Ok(())
 }
-pub fn move_preview(window: &mut Window, frame: Rect) -> Result<()> {
+unsafe extern "C" fn dispatch_trampoline(context: Ref) {
+    // SAFETY: dispatch_async_f owns exactly one Box until this callback, on main queue.
+    let task = unsafe { Box::from_raw(context.cast::<Box<dyn FnOnce()>>()) };
+    // No Rust panic may cross the native queue boundary.
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err() {
+        eprintln!("native dispatch callback panicked");
+    }
+}
+fn dispatch_main(task: Box<dyn FnOnce()>) {
+    let context = Box::into_raw(Box::new(task)).cast();
+    // SAFETY: Main queue is static. Context is an owned one-shot callback consumed
+    // and released by dispatch_trampoline, with no GPUI borrow on the native stack.
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, context, dispatch_trampoline) }
+}
+pub fn schedule_move_preview(window: &Window, frame: Rect, input: Arc<Input>) -> Result<()> {
     let (_, screen) = display()?;
-    window.resize(gpui::size(
-        gpui::px(frame.size.width as f32),
-        gpui::px(frame.size.height as f32),
-    ));
     let handle = HasWindowHandle::window_handle(window)
         .map_err(|e| anyhow::anyhow!("native handle unavailable: {e}"))?;
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
         bail!("not an AppKit window");
     };
-    // SAFETY: Borrowed live GPUI NSView and NSWindow, on main thread. NSPoint is the
-    // AppKit binding's correctly encoded argument; the single active built-in screen
-    // has Quartz top-left vs AppKit bottom-left origins. This does not activate a window.
-    unsafe {
+    // SAFETY: Borrowed live GPUI NSView/NSWindow on main thread. Retain NSWindow
+    // independently until the later native-queue callback, even if GPUI tears down.
+    let ns_window = unsafe {
         let view = handle.ns_view.as_ptr().cast::<objc::runtime::Object>();
         let ns_window: *mut objc::runtime::Object = msg_send![view, window];
         ensure!(!ns_window.is_null(), "preview has no NSWindow");
-        let top_left = cocoa::foundation::NSPoint::new(
-            frame.origin.x,
-            screen.origin.y + screen.size.height - frame.origin.y,
-        );
-        let _: () = msg_send![ns_window, setFrameTopLeftPoint:top_left];
-    }
+        let retained: *mut objc::runtime::Object = msg_send![ns_window, retain];
+        ensure!(!retained.is_null(), "preview NSWindow retain failed");
+        retained
+    };
+    dispatch_main(Box::new(move || {
+        // SAFETY: Outside GPUI callbacks on AppKit main queue. The NSWindow is retained
+        // until release below on the same thread. AppKit notifications cannot reenter
+        // a GPUI update because this task was queued by libdispatch, not an effect.
+        unsafe {
+            if input.command.load(Ordering::SeqCst) == 0 {
+                let rect = cocoa::foundation::NSRect::new(
+                    cocoa::foundation::NSPoint::new(
+                        frame.origin.x,
+                        screen.origin.y + screen.size.height - frame.origin.y - frame.size.height,
+                    ),
+                    cocoa::foundation::NSSize::new(frame.size.width, frame.size.height),
+                );
+                let _: () = msg_send![ns_window, setFrame:rect display:objc::runtime::YES];
+                input.preview_placed.store(true, Ordering::SeqCst);
+            }
+            let _: () = msg_send![ns_window, release];
+        }
+    }));
     Ok(())
+}
+pub fn foreground_pid() -> Option<u32> {
+    // SAFETY: Main-thread AppKit query; no autoreleased pointer escapes.
+    unsafe {
+        let workspace: *mut objc::runtime::Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let front: *mut objc::runtime::Object = msg_send![workspace, frontmostApplication];
+        if front.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![front, processIdentifier];
+        u32::try_from(pid).ok()
+    }
 }
 pub fn target_is_foreground(pid: u32) -> bool {
     // SAFETY: Main-thread AppKit query; no autoreleased pointer escapes.

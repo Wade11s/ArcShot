@@ -59,6 +59,11 @@ impl Fixture {
             fixed_probe: false,
         }
     }
+    pub fn activate_for_capture(&mut self, window: &mut Window) -> bool {
+        window.focus(&self.focus);
+        window.activate_window();
+        window.is_window_active()
+    }
     pub fn freeze_for_probe(&mut self) {
         self.fixed_probe = true;
     }
@@ -124,7 +129,7 @@ impl Render for Fixture {
                     "r" => this.mode = 3,
                     "u" => this.mode = 0,
                     "j" => this.offset = (this.offset + 1500).min(7400),
-                    "q" => cx.quit(),
+                    "q" => window.remove_window(),
                     _ => {}
                 }
                 this.invalidate(window, cx);
