@@ -1,0 +1,57 @@
+name: Guardrails
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardrails-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source:
+    name: Source guardrails (no product execution)
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Rust formatting toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Fetch locked dependency metadata
+        run: cargo fetch --locked
+      - name: Check crate direction
+        run: scripts/check-architecture.sh
+      - name: Inspect dependency sources and duplicates
+        run: scripts/inspect-dependencies.py
+      - name: Test validation tools
+        run: scripts/test-validation-tools.sh
+      - name: Check validation reports
+        run: scripts/check-validation.sh
+
+  native:
+    name: Native macOS 27 guardrails (self-hosted)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, macOS, ARM64, arcshot-macos27]
+    timeout-minutes: 40
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Assert the product build baseline
+        run: |
+          test "$(uname -m)" = "arm64"
+          test "$(sw_vers -productVersion | cut -d. -f1)" = "27"
+          test "$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)" = "27"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component cargo,clippy,rustfmt
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Run all product guardrails
+        run: scripts/check-all.sh

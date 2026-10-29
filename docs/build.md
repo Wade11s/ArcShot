@@ -32,7 +32,10 @@ open target/bundle/release/ArcShot.app
 ```
 
 - 所有 registry 依赖来自 crates.io，确切版本与 checksum 固定在 `Cargo.lock`；
-  本切片没有 Git、未记录 URL 或预编译第三方二进制依赖。
+  本切片没有 Git、未记录 URL 或预编译第三方二进制依赖。运行
+  `scripts/inspect-dependencies.py` 可在不展开整棵依赖树的情况下复核直接依赖、
+  来源和重复包名数量；该检查及验证报告工具使用 Python 3 标准库，其余构建/验证
+  脚本使用 POSIX shell。
 - 构建期允许从 crates.io 获取上述可信依赖；产品运行期不获取依赖、不联网。
 - bundle 设置 `LSUIElement=true`、`LSMinimumSystemVersion=27.0`，使用本地
   ad-hoc signature，不包含正式签名、公证或安装器。
@@ -80,6 +83,8 @@ facade，但不提供本票的 NSStatusItem 生命周期。本切片没有 GPUI 
 - 重要传递依赖包含 ring（TLS 的 C/汇编）与 GPUI 自带 Metal shader；这些均随
   crates.io 源码构建。其用途来自 GPUI 通用能力，本切片未调用网络路径。若需
   消除该供应面，应在 GPUI 依赖治理中评估，而不是另写未批准的替代路线。
+  重复版本先由 `scripts/inspect-dependencies.py` 报告数量；只在需要审查时以
+  `scripts/inspect-dependencies.py --show-duplicates` 展开有界列表。
 
 ## 后续捕获基线（本切片尚未链接）
 
