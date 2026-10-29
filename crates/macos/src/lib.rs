@@ -169,12 +169,17 @@ impl MenuBar {
         Ok(menu_bar)
     }
 
-    /// Hides the status item while a capture is in flight, restoring it afterwards.
+    /// Hides the status item before enumerating windows for capture.
     ///
-    /// Hide it before enumerating owned windows so its menu cannot reopen during
-    /// capture. This does not dismiss an already-open menu or cancel a native request.
-    pub fn set_capture_active(&self, active: bool) {
-        self.status_item.setVisible(!active);
+    /// This prevents its menu reopening but does not dismiss an already-open menu.
+    pub fn hide_for_capture(&self) {
+        self.status_item.setVisible(false);
+    }
+
+    /// Restores the status item after the capture worker result or watchdog timeout.
+    /// This does not cancel a native request or authorize a retry.
+    pub fn restore_after_capture(&self) {
+        self.status_item.setVisible(true);
     }
 
     /// Drains commands queued by AppKit actions, without invoking app callbacks.
