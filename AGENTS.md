@@ -12,6 +12,10 @@ The five canonical triage labels are used unchanged. See `docs/agents/triage-lab
 
 Single-context layout: root `GLOSSARY.md` and `docs/adr/`. See `docs/agents/domain.md`.
 
+### Source map
+
+See `docs/agents/source-map.md` when locating product code or research/prototype branches.
+
 ### Delegation
 
 Dispatch subagents with the `arcshot-delegation` skill; model pools live in `docs/agents/model-pool.md`.
@@ -26,4 +30,4 @@ Review changes against `REVIEW.md`; report Standards and Spec separately.
 
 ### Testing
 
-Test commands and layers will live in `TEST.md` once established.
+See `TEST.md` for test seams and commands, `docs/validation/` for evidence, and `docs/agents/ci.md` for CI scope.
