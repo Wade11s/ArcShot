@@ -4,21 +4,22 @@ use std::{error::Error, fmt};
 
 use arcshot_core::{MenuBarText, StatusItemIcon};
 use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, sel};
+use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, rc::Retained, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem,
     NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
 };
 use objc2_foundation::{NSData, NSSize, NSString};
 
+/// Standard status-item point size; the 36-pixel asset renders at 2x without scaling.
 const STATUS_ITEM_SIDE_POINTS: f64 = 18.0;
 
 /// A native menu-bar status item whose resources are owned on the main thread.
 pub struct MenuBar {
     marker: MainThreadMarker,
-    status_bar: objc2::rc::Retained<NSStatusBar>,
-    status_item: objc2::rc::Retained<NSStatusItem>,
-    quit_item: objc2::rc::Retained<NSMenuItem>,
+    status_bar: Retained<NSStatusBar>,
+    status_item: Retained<NSStatusItem>,
+    quit_item: Retained<NSMenuItem>,
 }
 
 impl MenuBar {
@@ -32,7 +33,7 @@ impl MenuBar {
     ///
     /// Returns an error when called off the main thread, when Accessory activation cannot
     /// be established, or when AppKit cannot construct the expected native object graph.
-    pub fn new(icon: StatusItemIcon, text: MenuBarText) -> Result<Self, MenuBarError> {
+    pub fn try_new(icon: StatusItemIcon, text: MenuBarText) -> Result<Self, MenuBarError> {
         let marker = MainThreadMarker::new().ok_or(MenuBarError::NotMainThread)?;
         let application = NSApplication::sharedApplication(marker);
         if !application.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
@@ -188,7 +189,7 @@ impl fmt::Display for MenuBarError {
         let message = match self {
             Self::NotMainThread => "menu bar must be created on the main thread",
             Self::ActivationPolicy => "could not activate the no-Dock Accessory policy",
-            Self::InvalidStatusIcon => "AppKit rejected the status item PNG",
+            Self::InvalidStatusIcon => "invalid status item PNG",
             Self::MissingButton => "the status item has no button",
             Self::StatusItemNotVisible => "the status item is not visible",
             Self::MissingStatusImage => "the status item has no image",

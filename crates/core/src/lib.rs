@@ -8,6 +8,15 @@ pub struct MenuBarText {
 }
 
 impl MenuBarText {
+    /// Creates the standard ArcShot menu-bar text.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            tooltip: "ArcShot",
+            quit_item: "退出 ArcShot",
+        }
+    }
+
     /// Returns the status item's accessibility tooltip.
     #[must_use]
     pub const fn tooltip(self) -> &'static str {
@@ -23,10 +32,7 @@ impl MenuBarText {
 
 impl Default for MenuBarText {
     fn default() -> Self {
-        Self {
-            tooltip: "ArcShot",
-            quit_item: "退出 ArcShot",
-        }
+        Self::new()
     }
 }
 
