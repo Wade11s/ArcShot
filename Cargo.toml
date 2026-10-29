@@ -1,0 +1,25 @@
+[workspace]
+members = ["crates/core", "crates/image", "crates/macos", "crates/app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+arcshot-core = { path = "crates/core" }
+arcshot-image = { path = "crates/image" }
+arcshot-macos = { path = "crates/macos" }
+anyhow = "1"
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
