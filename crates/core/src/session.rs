@@ -44,6 +44,8 @@ pub enum CaptureAction {
     },
     /// Cancels without output, retaining an in-flight native safety fence.
     Cancel,
+    /// Cancels only the attempt whose overlay produced this input.
+    CancelAttempt(CaptureTicket),
     /// Invalidates the built-in screen; never migrates to another display.
     DisplayInvalidated,
 }
@@ -204,6 +206,24 @@ impl CaptureSession {
                 }
             }
             CaptureAction::Completed { ticket, result } => self.complete(ticket, result),
+            CaptureAction::CancelAttempt(ticket) => {
+                let current = match self.state {
+                    State::Checking(current)
+                    | State::Preparing(current)
+                    | State::Draining {
+                        ticket: current, ..
+                    }
+                    | State::Frozen {
+                        ticket: current, ..
+                    } => current == ticket,
+                    State::Resident | State::Relaunch => false,
+                };
+                if current {
+                    self.dispatch(CaptureAction::Cancel)
+                } else {
+                    vec![]
+                }
+            }
             CaptureAction::Cancel | CaptureAction::DisplayInvalidated => {
                 let invalid = matches!(action, CaptureAction::DisplayInvalidated);
                 self.state = match self.state {

@@ -102,7 +102,9 @@ impl Coordinator {
         let queued = std::mem::take(&mut *self.queue.borrow_mut());
         for command in queued {
             match command {
-                UiCommand::CancelCapture => self.action(CaptureAction::Cancel, cx),
+                UiCommand::CancelCapture(ticket) => {
+                    self.action(CaptureAction::CancelAttempt(ticket), cx)
+                }
                 UiCommand::Permission(action) if !self.busy() => self.permission(action, cx),
                 _ => {}
             }
@@ -165,7 +167,7 @@ impl Coordinator {
                         continue;
                     }
                     self.close_notice(cx);
-                    if let Err(error) = self.open_preparing(cx) {
+                    if let Err(error) = self.open_preparing(ticket, cx) {
                         self.show_error(format!("无法打开截图准备窗口：{error}"), cx);
                         effects.extend(self.session.dispatch(CaptureAction::Completed {
                             ticket,
@@ -298,7 +300,7 @@ impl Coordinator {
                 match preview {
                     Ok(image) => {
                         state.close_overlay(cx);
-                        match state.open_frozen(screen, image, cx) {
+                        match state.open_frozen(ticket, screen, image, cx) {
                             Ok(()) => {
                                 log::info!(
                                     "capture_wake_window_submit_us={} pixels={:?}",
@@ -340,7 +342,11 @@ impl Coordinator {
         }
     }
 
-    fn open_preparing(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    fn open_preparing(
+        &mut self,
+        ticket: CaptureTicket,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         self.close_overlay(cx);
         let queue = Rc::clone(&self.queue);
         let bounds = WindowBounds::centered(size(px(420.0), px(110.0)), cx);
@@ -357,10 +363,13 @@ impl Coordinator {
             move |window, cx| {
                 let close_queue = Rc::clone(&queue);
                 window.on_window_should_close(cx, move |_, _| {
-                    close_queue.borrow_mut().push(UiCommand::CancelCapture);
+                    close_queue
+                        .borrow_mut()
+                        .push(UiCommand::CancelCapture(ticket));
                     true
                 });
                 let entity = cx.new(|cx| CaptureView {
+                    ticket,
                     image: None,
                     focus: cx.focus_handle(),
                     queue,
@@ -375,6 +384,7 @@ impl Coordinator {
 
     fn open_frozen(
         &mut self,
+        ticket: CaptureTicket,
         screen: ScreenGeometry,
         image: Arc<RenderImage>,
         cx: &mut Context<Self>,
@@ -406,10 +416,13 @@ impl Coordinator {
             move |window, cx| {
                 let close_queue = Rc::clone(&queue);
                 window.on_window_should_close(cx, move |_, _| {
-                    close_queue.borrow_mut().push(UiCommand::CancelCapture);
+                    close_queue
+                        .borrow_mut()
+                        .push(UiCommand::CancelCapture(ticket));
                     true
                 });
                 let entity = cx.new(|cx| CaptureView {
+                    ticket,
                     image: Some(image),
                     focus: cx.focus_handle(),
                     queue,

@@ -1,16 +1,18 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
 use arcshot_app::{PermissionAction, PermissionNotice};
+use arcshot_core::CaptureTicket;
 use gpui::{Context, FocusHandle, Render, RenderImage, Window, div, img, prelude::*, px, rgb};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum UiCommand {
-    CancelCapture,
+    CancelCapture(CaptureTicket),
     Permission(PermissionAction),
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
 pub(crate) struct CaptureView {
+    pub(crate) ticket: CaptureTicket,
     pub(crate) image: Option<Arc<RenderImage>>,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
@@ -18,6 +20,7 @@ pub(crate) struct CaptureView {
 impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let queue = Rc::clone(&self.queue);
+        let ticket = self.ticket;
         div()
             .size_full()
             .relative()
@@ -25,7 +28,7 @@ impl Render for CaptureView {
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
-                    queue.borrow_mut().push(UiCommand::CancelCapture);
+                    queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
                     cx.stop_propagation();
                 }
             })
