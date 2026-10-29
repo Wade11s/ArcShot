@@ -14,7 +14,7 @@ use screencapturekit::{
     screenshot_manager::SCScreenshotManager,
     shareable_content::SCShareableContent,
     stream::{
-        configuration::{SCCaptureDynamicRange, SCStreamConfiguration, color_space},
+        configuration::{PixelFormat, SCCaptureDynamicRange, SCStreamConfiguration, color_space},
         content_filter::SCContentFilter,
     },
 };
@@ -284,6 +284,8 @@ pub fn capture_builtin(
     let config = SCStreamConfiguration::new()
         .with_width(width)
         .with_height(height)
+        .with_pixel_format(PixelFormat::BGRA)
+        .with_shows_cursor(false)
         .with_source_rect(CGRect::new(0.0, 0.0, expected.width, expected.height))
         .with_color_space_name(color_space::SRGB)
         .map_err(|_| CaptureError::Frame)?

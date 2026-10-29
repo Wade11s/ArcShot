@@ -1,6 +1,6 @@
 # ArcShot 测试策略
 
-本文是根目录测试入口，依据 #18 的 T-01～T-05 与 #19 已落地检查维护。
+本文是根目录测试入口，依据 #18 的 T-01～T-05 与 #19/#20 已落地检查维护。
 目标是从最高行为接口取得可信证据，而不是用私有实现断言、mock 窗口或原型结果
 替代正式产品验收。
 
@@ -56,8 +56,8 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 
 ## 3. Rust 自动化接缝（随功能落地）
 
-下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。除本票已实现的
-启动/文字检查外，其余功能尚未实现，状态均为 **Not tested**。
+下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；具体稳定测试见下方文件。
+其他选区、编辑、滚动与输出功能未实现，状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -71,6 +71,22 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | APP-EFFECT | 注入权限、捕获、合成、编码、剪贴板、保存结果 | 成功/失败/取消/重试/放弃符合 I-04/I-10/I-11；同版本复用 PNG 字节 |
 | APP-ASYNC | 可控调度：单在途、2 帧队列、背压、取消/重启、迟到结果、worker 异常 | 不重复任务/输出、不污染新会话；不确定原生状态禁止部分输出与会话内重启 |
 | APP-FRAME | 注入宽高/stride/字节数/alpha/溢出与迟到帧 | 接纳前拒绝；保持命名 sRGB、不透明中性帧合同；不污染新文档 |
+
+### #20 的稳定自动化入口
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/session.rs` | CORE-SESSION-01～05：权限先行、冻结/Esc、权限不可用、显示失效、普通失败重试；APP-ASYNC-01～04：取消 drain、串行重启、取消后不确定终态、过期 preflight | 真实 TCC/SCK/窗口 |
+| `crates/core/tests/frame.rs` | CORE-COORD-01～02：global/display-local 与物理尺寸、畸形几何；APP-FRAME-01～02：行 padding、尺寸/stride/字节数/溢出/alpha/预算 | 颜色来源；native 必须先转换 named sRGB |
+| `crates/app/tests/capture_tasks.rs` | APP-ASYNC-05～07：独立绝对期限、worker unwind、单在途与已知结果释放 | 真实原生请求退出确认 |
+| `crates/app/tests/permission_flow.rs` | APP-EFFECT-01～03：稍后及重启、设置返回重检、按需配置/取消 | 系统权限提示与真实持久偏好 |
+| `crates/image/tests/preview.rs` | IMAGE-LIMIT-01～02：padding/通道、不修改底图、4M 预览上限 | 最终合成与输出 |
+| `crates/macos/tests/native_preflight.rs` | 失效身份先于 SCK 拒绝、内屏预检、错误分级、AppKit worker 拒绝 | 实际屏幕捕获 |
+| `scripts/check-startup.sh` | 新增 MAC-MENU-20-01：真实 NSMenu 两个 action 各入队，未启动 coordinator/SCK | 真人点击和捕获 |
+
+例如单文件执行 `cargo test --locked -p arcshot-app --test capture_tasks`。
+实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
+`docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
 
 新增子用例必须记录稳定 ID、前置、步骤、预期与实际，不通过删除规格边界来减少
 测试。模拟成功不能证明权限、焦点、IME、原生捕获或真实资源生命周期成功。

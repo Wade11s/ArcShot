@@ -1,6 +1,6 @@
 # 可复现构建与依赖记录
 
-适用范围：#19 的启动切片及 #20 的原生适配器。最低运行与 API/SDK 基线均为
+适用范围：#19 的启动切片及 #20 的权限引导、捕获和冻结覆盖层。最低运行与 API/SDK 基线均为
 macOS 27；不支持 macOS 26 或更早版本。V1 产品目标为用户 MacBook Air 的
 Apple Silicon 单一内建显示器。
 
@@ -51,6 +51,8 @@ open target/bundle/release/ArcShot.app
 | anyhow 1.0.104 | 可执行文件启动错误上下文 | 不进入其他 crate 的公共错误 API。 |
 | objc2 0.6.5、objc2-app-kit / foundation 0.3.2 | NSStatusItem、NSMenu、NSImage、NSApplication 的 Rust 绑定 | 替代是更老 cocoa/objc 或手写 FFI；当前选择减少 unsafe 并与主线程类型集成。generated binding feature/可用性风险由锁版与 MAC-START 检查控制。 |
 | dispatch2 0.3.1 | 将退出 action 安全排队回主队列 | 替代为自写 GCD FFI，未采用；`MainThreadBound` 避免自写 `unsafe impl Send`。 |
+| image 0.25.10（app，关闭默认特性） | 把内存 BGRA 预览包装成 GPUI 要求的 Frame 类型 | 已由 GPUI 带入同版本；不使用编码、磁盘或网络加载。替代为 PNG 中转会增加编码和内存副本，未采用。 |
+| log 0.4.34（app） | 文本诊断和捕获/窗口提交耗时 | 已在依赖图中；自有 stderr logger 无网络、遥测和像素日志。替代为每处直接打印未采用。 |
 
 四个本地 crate 均为 path dependency。依赖方向由 `scripts/check-architecture.sh`
 检查：app → core/image/macos；image/macos → core；image 与 macos 不互依赖；
@@ -61,8 +63,9 @@ core 无产品反向依赖或系统 I/O，GPUI 只在 app。
 用户提出的 longbridge/gpui-kit 已按 v0.8.1 manifest 与 facade 源码核对。其默认
 上游后端锁定 `gpui-pre 0.3.9`，不是本切片已验证的 crates.io GPUI 0.2.2；即使
 关闭默认 component/assets，也仍引入 Base 层。它提供应用窗口与后续组件/测试
-facade，但不提供本票的 NSStatusItem 生命周期。本切片没有 GPUI 窗口或组件可复用，
-因此不迁移 GPUI、不形成两套后端，也不增加无实际职责的依赖。后续工具坞/标注 UI
+facade，但不提供本票的 NSStatusItem 生命周期。#19 时没有 GPUI 窗口或组件可复用；
+#20 的少量权限按钮与底图覆盖层沿用已验证 GPUI，不迁移后端或额外引入 Base 层。
+不形成两套后端，也不增加无实际职责的依赖。后续工具坞/标注 UI
 切片可在存在具体组件复用时重新评估并完整记录迁移风险。
 
 来源：https://github.com/longbridge/gpui-kit/tree/v0.8.1 （`crates/kit/Cargo.toml`、

@@ -217,6 +217,51 @@ impl MenuBar {
         Ok(())
     }
 
+    /// Exercises both actual capture menu actions without starting a capture.
+    ///
+    /// The startup smoke process has no coordinator consuming commands. This checks
+    /// AppKit target/action delivery and command ordering, not permissions or SCK.
+    ///
+    /// # Errors
+    /// Returns an error if a menu action is missing, cannot be sent, or queues wrongly.
+    pub fn validate_capture_commands(&self) -> Result<(), MenuBarError> {
+        self.validate()?;
+        if !self.drain_commands().is_empty() {
+            return Err(MenuBarError::CaptureCommands);
+        }
+        let menu = self
+            .status_item
+            .menu(self.marker)
+            .ok_or(MenuBarError::MissingMenu)?;
+        let application = NSApplication::sharedApplication(self.marker);
+        for (index, expected) in [
+            (0, sel!(startCapture:)),
+            (1, sel!(screenRecordingPermissions:)),
+        ] {
+            let item = menu
+                .itemAtIndex(index)
+                .ok_or(MenuBarError::CaptureCommands)?;
+            if item.action() != Some(expected) {
+                return Err(MenuBarError::CaptureCommands);
+            }
+            let target = item.target().ok_or(MenuBarError::CaptureCommands)?;
+            // SAFETY: The expected selectors are checked above and implemented by
+            // our retained CommandTarget. Its actions only enqueue enum values.
+            if !unsafe { application.sendAction_to_from(expected, Some(&target), Some(&item)) } {
+                return Err(MenuBarError::CaptureCommands);
+            }
+        }
+        if self.drain_commands()
+            != [
+                MenuCommand::StartCapture,
+                MenuCommand::ScreenRecordingPermissions,
+            ]
+        {
+            return Err(MenuBarError::CaptureCommands);
+        }
+        Ok(())
+    }
+
     /// Queues the same `terminate:` action configured on the quit menu item.
     ///
     /// Queuing avoids re-entering GPUI's termination callback while its application state
@@ -283,6 +328,8 @@ pub enum MenuBarError {
     MissingMenu,
     /// The quit menu item does not have the expected action.
     MissingQuitAction,
+    /// Native capture commands did not reach their retained target in order.
+    CaptureCommands,
 }
 
 impl fmt::Display for MenuBarError {
@@ -296,6 +343,7 @@ impl fmt::Display for MenuBarError {
             Self::MissingStatusImage => "the status item has no image",
             Self::MissingMenu => "the status item has no menu",
             Self::MissingQuitAction => "the quit item has no terminate action",
+            Self::CaptureCommands => "capture menu actions could not be delivered",
         };
         formatter.write_str(message)
     }

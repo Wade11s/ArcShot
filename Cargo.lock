@@ -95,6 +95,8 @@ dependencies = [
  "arcshot-image",
  "arcshot-macos",
  "gpui",
+ "image",
+ "log",
 ]
 
 [[package]]
