@@ -2,7 +2,8 @@
 
 问题：[实机验证 Scroll Capture 的双向拼接、浮层捕获与输入协作](https://github.com/Wade11s/ArcShot/issues/15)。
 
-**状态：原型已构建；没有完成真人 Scroll Capture 实机验收。不得据此关闭票据或锁定 V1 路线。**
+**状态：受控原生路径已完成一轮真人原型验证；完整实机记录见 [VALIDATION.md](VALIDATION.md)。**
+未证明任意应用、速度或长图兼容；最终原生路线与资源门槛不在本票据内定案。
 资产只保留在 `prototype/manual-scroll`，不合并到 main。
 
 ## 一条命令启动
