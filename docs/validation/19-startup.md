@@ -27,7 +27,7 @@
 | MAC-START-01 | 从 `target/bundle/debug/ArcShot.app` 内二进制运行 `--smoke-test` | 无 Dock Accessory；真实可见状态项、图像、菜单；菜单自身 `terminate:` 排队执行并 exit 0；5 秒内完成 | 修复后连续四次输出 `startup_smoke=pass activation_policy=Accessory quit_action=terminate:`，exit 0 | Pass |
 | PRIVACY-01 | 正常启动、驻留 0.5 秒，执行 `lsof -nP -a -p PID -i`，随后结束该测试进程；另以不含 lsof 的 PATH 做负面检查 | 进程仍驻留，网络/监听 socket 数为 0；工具缺失或检查异常不得假通过 | 正常检查 `privacy_smoke=pass network_sockets=0 lsof_status=1`（合法无匹配）；缺失工具输出 Not tested 并 exit 1 | Pass |
 | BUILD-RELEASE-01 | 构建 Release bundle 并执行同一 MAC-START-01 | Release 也完成驻留与退出 | Release 构建成功，`startup_smoke=pass activation_policy=Accessory quit_action=terminate:`，exit 0 | Pass |
-| MAC-START-MANUAL-01 | 用户从 Finder 启动，观察菜单栏图标和 Dock，点击“退出 ArcShot” | 图标可见、无 Dock 主窗口，点击后进程退出 | 需要用户实机视觉与点击；自动 AppKit 检查不替代 | Not tested |
+| MAC-START-MANUAL-01 | 用户从 Finder 启动，观察菜单栏图标和 Dock，点击“退出 ArcShot” | 图标可见、无 Dock 主窗口，点击后进程退出 | 2026-10-29T13:27:14Z 用户明确回报 `MAC-START-MANUAL-01 Pass`，确认三项均通过 | Pass |
 
 ## 缺陷回归与限制
 
