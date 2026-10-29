@@ -27,8 +27,9 @@ description: ArcShot 的分支与 worktree 规则：命名、基点、worktree �
 ## 合并与 PR
 
 - 单票据 `/implement`：完成并通过 `/code-review` 后开 PR 到 `main`。
+- 双轴审查无未决发现后，开 PR 并立即执行 `gh pr merge --auto --merge`；必需检查变绿后由 GitHub 自动合并，合并完成后 fast-forward `main` 并清理 worktree 与分支。等待用户人工原生验收（MAC-*-MANUAL 类）或用户明确要求先审阅的 PR 不自动合并，须用户确认后再执行。
 - `/implement-spec`：实现代理从 `spec/<slug>` 拉票据分支，合并回集成分支；整体验收后开一个 PR 到 `main`。
-- 代码改动必须经 PR；纯文档或配置修正可直接提交 `main`。
+- 所有提交必须经 PR；`main` 的 ruleset 强制 PR 与必需状态检查，纯文档或配置修正同样走 PR。
 - 不 force-push `main`；不改写已推送的共享分支。
 
 ## 研究与原型
