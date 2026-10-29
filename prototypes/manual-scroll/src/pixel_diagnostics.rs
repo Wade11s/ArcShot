@@ -68,7 +68,7 @@ fn best(frame: &Frame, scale: usize) -> Result<Score> {
     );
     let decoded = usize::from(frame.pixels[0]) + (usize::from(frame.pixels[1]) << 8);
     let bases = [
-        2016 * scale,
+        2040 * scale,
         decoded,
         decoded.saturating_sub(frame.height - 1),
     ];
@@ -111,7 +111,7 @@ pub fn report(frame: &Frame, scale: usize) -> Result<String> {
     let alpha_max = pixels.iter().map(|p| p[3]).max().unwrap_or(0);
     Ok(format!(
         "assumed_initial_row={} decoded_first_row={decoded} alpha={alpha_min}..{alpha_max} best={:?} exact_samples={}/{} mean_channel_delta={:.3} max_channel_delta={}; DIAGNOSTIC ONLY",
-        2016 * scale,
+        2040 * scale,
         selected.mapping,
         selected.exact,
         selected.samples,
@@ -129,7 +129,7 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let row = if flipped { height - 1 - y } else { y };
-                let mut p = fixture::pixel(16 + x, 2016 + row, 1);
+                let mut p = fixture::pixel(16 + x, 2040 + row, 1);
                 if swapped {
                     p.swap(0, 2);
                 }

@@ -3,6 +3,7 @@ mod capture;
 mod fixture;
 mod geometry;
 mod native;
+mod native_probe;
 mod pixel_diagnostics;
 mod pixels;
 mod stitch;
@@ -316,7 +317,21 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let is_fixture = args.iter().any(|a| a == "--fixture");
+    let probe_pixels = args.iter().any(|a| a == "--probe-pixels");
+    let probe_exit = Arc::new(std::sync::atomic::AtomicI32::new(-1));
+    let result_exit = probe_exit.clone();
+    let probe_inset = args
+        .iter()
+        .position(|a| a == "--probe-inset")
+        .map(|i| -> Result<usize> {
+            Ok(args
+                .get(i + 1)
+                .ok_or_else(|| anyhow::anyhow!("missing probe inset"))?
+                .parse()?)
+        })
+        .transpose()?
+        .unwrap_or(40);
+    let is_fixture = probe_pixels || args.iter().any(|a| a == "--fixture");
     let smoke = args.iter().any(|a| a == "--smoke");
     let left = args.iter().any(|a| a == "--left");
     let inside = args.iter().any(|a| a == "--inside");
@@ -395,7 +410,16 @@ fn main() -> Result<()> {
         };
         if is_fixture {
             if let Err(e) = cx.open_window(options, |window, cx| {
-                cx.new(|cx| fixture::Fixture::new(window, cx))
+                if probe_pixels {
+                    native_probe::schedule(window, cx, probe_exit.clone(), probe_inset);
+                }
+                cx.new(|cx| {
+                    let mut fixture = fixture::Fixture::new(window, cx);
+                    if probe_pixels {
+                        fixture.freeze_for_probe();
+                    }
+                    fixture
+                })
             }) {
                 eprintln!("fixture window: {e:#}");
                 cx.quit();
@@ -411,6 +435,12 @@ fn main() -> Result<()> {
             println!("prepared_window_created fixture={is_fixture}; no capture started");
         }
     });
+    if probe_pixels {
+        ensure!(
+            result_exit.load(Ordering::SeqCst) == 0,
+            "native pixel probe failed (see numeric diagnostics)"
+        );
+    }
     if let Some(child) = &mut child {
         let _ = child.kill();
         let _ = child.wait();

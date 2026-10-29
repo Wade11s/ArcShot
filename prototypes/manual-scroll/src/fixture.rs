@@ -37,6 +37,7 @@ pub struct Fixture {
     mode: u8,
     image: Option<Arc<RenderImage>>,
     focus: FocusHandle,
+    fixed_probe: bool,
 }
 impl Fixture {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -55,7 +56,11 @@ impl Fixture {
             mode: 0,
             image: None,
             focus,
+            fixed_probe: false,
         }
+    }
+    pub fn freeze_for_probe(&mut self) {
+        self.fixed_probe = true;
     }
     fn invalidate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(image) = self.image.take() {
@@ -70,6 +75,10 @@ impl Render for Fixture {
         if self.image.is_none() {
             let width = 720 * scale;
             let height = 600 * scale;
+            println!(
+                "fixture_render viewport={:?} scale={scale} image={width}x{height}",
+                window.viewport_size()
+            );
             let mut pixels = Vec::with_capacity(width * height * 4);
             for y in 0..height {
                 for x in 0..width {
@@ -96,6 +105,7 @@ impl Render for Fixture {
         div().id("controlled-target").size_full().overflow_hidden()
             .track_focus(&self.focus)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                if this.fixed_probe { return; }
                 let delta = event.delta.pixel_delta(px(16.)).y;
                 let delta = f32::from(delta).round() as i32;
                 this.offset = (this.offset - delta).clamp(0, 7400);
@@ -106,6 +116,7 @@ impl Render for Fixture {
                 println!("TARGET_RECEIVED_CLICK count={} (must NOT happen while capture tap is active)", event.click_count);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.fixed_probe { return; }
                 println!("TARGET_RECEIVED_KEY {}", event.keystroke.key);
                 match event.keystroke.key.as_str() {
                     "m" => this.mode = 1,

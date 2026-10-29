@@ -21,7 +21,7 @@ pub fn fixture_selection(frame: Rect) -> Result<Rect> {
     Ok(Rect {
         origin: Point {
             x: frame.origin.x + 16.0,
-            y: frame.origin.y + 16.0,
+            y: frame.origin.y + 40.0,
         },
         size: Size {
             width: 680.0,
@@ -96,13 +96,13 @@ mod tests {
         let r = fixture_selection(frame(280., 315.)).expect("valid fixture");
         assert_eq!(
             (r.origin.x, r.origin.y, r.size.width, r.size.height),
-            (296., 331., 680., 540.)
+            (296., 355., 680., 540.)
         );
     }
     #[test]
     fn requested_initial_origin_still_has_the_same_inset() {
         let r = fixture_selection(frame(60., 100.)).expect("valid fixture");
-        assert_eq!((r.origin.x, r.origin.y), (76., 116.));
+        assert_eq!((r.origin.x, r.origin.y), (76., 140.));
     }
     #[test]
     fn thumbnail_geometry_is_not_a_capture_target() {
@@ -123,11 +123,11 @@ mod tests {
         let right = preview_frame(r, screen(), PreviewPlacement::Right).expect("fits");
         let left = preview_frame(r, screen(), PreviewPlacement::Left).expect("fits");
         let inside = preview_frame(r, screen(), PreviewPlacement::Inside).expect("fits");
-        assert_eq!((right.origin.x, right.origin.y), (984., 331.));
-        assert_eq!((left.origin.x, left.origin.y), (48., 331.));
+        assert_eq!((right.origin.x, right.origin.y), (984., 355.));
+        assert_eq!((left.origin.x, left.origin.y), (48., 355.));
         assert_eq!(
             (inside.origin.x, inside.origin.y, inside.size.height),
-            (736., 411., 460.)
+            (736., 435., 460.)
         );
     }
 }
