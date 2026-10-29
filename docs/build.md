@@ -1,6 +1,6 @@
 # 可复现构建与依赖记录
 
-适用范围：#19 的“菜单栏驻留 → 退出”切片。最低运行与 API/SDK 基线均为
+适用范围：#19 的启动切片及 #20 的原生适配器。最低运行与 API/SDK 基线均为
 macOS 27；不支持 macOS 26 或更早版本。V1 产品目标为用户 MacBook Air 的
 Apple Silicon 单一内建显示器。
 
@@ -39,9 +39,9 @@ open target/bundle/release/ArcShot.app
 - 构建期允许从 crates.io 获取上述可信依赖；产品运行期不获取依赖、不联网。
 - bundle 设置 `LSUIElement=true`、`LSMinimumSystemVersion=27.0`，使用本地
   ad-hoc signature，不包含正式签名、公证或安装器。
-- `.cargo/config.toml` 为 arm64 最终链接加入 `/usr/lib/swift` rpath。当前菜单栏
-  切片未链接 Swift；后续 screencapturekit/apple-* Swift 桥接入时必须保留该标准
-  系统运行库搜索路径。
+- `.cargo/config.toml` 为 arm64 最终链接加入 `/usr/lib/swift` rpath。
+  screencapturekit/apple-* 使用第三方 Swift 源码桥，必须保留该标准系统运行库
+  搜索路径。
 
 ## 直接依赖与维护风险
 
@@ -86,12 +86,20 @@ facade，但不提供本票的 NSStatusItem 生命周期。本切片没有 GPUI 
   重复版本先由 `scripts/inspect-dependencies.py` 报告数量；只在需要审查时以
   `scripts/inspect-dependencies.py --show-duplicates` 展开有界列表。
 
-## 捕获依赖基线（适配器尚未完成）
+## 捕获依赖与安全边界
 
 macos crate 锁定 screencapturekit 11.1.1（关闭默认特性，启用真实的
 `macos_15_0`）及 apple-cf 0.11.7（关闭默认特性，启用 `cg`）。Cargo.lock
 同时记录 apple-metal 0.10.4 和 doom-fish-utils 0.4.3。它们从 crates.io 源码
-构建，包含第三方 SwiftPM 源码桥；不意味着捕获适配器已完成或原生验收通过。
+构建，包含第三方 SwiftPM 源码桥；编译通过不意味着原生验收通过。
 系统仍以 macOS 27 为最低基线，不虚构 macOS 27 feature。替代路线
 objc2-screen-capture-kit 重写未获采用，不擅自增加。第三方 Swift 编译/运行库、
 SDK 可用性与上游维护是主要风险；不得引入未经确认的预编译组件。
+
+捕获适配器同步调用 SCK；app 必须在第一次 SCK 调用之前开始独立的 5 秒绝对
+看门狗，捕获 worker panic，worker 未退出前不得启动新请求。SCK 自身等待时间
+可受环境变量影响，不是安全看门狗；任何 SCK 请求错误、超时或 worker panic
+均须进入禁止输出及会话内重启的终态。调用方在主线程列举全部可见自有窗口，
+捕获前隐藏状态栏图标以防其菜单重新打开，捕获完成前不得显示或新建窗口；
+任一窗口未能精确映射时拒绝捕获。正式产品的
+权限、显示几何、窗口排除、命名 sRGB 色彩及生命周期证据仍须实机取得。

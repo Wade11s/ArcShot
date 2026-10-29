@@ -27,11 +27,14 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSStatusItem",
     "NSView",
     "NSWorkspace",
+    "NSWindow",
     "objc2-core-foundation",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSArray",
     "NSData",
+    "NSEnumerator",
     "NSGeometry",
     "NSString",
     "NSURL",
