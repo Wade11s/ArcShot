@@ -86,10 +86,12 @@ facade，但不提供本票的 NSStatusItem 生命周期。本切片没有 GPUI 
   重复版本先由 `scripts/inspect-dependencies.py` 报告数量；只在需要审查时以
   `scripts/inspect-dependencies.py --show-duplicates` 展开有界列表。
 
-## 后续捕获基线（本切片尚未链接）
+## 捕获依赖基线（适配器尚未完成）
 
-父规格已选 screencapturekit 11.1.1、apple-cf 0.11.7 的 `cg` 能力，接受
-apple-metal 传递依赖及第三方 SwiftPM 源码桥。引入时按实际 feature 配置并重新
-锁定、记录；不得虚构 macOS 27 feature。替代路线 objc2-screen-capture-kit 重写
-未获采用，不擅自增加。第三方 Swift 编译/运行库、SDK 可用性与上游维护是主要
-风险；不得引入未经确认的预编译组件。
+macos crate 锁定 screencapturekit 11.1.1（关闭默认特性，启用真实的
+`macos_15_0`）及 apple-cf 0.11.7（关闭默认特性，启用 `cg`）。Cargo.lock
+同时记录 apple-metal 0.10.4 和 doom-fish-utils 0.4.3。它们从 crates.io 源码
+构建，包含第三方 SwiftPM 源码桥；不意味着捕获适配器已完成或原生验收通过。
+系统仍以 macOS 27 为最低基线，不虚构 macOS 27 feature。替代路线
+objc2-screen-capture-kit 重写未获采用，不擅自增加。第三方 Swift 编译/运行库、
+SDK 可用性与上游维护是主要风险；不得引入未经确认的预编译组件。

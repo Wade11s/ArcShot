@@ -1,5 +1,12 @@
 //! Safe macOS adapters for ArcShot.
 
+mod permission;
+
+pub use permission::{
+    PermissionError, mark_permission_guide_seen, open_screen_recording_settings,
+    permission_guide_seen, request_screen_recording, screen_recording_available,
+};
+
 use std::{error::Error, fmt};
 
 use arcshot_core::{MenuBarText, StatusItemIcon};

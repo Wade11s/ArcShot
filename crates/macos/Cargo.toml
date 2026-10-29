@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 arcshot-core.workspace = true
+screencapturekit = { version = "=11.1.1", default-features = false, features = ["macos_15_0"] }
+apple-cf = { version = "=0.11.7", default-features = false, features = ["cg"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -24,6 +26,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSStatusBarButton",
     "NSStatusItem",
     "NSView",
+    "NSWorkspace",
     "objc2-core-foundation",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
@@ -31,6 +34,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSData",
     "NSGeometry",
     "NSString",
+    "NSURL",
+    "NSUserDefaults",
 ] }
 
 [lints]
