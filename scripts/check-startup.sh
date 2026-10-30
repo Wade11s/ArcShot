@@ -4,8 +4,12 @@ set -eu
 cd "$(dirname "$0")/.."
 
 configuration=debug
+expected_identifier=dev.arcshot.app.debug
+expected_name='ArcShot Debug'
 if [ "$#" -eq 1 ] && [ "$1" = "--release" ]; then
     configuration=release
+    expected_identifier=dev.arcshot.app
+    expected_name=ArcShot
 elif [ "$#" -ne 0 ]; then
     printf 'usage: %s [--release]\n' "$0" >&2
     exit 2
@@ -13,6 +17,14 @@ fi
 
 build_output=$(scripts/build-app.sh ${1:-})
 printf '%s\n' "$build_output"
+app_dir="target/bundle/$configuration/ArcShot.app"
+actual_identifier=$(plutil -extract CFBundleIdentifier raw "$app_dir/Contents/Info.plist")
+actual_name=$(plutil -extract CFBundleName raw "$app_dir/Contents/Info.plist")
+if [ "$actual_identifier" != "$expected_identifier" ] || [ "$actual_name" != "$expected_name" ]; then
+    printf 'startup check failed: bundle identity mismatch: %s / %s\n' "$actual_identifier" "$actual_name" >&2
+    exit 1
+fi
+printf 'bundle_identity_smoke=pass configuration=%s identifier=%s name=%s\n' "$configuration" "$actual_identifier" "$actual_name"
 log="target/startup-smoke-$configuration.log"
 "target/bundle/$configuration/ArcShot.app/Contents/MacOS/arcshot" --smoke-test >"$log" 2>&1 &
 pid=$!

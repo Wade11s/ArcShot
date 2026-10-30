@@ -19,6 +19,11 @@ rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "target/$configuration/arcshot" "$app_dir/Contents/MacOS/arcshot"
 cp packaging/Info.plist "$app_dir/Contents/Info.plist"
+if [ "$configuration" = debug ]; then
+    plutil -replace CFBundleIdentifier -string dev.arcshot.app.debug "$app_dir/Contents/Info.plist"
+    plutil -replace CFBundleName -string 'ArcShot Debug' "$app_dir/Contents/Info.plist"
+    plutil -insert CFBundleDisplayName -string 'ArcShot Debug' "$app_dir/Contents/Info.plist"
+fi
 plutil -lint "$app_dir/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$app_dir"
 printf 'app_bundle=%s\n' "$app_dir"

@@ -39,6 +39,10 @@ open target/bundle/release/ArcShot.app
 - 构建期允许从 crates.io 获取上述可信依赖；产品运行期不获取依赖、不联网。
 - bundle 设置 `LSUIElement=true`、`LSMinimumSystemVersion=27.0`，使用本地
   ad-hoc signature，不包含正式签名、公证或安装器。
+- Release 的 bundle ID 为 `dev.arcshot.app`，名称为 ArcShot；Debug 使用独立的
+  `dev.arcshot.app.debug` 与 ArcShot Debug。构建脚本在签名前写入 Debug 元数据，
+  两者的 LaunchServices 解析、TCC 授权与偏好分别归属，避免系统重开时选错构建。
+  同一配置重新编译仍可能改变 ad-hoc CDHash，不能沿用旧签名的权限结论。
 - `.cargo/config.toml` 为 arm64 最终链接加入 `/usr/lib/swift` rpath。
   screencapturekit/apple-* 使用第三方 Swift 源码桥，必须保留该标准系统运行库
   搜索路径。
