@@ -37,12 +37,18 @@ open target/bundle/release/ArcShot.app
   来源和重复包名数量；该检查及验证报告工具使用 Python 3 标准库，其余构建/验证
   脚本使用 POSIX shell。
 - 构建期允许从 crates.io 获取上述可信依赖；产品运行期不获取依赖、不联网。
-- bundle 设置 `LSUIElement=true`、`LSMinimumSystemVersion=27.0`，使用本地
-  ad-hoc signature，不包含正式签名、公证或安装器。
+- bundle 设置 `LSUIElement=true`、`LSMinimumSystemVersion=27.0`，不包含正式签名、
+  公证或安装器。本地测试构建优先使用固定的自签名身份 `ArcShot Dev`
+  （`scripts/create-dev-signing-identity.sh` 一次性创建，私钥存于登录钥匙串并在
+  当前用户域信任 code signing）；其指定需求为
+  `identifier + certificate leaf`，跨重建稳定，因此 TCC 屏幕录制授权可跨构建保留。
+  未创建该身份时回退 ad-hoc；ad-hoc 的指定需求绑定 CDHash，同一配置重新编译也会
+  改变它，不能沿用旧签名的权限结论。该身份仅用于本机测试，不可用于发布或分发，
+  首次签名时系统可能询问钥匙串访问（选“始终允许”）。
 - Release 的 bundle ID 为 `dev.arcshot.app`，名称为 ArcShot；Debug 使用独立的
   `dev.arcshot.app.debug` 与 ArcShot Debug。构建脚本在签名前写入 Debug 元数据，
   两者的 LaunchServices 解析、TCC 授权与偏好分别归属，避免系统重开时选错构建。
-  同一配置重新编译仍可能改变 ad-hoc CDHash，不能沿用旧签名的权限结论。
+  Debug 与 Release 的 TCC 授权互不覆盖，手动验收须每次确认正在运行的那个 bundle。
 - `.cargo/config.toml` 为 arm64 最终链接加入 `/usr/lib/swift` rpath。
   screencapturekit/apple-* 使用第三方 Swift 源码桥，必须保留该标准系统运行库
   搜索路径。
