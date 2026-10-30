@@ -1,6 +1,6 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
-use arcshot_app::{PermissionAction, PermissionNotice};
-use arcshot_core::{CaptureTicket, Hotkey, Selection};
+use arcshot_app::{CaptureKeyAction, PermissionAction, PermissionNotice, capture_key_action};
+use arcshot_core::{CaptureTicket, Hotkey, ScreenGeometry, Selection};
 use gpui::{
     Context, FocusHandle, Render, RenderImage, Window, WindowId, div, img, prelude::*, px, rgb,
     rgba,
@@ -38,10 +38,8 @@ pub(crate) struct CaptureView {
     pub(crate) selection: Option<Selection>,
     pub(crate) busy: bool,
     pub(crate) error: Option<String>,
-    /// Point-to-pixel scale of the frozen screen; never used for view sizing.
-    pub(crate) scale: f64,
-    /// Display-local logical size of the frozen screen.
-    pub(crate) logical_size: [f64; 2],
+    /// Frozen screen geometry; the single source for logical bounds and 2x output.
+    pub(crate) screen: Option<ScreenGeometry>,
     /// View-only rubber band; core owns the committed selection.
     pub(crate) drag: Option<([f64; 2], [f64; 2])>,
     pub(crate) focus: FocusHandle,
@@ -54,11 +52,13 @@ fn pointer(event: &gpui::Point<gpui::Pixels>) -> [f64; 2] {
 
 /// Logical rubber-band bounds in points, rejecting a zero-size drag.
 fn band(a: [f64; 2], b: [f64; 2]) -> Option<(f32, f32, f32, f32)> {
-    let x = a[0].min(b[0]);
-    let y = a[1].min(b[1]);
-    let width = (a[0] - b[0]).abs();
-    let height = (a[1] - b[1]).abs();
-    (width > 0.0 && height > 0.0).then_some((x as f32, y as f32, width as f32, height as f32))
+    let selection = Selection::from_drag(a, b).ok()?;
+    Some((
+        selection.x() as f32,
+        selection.y() as f32,
+        selection.width() as f32,
+        selection.height() as f32,
+    ))
 }
 
 fn region(x: f32, y: f32, width: f32, height: f32) -> gpui::Div {
@@ -71,11 +71,18 @@ fn region(x: f32, y: f32, width: f32, height: f32) -> gpui::Div {
 }
 
 impl CaptureView {
+    fn logical_size(&self) -> [f64; 2] {
+        self.screen
+            .map(|screen| {
+                let [_, _, width, height] = screen.source_rect();
+                [width, height]
+            })
+            .unwrap_or([0.0, 0.0])
+    }
+
     fn clamp(&self, point: [f64; 2]) -> [f64; 2] {
-        [
-            point[0].clamp(0.0, self.logical_size[0]),
-            point[1].clamp(0.0, self.logical_size[1]),
-        ]
+        let [width, height] = self.logical_size();
+        [point[0].clamp(0.0, width), point[1].clamp(0.0, height)]
     }
 }
 
@@ -83,22 +90,26 @@ impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ticket = self.ticket;
         let busy = self.busy;
+        let dragging = self.drag.is_some();
         let frozen = self.image.is_some();
-        let scale = self.scale;
-        let preview = self
-            .drag
-            .and_then(|(start, end)| band(start, end))
-            .or_else(|| {
-                self.selection.and_then(|selection| {
-                    band(
-                        [selection.x(), selection.y()],
-                        [
-                            selection.x() + selection.width(),
-                            selection.y() + selection.height(),
-                        ],
-                    )
-                })
-            });
+        let preview_points = self.drag.or_else(|| {
+            self.selection.map(|selection| {
+                (
+                    [selection.x(), selection.y()],
+                    [
+                        selection.x() + selection.width(),
+                        selection.y() + selection.height(),
+                    ],
+                )
+            })
+        });
+        let preview = preview_points.and_then(|(start, end)| band(start, end));
+        // Label the exact physical crop the shared output conversion would produce.
+        let dimensions = preview_points
+            .and_then(|(start, end)| Selection::from_drag(start, end).ok())
+            .zip(self.screen)
+            .and_then(|(selection, screen)| selection.pixel_rect(screen).ok())
+            .map(|crop| format!("{} × {}", crop.width(), crop.height()));
         let finish_enabled = frozen && self.selection.is_some() && !busy;
         let error = self.error.clone();
         let image = self
@@ -114,19 +125,22 @@ impl Render for CaptureView {
             .track_focus(&self.focus)
             .on_key_down({
                 let queue = Rc::clone(&self.queue);
-                move |event, _, cx| match event.keystroke.key.as_str() {
-                    "escape" => {
-                        queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
-                        cx.stop_propagation();
+                move |event, _, cx| {
+                    let action = capture_key_action(&event.keystroke.key, busy, dragging);
+                    match action {
+                        Some(CaptureKeyAction::Cancel) => {
+                            queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+                            cx.stop_propagation();
+                        }
+                        Some(CaptureKeyAction::Finish) => {
+                            queue.borrow_mut().push(UiCommand::FinishCapture {
+                                ticket,
+                                point: None,
+                            });
+                            cx.stop_propagation();
+                        }
+                        None => {}
                     }
-                    "enter" if !busy => {
-                        queue.borrow_mut().push(UiCommand::FinishCapture {
-                            ticket,
-                            point: None,
-                        });
-                        cx.stop_propagation();
-                    }
-                    _ => {}
                 }
             })
             .on_mouse_down(gpui::MouseButton::Left, {
@@ -193,8 +207,7 @@ impl Render for CaptureView {
         }
 
         if let Some((x, y, width, height)) = preview {
-            let full_width = self.logical_size[0] as f32;
-            let full_height = self.logical_size[1] as f32;
+            let [full_width, full_height] = self.logical_size().map(|value| value as f32);
             // Dim only outside the selection; the region itself stays untouched.
             root = root
                 .child(region(0.0, 0.0, full_width, y).bg(rgba(0x00000099)))
@@ -209,7 +222,7 @@ impl Render for CaptureView {
                         .border_1()
                         .border_color(rgb(0xffffff)),
                 )
-                .child(
+                .children(dimensions.map(|dimensions| {
                     div()
                         .absolute()
                         .left(px(x))
@@ -220,12 +233,8 @@ impl Render for CaptureView {
                         .bg(rgba(0x000000cc))
                         .text_color(rgb(0xffffff))
                         .text_sm()
-                        .child(format!(
-                            "{} × {}",
-                            (f64::from(width) * scale).round() as u64,
-                            (f64::from(height) * scale).round() as u64
-                        )),
-                );
+                        .child(dimensions)
+                }));
         } else if !frozen {
             root = root.child(
                 div()

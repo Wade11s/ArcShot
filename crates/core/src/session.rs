@@ -145,6 +145,8 @@ pub enum OutputFailure {
     Clipboard,
     /// The encode worker could not run or unwound.
     Worker,
+    /// A previous encode job still owns the single slot.
+    Busy,
 }
 impl OutputFailure {
     fn message(self) -> &'static str {
@@ -153,6 +155,7 @@ impl OutputFailure {
             Self::Encode => "合成或 PNG 编码失败，未产生输出，可重试或取消",
             Self::Clipboard => "剪贴板未确认写入 PNG，未报告成功；选区已保留，可重试",
             Self::Worker => "编码工作线程未能完成，未产生输出，可重试",
+            Self::Busy => "上一个合成/编码任务仍在结束，未产生输出，请稍后重试",
         }
     }
 }
@@ -278,10 +281,7 @@ impl CaptureSession {
         let State::Frozen { ticket, document } = &self.state else {
             return false;
         };
-        self.output_mutex
-            && *ticket == job.ticket
-            && document.version() == job.version
-            && document.crop().is_ok_and(|crop| crop == job.crop)
+        self.output_mutex && job_matches(*ticket, document, job)
     }
 
     /// Fences window presentation immediately before a UI side effect.
@@ -373,11 +373,7 @@ impl CaptureSession {
             CaptureAction::FinishAt { ticket, point } => self.finish(ticket, Some(point)),
             CaptureAction::OutputCompleted { job, result } => {
                 let matches_job = match &self.state {
-                    State::Frozen { ticket, document } => {
-                        *ticket == job.ticket
-                            && document.version() == job.version
-                            && document.crop().is_ok_and(|crop| crop == job.crop)
-                    }
+                    State::Frozen { ticket, document } => job_matches(*ticket, document, job),
                     _ => false,
                 };
                 // Stale or duplicated results never publish or end another session.
@@ -509,4 +505,11 @@ impl CaptureSession {
             ],
         }
     }
+}
+
+/// One fence definition shared by publish and completion: ticket, version and crop.
+fn job_matches(ticket: CaptureTicket, document: &Document, job: OutputJob) -> bool {
+    ticket == job.ticket
+        && document.version() == job.version
+        && document.crop().is_ok_and(|crop| crop == job.crop)
 }

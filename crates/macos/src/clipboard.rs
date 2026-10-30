@@ -1,8 +1,15 @@
 //! Safe AppKit clipboard and completion-sound adapters.
-use objc2::AnyThread;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG, NSSound};
 use objc2_foundation::{NSData, NSString};
-use std::{error::Error, fmt};
+use std::{cell::RefCell, error::Error, fmt};
+
+thread_local! {
+    /// Keeps the last completion sound alive for the duration of its playback.
+    static COMPLETION_SOUND: RefCell<Option<objc2::rc::Retained<NSSound>>> = const {
+        RefCell::new(None)
+    };
+}
 
 /// Writes PNG bytes to the general pasteboard and verifies the declared type.
 ///
@@ -13,6 +20,9 @@ use std::{error::Error, fmt};
 /// Returns [`ClipboardError::WriteRejected`] when AppKit refuses the data and
 /// [`ClipboardError::TypeUnavailable`] when PNGf is not exposed afterwards.
 pub fn write_png_to_clipboard(png: &[u8]) -> Result<(), ClipboardError> {
+    if MainThreadMarker::new().is_none() {
+        return Err(ClipboardError::NotMainThread);
+    }
     let data = NSData::with_bytes(png);
     let pasteboard = NSPasteboard::generalPasteboard();
     pasteboard.clearContents();
@@ -21,16 +31,27 @@ pub fn write_png_to_clipboard(png: &[u8]) -> Result<(), ClipboardError> {
     if !pasteboard.setData_forType(Some(&data), png_type) {
         return Err(ClipboardError::WriteRejected);
     }
-    if pasteboard.dataForType(png_type).is_none() {
-        return Err(ClipboardError::TypeUnavailable);
-    }
-    Ok(())
+    pasteboard
+        .dataForType(png_type)
+        .map(|_| ())
+        .ok_or(ClipboardError::TypeUnavailable)
 }
 
 /// Plays one short system completion sound. A failed sound never fails output.
+///
+/// The retained sound is held in a thread-local so AppKit cannot release it
+/// while playback is still starting.
 #[must_use]
 pub fn play_completion_sound() -> bool {
-    NSSound::soundNamed(&NSString::from_str("Tink")).is_some_and(|sound| sound.play())
+    if MainThreadMarker::new().is_none() {
+        return false;
+    }
+    let Some(sound) = NSSound::soundNamed(&NSString::from_str("Tink")) else {
+        return false;
+    };
+    let played = sound.play();
+    COMPLETION_SOUND.with(|slot| *slot.borrow_mut() = Some(sound));
+    played
 }
 
 /// Result of a named-pasteboard PNG roundtrip used by the native smoke test.
@@ -56,30 +77,36 @@ pub fn validate_png_pasteboard(
     expected_width: u32,
     expected_height: u32,
 ) -> Result<ClipboardSmoke, ClipboardError> {
+    if MainThreadMarker::new().is_none() {
+        return Err(ClipboardError::NotMainThread);
+    }
     let pasteboard =
         NSPasteboard::pasteboardWithName(&NSString::from_str("dev.arcshot.clipboard-smoke"));
-    let data = NSData::with_bytes(png);
-    // SAFETY: `NSPasteboardTypePNG` is an immutable AppKit constant.
-    let png_type = unsafe { NSPasteboardTypePNG };
+    let result = (|| {
+        let data = NSData::with_bytes(png);
+        // SAFETY: `NSPasteboardTypePNG` is an immutable AppKit constant.
+        let png_type = unsafe { NSPasteboardTypePNG };
+        pasteboard.clearContents();
+        if !pasteboard.setData_forType(Some(&data), png_type) {
+            return Err(ClipboardError::WriteRejected);
+        }
+        let read_back = pasteboard
+            .dataForType(png_type)
+            .ok_or(ClipboardError::TypeUnavailable)?;
+        if read_back.to_vec() != png {
+            return Err(ClipboardError::Decode);
+        }
+        let bitmap = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &read_back)
+            .ok_or(ClipboardError::Decode)?;
+        let width = u32::try_from(bitmap.pixelsWide()).map_err(|_| ClipboardError::Decode)?;
+        let height = u32::try_from(bitmap.pixelsHigh()).map_err(|_| ClipboardError::Decode)?;
+        if (width, height) != (expected_width, expected_height) {
+            return Err(ClipboardError::Decode);
+        }
+        Ok(ClipboardSmoke { width, height })
+    })();
     pasteboard.clearContents();
-    if !pasteboard.setData_forType(Some(&data), png_type) {
-        return Err(ClipboardError::WriteRejected);
-    }
-    let read_back = pasteboard
-        .dataForType(png_type)
-        .ok_or(ClipboardError::TypeUnavailable)?;
-    if read_back.to_vec() != png {
-        return Err(ClipboardError::Decode);
-    }
-    let bitmap = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &read_back)
-        .ok_or(ClipboardError::Decode)?;
-    let width = u32::try_from(bitmap.pixelsWide()).map_err(|_| ClipboardError::Decode)?;
-    let height = u32::try_from(bitmap.pixelsHigh()).map_err(|_| ClipboardError::Decode)?;
-    pasteboard.clearContents();
-    if (width, height) != (expected_width, expected_height) {
-        return Err(ClipboardError::Decode);
-    }
-    Ok(ClipboardSmoke { width, height })
+    result
 }
 
 /// Native clipboard failures that never count as a successful copy.
@@ -91,6 +118,8 @@ pub enum ClipboardError {
     TypeUnavailable,
     /// The PNG could not be decoded or did not match the composed size.
     Decode,
+    /// AppKit was asked off the main thread, where these calls are unsafe.
+    NotMainThread,
 }
 impl fmt::Display for ClipboardError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -98,6 +127,7 @@ impl fmt::Display for ClipboardError {
             Self::WriteRejected => "clipboard rejected the PNG data",
             Self::TypeUnavailable => "clipboard did not expose the PNG type",
             Self::Decode => "clipboard PNG did not decode as the composed image",
+            Self::NotMainThread => "clipboard must be accessed on the main thread",
         })
     }
 }

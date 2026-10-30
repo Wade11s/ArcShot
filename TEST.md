@@ -117,7 +117,9 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | `crates/core/tests/output.rs` | CORE-SESSION-08～13：零选区不完成、Finish job、双击命中、输出期互斥/取消；APP-EFFECT-12～14：成功结束、失败保留文档、过期版本/迟到结果拒绝 | 剪贴板与编码副作用本身 |
 | `crates/image/tests/compose.rs` | IMAGE-COMPOSE-01～03：物理裁剪/通道/padding、越界拒绝、内存 PNG 解码尺寸/像素/sRGB chunk；IMAGE-LIMIT-04 合成预算 | 原生字体/标注合成、全屏大图压力 |
 | `crates/app/tests/output_tasks.rs` | APP-EFFECT-15～17：注入编码结果、worker panic 可重试、单在途 | 真实 24M 导出耗时与内存峰值 |
-| `scripts/check-startup.sh` | MAC-COLOR-OUTPUT-22-01：真实进程内编码 PNG、私有命名 pasteboard PNGf 写入/回读、AppKit 内存解码尺寸 | 用户剪贴板、非 ArcShot 应用粘贴、颜色真值 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-01～03：拖动中忽略 Esc/Enter、输出中忽略 Enter 但 Esc 可取消 | 文字编辑/工具激活时的完整 I-09 优先级 |
+| `scripts/check-startup.sh` | MAC-COLOR-OUTPUT-22-01：真实进程内编码 PNG、私有命名 pasteboard PNGf 写入/回读、AppKit 内存解码尺寸；脚本同时断言该行 | 用户剪贴板、非 ArcShot 应用粘贴、颜色真值 |
+| `crates/macos/tests/native_preflight.rs` | MAC-COLOR-OUTPUT-22-02：worker 线程访问剪贴板/音效时在 AppKit 副作用前拒绝 | 主线程真实写入与播放已由启动冒烟/实机覆盖 |
 
 实机步骤与预算口径见 `docs/output.md`；实测记录见
 `docs/validation/22-region-output.md`。这不是 MAC-REGION 其余必测项的替代。

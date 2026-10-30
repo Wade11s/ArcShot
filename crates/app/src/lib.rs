@@ -9,3 +9,5 @@ mod hotkey_flow;
 pub use hotkey_flow::{HotkeyAction, HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome};
 mod output_tasks;
 pub use output_tasks::{OutputSubmitError, OutputTasks};
+mod key_policy;
+pub use key_policy::{CaptureKeyAction, capture_key_action};

@@ -157,14 +157,12 @@ fn app_effect_14_changed_document_or_cancelled_session_rejects_stale_output() {
     let (mut session, ticket) = frozen();
     select(&mut session, ticket);
     let stale = finish(&mut session, ticket);
-    assert!(
-        session
-            .dispatch(CaptureAction::OutputCompleted {
-                job: stale,
-                result: Err(OutputFailure::Encode)
-            })
-            .len()
-            == 1
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job: stale,
+            result: Err(OutputFailure::Encode)
+        }),
+        vec![CaptureEffect::ReportOutputFailure(OutputFailure::Encode)]
     );
 
     // A newer selection bumps the version; the old job may not publish.

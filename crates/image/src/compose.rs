@@ -4,7 +4,11 @@
 //! The input frame is immutable and never modified; no intermediate image is
 //! written to disk.
 use arcshot_core::{CapturedFrame, MAX_EDGE, MAX_PIXELS, MAX_PNG_BYTES, PixelRect};
-use std::{error::Error, fmt};
+use std::{
+    error::Error,
+    fmt,
+    io::{self, Write},
+};
 
 /// A packed, opaque SDR sRGB RGBA surface produced from the immutable base.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,9 +97,9 @@ pub fn compose_crop(frame: &CapturedFrame, crop: PixelRect) -> Result<ComposedIm
 /// Returns [`ComposeError::Encode`] if PNG encoding fails and
 /// [`ComposeError::ResourceLimit`] when the PNG exceeds V1's byte budget.
 pub fn encode_png(image: &ComposedImage) -> Result<Vec<u8>, ComposeError> {
-    let mut bytes = Vec::new();
+    let mut budget = BudgetWriter::new(MAX_PNG_BYTES);
     {
-        let mut encoder = png::Encoder::new(&mut bytes, image.width, image.height);
+        let mut encoder = png::Encoder::new(&mut budget, image.width, image.height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
@@ -105,10 +109,39 @@ pub fn encode_png(image: &ComposedImage) -> Result<Vec<u8>, ComposeError> {
             .map_err(|_| ComposeError::Encode)?;
         writer.finish().map_err(|_| ComposeError::Encode)?;
     }
-    if bytes.len() > MAX_PNG_BYTES {
+    if budget.exceeded {
         return Err(ComposeError::ResourceLimit);
     }
-    Ok(bytes)
+    Ok(budget.bytes)
+}
+
+/// A writer that refuses a write before the encoded PNG can exceed its budget.
+struct BudgetWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+impl BudgetWriter {
+    const fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+impl Write for BudgetWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(buffer.len()) > self.limit {
+            self.exceeded = true;
+            return Err(io::Error::other("PNG output budget exceeded"));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn checked_surface(width: u32, height: u32) -> Result<usize, ComposeError> {

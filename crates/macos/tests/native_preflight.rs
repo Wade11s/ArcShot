@@ -1,8 +1,9 @@
 //! Native preflight only. These tests never request permission or capture pixels.
 
 use arcshot_macos::{
-    CaptureError, DisplaySnapshot, application_active, builtin_display, capture_builtin,
-    owned_visible_window_ids,
+    CaptureError, ClipboardError, DisplaySnapshot, application_active, builtin_display,
+    capture_builtin, owned_visible_window_ids, play_completion_sound, validate_png_pasteboard,
+    write_png_to_clipboard,
 };
 
 #[test]
@@ -61,4 +62,20 @@ fn owned_window_enumeration_rejects_worker_thread() {
             .join()
             .expect("worker should not panic")
     );
+}
+
+#[test]
+fn clipboard_and_sound_reject_worker_threads_before_appkit_side_effects() {
+    let result = std::thread::spawn(|| {
+        (
+            write_png_to_clipboard(b"not read"),
+            validate_png_pasteboard(b"not read", 1, 1),
+            play_completion_sound(),
+        )
+    })
+    .join()
+    .expect("worker should not panic");
+    assert!(matches!(result.0, Err(ClipboardError::NotMainThread)));
+    assert!(matches!(result.1, Err(ClipboardError::NotMainThread)));
+    assert!(!result.2);
 }

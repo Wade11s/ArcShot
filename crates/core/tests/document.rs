@@ -112,7 +112,7 @@ fn image_limit_03_physical_rect_rejects_edge_and_pixel_budget_before_allocation(
         Err(DocumentError::Dimensions)
     );
     assert!(PixelRect::try_new(0, 0, 16_384, 1).is_ok());
-    // 16,384 x 1,466 exceeds 24,000,000 physical pixels.
+    // 16,384 x 1,465 exceeds 24,000,000 physical pixels.
     let over_budget = (MAX_PIXELS / 16_384 + 1) as u32;
     assert_eq!(
         PixelRect::try_new(0, 0, 16_384, over_budget),

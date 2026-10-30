@@ -498,9 +498,8 @@ impl Coordinator {
                         effects.extend(self.session.dispatch(CaptureAction::OutputCompleted {
                             job,
                             result: Err(match error {
-                                OutputSubmitError::Busy | OutputSubmitError::WorkerUnavailable => {
-                                    OutputFailure::Worker
-                                }
+                                OutputSubmitError::Busy => OutputFailure::Busy,
+                                OutputSubmitError::WorkerUnavailable => OutputFailure::Worker,
                             }),
                         }));
                     }
@@ -737,8 +736,7 @@ impl Coordinator {
                     selection: None,
                     busy: false,
                     error: None,
-                    scale: 2.0,
-                    logical_size: [0.0, 0.0],
+                    screen: None,
                     drag: None,
                     focus: cx.focus_handle(),
                     queue,
@@ -797,8 +795,7 @@ impl Coordinator {
                     selection: None,
                     busy: false,
                     error: None,
-                    scale: screen.scale(),
-                    logical_size: [w, h],
+                    screen: Some(screen),
                     drag: None,
                     focus: cx.focus_handle(),
                     queue,
