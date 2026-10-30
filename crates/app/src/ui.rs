@@ -285,7 +285,15 @@ impl Render for HotkeyView {
                         }
                     })
                     .child(match (recording, candidate) {
-                        (true, _) => "按下新组合 · Esc 取消录入".to_owned(),
+                        (true, Some(candidate)) => format!(
+                            "{candidate}{}",
+                            if candidate.is_valid() {
+                                " · Esc 取消录入"
+                            } else {
+                                "（不合法）· Esc 取消录入"
+                            }
+                        ),
+                        (true, None) => "按下新组合 · Esc 取消录入".to_owned(),
                         (false, Some(candidate)) => format!(
                             "{candidate}{}",
                             if candidate.is_valid() { "" } else { "（不合法）" }

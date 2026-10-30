@@ -199,6 +199,8 @@ pub struct GlobalHotkeys {
     presses: Rc<RefCell<u32>>,
     active: Option<(Hotkey, EventHotKeyRef)>,
     suspended: Option<Hotkey>,
+    /// References whose unregistration failed; retried on drop.
+    retired: Vec<EventHotKeyRef>,
 }
 
 impl GlobalHotkeys {
@@ -233,6 +235,7 @@ impl GlobalHotkeys {
             presses,
             active: None,
             suspended: None,
+            retired: Vec::new(),
         })
     }
 
@@ -247,8 +250,12 @@ impl GlobalHotkeys {
         let reference = self.register(hotkey)?;
         if let Some((_, previous)) = self.active.take() {
             // Best effort: the new registration is already active; a failed
-            // unregister only leaves the replaced combination also firing.
-            let _ = self.unregister(previous);
+            // unregister only leaves the replaced combination also firing,
+            // and the reference is retried on drop.
+            if let Err(error) = self.unregister(previous) {
+                log::error!("hotkey_replace_unregister_failure={error}");
+                self.retired.push(previous);
+            }
         }
         self.active = Some((hotkey, reference));
         self.suspended = None;
@@ -358,8 +365,17 @@ impl Drop for GlobalHotkeys {
             if let Some((_, reference)) = self.active.take() {
                 let _ = UnregisterEventHotKey(reference);
             }
+            for reference in self.retired.drain(..) {
+                let _ = UnregisterEventHotKey(reference);
+            }
             if !self.handler.is_null() {
-                let _ = RemoveEventHandler(self.handler);
+                let status = RemoveEventHandler(self.handler);
+                if status != NO_ERR {
+                    // The handler may still be installed; leak the counter it
+                    // borrows instead of freeing memory it could write to.
+                    log::error!("{}", HotkeyError::Remove(status));
+                    std::mem::forget(Rc::clone(&self.presses));
+                }
             }
         }
     }

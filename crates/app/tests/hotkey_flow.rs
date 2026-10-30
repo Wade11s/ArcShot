@@ -117,3 +117,34 @@ fn app_effect_10_escape_ends_recording_and_resumes_without_saving() {
     // Saving the unchanged combination does nothing.
     assert_eq!(flow.dispatch(A::Save(Hotkey::default())), vec![]);
 }
+
+#[test]
+fn app_effect_11_saving_while_recording_replaces_suspension_without_restore() {
+    let mut flow = HotkeyFlow::new(Hotkey::default());
+    flow.dispatch(A::Launch);
+    flow.dispatch(A::RegisterResult(O::Applied));
+    flow.dispatch(A::RecordingStarted);
+    flow.dispatch(A::SuspendResult(O::Applied));
+    // The old registration stays suspended; a successful save must not also
+    // resume it, and a failed save must restore it exactly once.
+    assert_eq!(
+        flow.dispatch(A::Save(alternate())),
+        vec![E::Register(alternate())]
+    );
+    assert_eq!(
+        flow.dispatch(A::RegisterResult(O::Applied)),
+        vec![E::Store(alternate())]
+    );
+    assert_eq!(flow.config(), alternate());
+    assert_eq!(flow.registered(), Some(alternate()));
+    flow.dispatch(A::RecordingStarted);
+    flow.dispatch(A::SuspendResult(O::Applied));
+    flow.dispatch(A::Save(Hotkey::new('d', true, false, false, false)));
+    assert_eq!(
+        flow.dispatch(A::RegisterResult(O::Failed)),
+        vec![E::Notice(N::SaveRejected), E::Resume]
+    );
+    assert_eq!(flow.dispatch(A::ResumeResult(O::Applied)), vec![]);
+    assert_eq!(flow.registered(), Some(alternate()));
+    assert_eq!(flow.config(), alternate());
+}

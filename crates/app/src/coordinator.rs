@@ -136,9 +136,9 @@ impl Coordinator {
                         .hotkey_settings
                         .is_some_and(|settings| settings.window_id() == window_id) =>
                 {
-                    // A save click always ends recording first, restoring or
-                    // replacing the registration through the flow below.
-                    self.hotkey(HotkeyAction::RecordingEnded, cx);
+                    // Saving while recording keeps the old registration
+                    // suspended: the flow registers the candidate first and
+                    // restores the suspended value if registration fails.
                     self.hotkey(HotkeyAction::Save(candidate), cx);
                 }
                 UiCommand::HotkeyRecording(window_id, true)
@@ -257,7 +257,11 @@ impl Coordinator {
                 HotkeyEffect::Notice(notice) => self.hotkey_notice(notice),
             }
         }
-        self.refresh_hotkey_view(cx, !matches!(action, HotkeyAction::RecordingStarted));
+        // A failed suspension or a rejected save must leave recording mode;
+        // otherwise the view would keep consuming keys with no hotkey suspended.
+        let exit_recording =
+            !matches!(action, HotkeyAction::RecordingStarted) || self.hotkey_view_error.is_some();
+        self.refresh_hotkey_view(cx, exit_recording);
     }
 
     fn with_hotkeys(

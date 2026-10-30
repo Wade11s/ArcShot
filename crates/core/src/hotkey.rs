@@ -58,6 +58,10 @@ impl Hotkey {
     /// A legal combination contains at least one Command / Control / Option
     /// modifier and one plain key; Shift may be added. Shift plus a plain key
     /// alone, or no modifier at all, is not legal.
+    ///
+    /// This predicate is platform-neutral: whether the key character maps to
+    /// a real virtual keycode is decided by the native adapter, whose refusal
+    /// keeps the old configuration instead of saving it.
     #[must_use]
     pub const fn is_valid(self) -> bool {
         (self.command || self.control || self.option) && !self.key.is_control()
@@ -66,23 +70,12 @@ impl Hotkey {
     /// The canonical persisted representation, e.g. `command+shift+x`.
     #[must_use]
     pub fn to_storage_string(self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        if self.command {
-            parts.push("command".to_owned());
-        }
-        if self.control {
-            parts.push("control".to_owned());
-        }
-        if self.option {
-            parts.push("option".to_owned());
-        }
-        if self.shift {
-            parts.push("shift".to_owned());
-        }
-        parts.push(match self.key {
-            ' ' => "space".to_owned(),
-            key => key.to_lowercase().next().unwrap_or(key).to_string(),
-        });
+        let mut parts: Vec<String> = MODIFIERS
+            .iter()
+            .filter(|(is_set, _, _)| is_set(&self))
+            .map(|(_, token, _)| (*token).to_owned())
+            .collect();
+        parts.push(storage_key(self.key));
         parts.join("+")
     }
 
@@ -125,19 +118,31 @@ impl Default for Hotkey {
     }
 }
 
+/// One modifier row shared by the display and persistence encodings.
+type ModifierRow<'a> = (fn(&Hotkey) -> bool, &'a str, char);
+
+/// Modifier rows in the canonical order used by both encodings.
+const MODIFIERS: [ModifierRow; 4] = [
+    (|hotkey| hotkey.command, "command", '⌘'),
+    (|hotkey| hotkey.control, "control", '⌃'),
+    (|hotkey| hotkey.option, "option", '⌥'),
+    (|hotkey| hotkey.shift, "shift", '⇧'),
+];
+
+/// The storage token for the plain key.
+fn storage_key(key: char) -> String {
+    match key {
+        ' ' => "space".to_owned(),
+        key => key.to_lowercase().next().unwrap_or(key).to_string(),
+    }
+}
+
 impl fmt::Display for Hotkey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.command {
-            formatter.write_str("⌘")?;
-        }
-        if self.control {
-            formatter.write_str("⌃")?;
-        }
-        if self.option {
-            formatter.write_str("⌥")?;
-        }
-        if self.shift {
-            formatter.write_str("⇧")?;
+        for (is_set, _, glyph) in MODIFIERS {
+            if is_set(self) {
+                formatter.write_str(glyph.encode_utf8(&mut [0; 4]))?;
+            }
         }
         match self.key {
             ' ' => formatter.write_str("空格"),
