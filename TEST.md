@@ -56,8 +56,9 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 
 ## 3. Rust 自动化接缝（随功能落地）
 
-下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；具体稳定测试见下方文件。
-其他选区、编辑、滚动与输出功能未实现，状态仍为 **Not tested**。
+下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；#22 已实现拖拽选区、Finish/双击/完成入口、
+2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏。标注编辑、选区移动/调整/重选、
+显式保存、滚动截图与偏好设置仍未实现，状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -103,6 +104,25 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | `crates/app/src/main.rs`（`--smoke-test`） | MAC-HOTKEY-21-01：默认 ⌘⇧X 注册、suspend、resume 与 Drop 清理 | 事件投递、冲突、用户按键 |
 
 热键实测记录见 `docs/validation/21-hotkey.md`。这不是 MAC-START 其余必测项的替代。
+
+### #22 的稳定自动化入口
+
+区域选择、Finish 与复制只覆盖已确认接缝：core 语义/坐标、固定图像、app 的
+在途编码边界与真实 AppKit PNGf 冒烟。真实鼠标拖拽、系统剪贴板粘贴、音效与
+原生失败注入属于 MAC-REGION / MAC-COLOR-OUTPUT / MAC-RECOVERY，仍为用户参与项。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/document.rs` | CORE-COORD-03～07：逻辑拖动归一化、2x 单次换算、零尺寸/畸形/越界；CORE-DOCUMENT-01 版本；IMAGE-LIMIT-03 物理边/像素上限 | 真实指针事件、原生显示缩放 |
+| `crates/core/tests/output.rs` | CORE-SESSION-08～13：零选区不完成、Finish job、双击命中、输出期互斥/取消；APP-EFFECT-12～14：成功结束、失败保留文档、过期版本/迟到结果拒绝 | 剪贴板与编码副作用本身 |
+| `crates/image/tests/compose.rs` | IMAGE-COMPOSE-01～03：物理裁剪/通道/padding、越界拒绝、内存 PNG 解码尺寸/像素/sRGB chunk；IMAGE-LIMIT-04 合成预算 | 原生字体/标注合成、全屏大图压力 |
+| `crates/app/tests/output_tasks.rs` | APP-EFFECT-15～17：注入编码结果、worker panic 可重试、单在途 | 真实 24M 导出耗时与内存峰值 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-01～03：拖动中忽略 Esc/Enter、输出中忽略 Enter 但 Esc 可取消 | 文字编辑/工具激活时的完整 I-09 优先级 |
+| `scripts/check-startup.sh` | MAC-COLOR-OUTPUT-22-01：真实进程内编码 PNG、私有命名 pasteboard PNGf 写入/回读、AppKit 内存解码尺寸；脚本同时断言该行 | 用户剪贴板、非 ArcShot 应用粘贴、颜色真值 |
+| `crates/macos/tests/native_preflight.rs` | MAC-COLOR-OUTPUT-22-02：worker 线程访问剪贴板/音效时在 AppKit 副作用前拒绝 | 主线程真实写入与播放已由启动冒烟/实机覆盖 |
+
+实机步骤与预算口径见 `docs/output.md`；实测记录见
+`docs/validation/22-region-output.md`。这不是 MAC-REGION 其余必测项的替代。
 
 实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
 `docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
