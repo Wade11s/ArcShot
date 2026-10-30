@@ -1,11 +1,11 @@
 //! Connects the authoritative session to safe native operations and GPUI windows.
 use crate::{
     MenuBarGlobal,
-    ui::{CaptureView, NoticeView, UiCommand, UiQueue},
+    ui::{CaptureView, HotkeyView, NoticeView, UiCommand, UiQueue},
 };
 use arcshot_app::{
-    CaptureSubmitError, CaptureTasks, GuideHistory, PermissionAction, PermissionEffect,
-    PermissionFlow,
+    CaptureSubmitError, CaptureTasks, GuideHistory, HotkeyAction, HotkeyEffect, HotkeyFlow,
+    HotkeyNotice, HotkeyOutcome, PermissionAction, PermissionEffect, PermissionFlow,
 };
 use arcshot_core::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
@@ -33,6 +33,11 @@ struct Coordinator {
     session: CaptureSession,
     tasks: CaptureTasks,
     permissions: PermissionFlow,
+    hotkeys: Option<native::GlobalHotkeys>,
+    hotkey_flow: HotkeyFlow,
+    hotkey_settings: Option<WindowHandle<HotkeyView>>,
+    hotkey_view_error: Option<String>,
+    hotkey_error: Option<String>,
     queue: UiQueue,
     overlay: Option<WindowHandle<CaptureView>>,
     notice: Option<WindowHandle<NoticeView>>,
@@ -43,6 +48,8 @@ struct Coordinator {
     visiting_settings: bool,
 }
 pub(crate) fn launch(cx: &mut App) {
+    let hotkeys = native::GlobalHotkeys::install().ok();
+    let hotkey_flow = HotkeyFlow::new(native::hotkey_settings_load());
     let coordinator = cx.new(|_| Coordinator {
         session: CaptureSession::default(),
         tasks: CaptureTasks::default(),
@@ -51,6 +58,11 @@ pub(crate) fn launch(cx: &mut App) {
         } else {
             GuideHistory::Unseen
         }),
+        hotkeys,
+        hotkey_flow,
+        hotkey_settings: None,
+        hotkey_view_error: None,
+        hotkey_error: None,
         queue: Rc::new(RefCell::new(Vec::new())),
         overlay: None,
         notice: None,
@@ -61,7 +73,8 @@ pub(crate) fn launch(cx: &mut App) {
         visiting_settings: false,
     });
     coordinator.update(cx, |state, cx| {
-        state.permission(PermissionAction::Launch, cx)
+        state.permission(PermissionAction::Launch, cx);
+        state.hotkey(HotkeyAction::Launch, cx);
     });
     // The foreground task owns the coordinator; workers never own GPUI or AppKit state.
     cx.spawn(async move |cx| {
@@ -87,17 +100,22 @@ impl Coordinator {
         let commands = cx.global_mut::<MenuBarGlobal>().0.drain_commands();
         for command in commands {
             match command {
-                MenuCommand::StartCapture => {
-                    self.permission(PermissionAction::Cancel, cx);
-                    self.started = Some(Instant::now());
-                    self.action(CaptureAction::Start, cx);
-                }
+                MenuCommand::StartCapture => self.start_capture(cx),
+                MenuCommand::HotkeySettings => self.open_hotkey_settings(cx),
                 MenuCommand::ScreenRecordingPermissions if !self.busy() => {
                     self.action(CaptureAction::Cancel, cx);
                     self.permission(PermissionAction::Check, cx);
                 }
                 _ => {}
             }
+        }
+        // The global hotkey enters the same Capture Session as the menu command.
+        if self
+            .hotkeys
+            .as_ref()
+            .is_some_and(native::GlobalHotkeys::take_pressed)
+        {
+            self.start_capture(cx);
         }
         let queued = std::mem::take(&mut *self.queue.borrow_mut());
         for command in queued {
@@ -113,8 +131,42 @@ impl Coordinator {
                 {
                     self.permission(action, cx)
                 }
+                UiCommand::HotkeySave(window_id, candidate)
+                    if self
+                        .hotkey_settings
+                        .is_some_and(|settings| settings.window_id() == window_id) =>
+                {
+                    // A save click always ends recording first, restoring or
+                    // replacing the registration through the flow below.
+                    self.hotkey(HotkeyAction::RecordingEnded, cx);
+                    self.hotkey(HotkeyAction::Save(candidate), cx);
+                }
+                UiCommand::HotkeyRecording(window_id, true)
+                    if self
+                        .hotkey_settings
+                        .is_some_and(|settings| settings.window_id() == window_id) =>
+                {
+                    self.hotkey(HotkeyAction::RecordingStarted, cx);
+                }
+                UiCommand::HotkeyRecording(window_id, false)
+                | UiCommand::HotkeySettingsClosed(window_id)
+                    if self
+                        .hotkey_settings
+                        .is_some_and(|settings| settings.window_id() == window_id) =>
+                {
+                    if matches!(command, UiCommand::HotkeySettingsClosed(_)) {
+                        self.close_hotkey_settings(cx);
+                    }
+                    self.hotkey(HotkeyAction::RecordingEnded, cx);
+                    self.hotkey(HotkeyAction::SettingsClosed, cx);
+                }
                 _ => {}
             }
+        }
+        if let Some(error) = self.hotkey_error.take_if(|_| {
+            self.notice.is_none() && self.overlay.is_none() && self.hotkey_settings.is_none()
+        }) {
+            self.show_error(error, cx);
         }
         if self.visiting_settings && !self.busy() {
             if !native::application_active() {
@@ -156,6 +208,172 @@ impl Coordinator {
             {
                 self.action(CaptureAction::DisplayInvalidated, cx);
             }
+        }
+    }
+
+    /// The shared entry for the menu command and the global hotkey.
+    fn start_capture(&mut self, cx: &mut Context<Self>) {
+        self.permission(PermissionAction::Cancel, cx);
+        self.started = Some(Instant::now());
+        self.action(CaptureAction::Start, cx);
+    }
+
+    /// Drives the hotkey policy, executing its native and persistence effects.
+    fn hotkey(&mut self, action: HotkeyAction, cx: &mut Context<Self>) {
+        let mut effects: VecDeque<_> = self.hotkey_flow.dispatch(action).into();
+        while let Some(effect) = effects.pop_front() {
+            match effect {
+                HotkeyEffect::Register(value) => {
+                    let outcome = self
+                        .with_hotkeys(|hotkeys| hotkeys.set_active(value))
+                        .map(|()| HotkeyOutcome::Applied)
+                        .unwrap_or(HotkeyOutcome::Failed);
+                    effects.extend(
+                        self.hotkey_flow
+                            .dispatch(HotkeyAction::RegisterResult(outcome)),
+                    );
+                }
+                HotkeyEffect::Suspend => {
+                    let outcome = self
+                        .with_hotkeys(native::GlobalHotkeys::suspend)
+                        .map(|()| HotkeyOutcome::Applied)
+                        .unwrap_or(HotkeyOutcome::Failed);
+                    effects.extend(
+                        self.hotkey_flow
+                            .dispatch(HotkeyAction::SuspendResult(outcome)),
+                    );
+                }
+                HotkeyEffect::Resume => {
+                    let outcome = self
+                        .with_hotkeys(native::GlobalHotkeys::resume)
+                        .map(|()| HotkeyOutcome::Applied)
+                        .unwrap_or(HotkeyOutcome::Failed);
+                    effects.extend(
+                        self.hotkey_flow
+                            .dispatch(HotkeyAction::ResumeResult(outcome)),
+                    );
+                }
+                HotkeyEffect::Store(value) => native::hotkey_settings_store(value),
+                HotkeyEffect::Notice(notice) => self.hotkey_notice(notice),
+            }
+        }
+        self.refresh_hotkey_view(cx, !matches!(action, HotkeyAction::RecordingStarted));
+    }
+
+    fn with_hotkeys(
+        &mut self,
+        operation: impl FnOnce(&mut native::GlobalHotkeys) -> Result<(), native::HotkeyError>,
+    ) -> Option<()> {
+        let hotkeys = self.hotkeys.as_mut()?;
+        match operation(hotkeys) {
+            Ok(()) => Some(()),
+            Err(error) => {
+                log::error!("hotkey_operation_failure={error}");
+                None
+            }
+        }
+    }
+
+    fn hotkey_notice(&mut self, notice: HotkeyNotice) {
+        let message = match notice {
+            HotkeyNotice::StartupRegistrationFailed => format!(
+                "全局快捷键 {} 注册失败，当前未生效。仍可从菜单栏选择“开始截图”，或打开“截图快捷键…”重新设置。",
+                self.hotkey_flow.config()
+            ),
+            HotkeyNotice::SaveRejected => format!(
+                "新组合注册失败，已保留 {}；可更换组合后重试。",
+                self.hotkey_flow.config()
+            ),
+            HotkeyNotice::RestoreFailed => format!(
+                "快捷键 {} 暂时无法恢复注册，当前未生效；可重新打开“截图快捷键…”重试，或从菜单栏开始截图。",
+                self.hotkey_flow.config()
+            ),
+            HotkeyNotice::SuspendFailed => {
+                "快捷键暂挂失败，已退出录入；可重新点击录入区域。".to_owned()
+            }
+        };
+        // In-window notices stay in the settings window; the others surface
+        // through the shared error notice once windows permit it.
+        if matches!(
+            notice,
+            HotkeyNotice::SaveRejected | HotkeyNotice::SuspendFailed
+        ) && self.hotkey_settings.is_some()
+        {
+            self.hotkey_view_error = Some(message);
+        } else {
+            self.hotkey_error = Some(message);
+        }
+    }
+
+    fn refresh_hotkey_view(&mut self, cx: &mut Context<Self>, reset_recording: bool) {
+        let Some(settings) = self.hotkey_settings else {
+            return;
+        };
+        let current = self.hotkey_flow.config();
+        let active = self.hotkey_flow.registered() == Some(current);
+        let error = self.hotkey_view_error.take();
+        let _ = settings.update(cx, |view, _, cx| {
+            view.current = current;
+            view.active = active;
+            view.error = error;
+            if reset_recording {
+                view.recording = false;
+            }
+            cx.notify();
+        });
+    }
+
+    fn open_hotkey_settings(&mut self, cx: &mut Context<Self>) {
+        if self.hotkey_settings.is_some() {
+            return;
+        }
+        let current = self.hotkey_flow.config();
+        let active = self.hotkey_flow.registered() == Some(current);
+        let queue = Rc::clone(&self.queue);
+        let bounds = WindowBounds::centered(size(px(480.0), px(330.0)), cx);
+        let result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(bounds),
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let close_queue = Rc::clone(&queue);
+                let window_id = window.window_handle().window_id();
+                window.on_window_should_close(cx, move |_, _| {
+                    close_queue
+                        .borrow_mut()
+                        .push(UiCommand::HotkeySettingsClosed(window_id));
+                    true
+                });
+                let entity = cx.new(|cx| HotkeyView {
+                    current,
+                    active,
+                    candidate: None,
+                    recording: false,
+                    error: None,
+                    focus: cx.focus_handle(),
+                    queue,
+                });
+                entity.update(cx, |view, _| window.focus(&view.focus));
+                entity
+            },
+        );
+        match result {
+            Ok(handle) => {
+                self.hotkey_settings = Some(handle);
+                cx.activate(true);
+            }
+            Err(error) => {
+                self.hotkey_error = Some(format!("无法打开截图快捷键设置窗口：{error}"));
+            }
+        }
+    }
+
+    fn close_hotkey_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.hotkey_settings.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
 

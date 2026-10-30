@@ -1,13 +1,16 @@
 //! Safe macOS adapters for ArcShot.
 
 mod capture;
+mod hotkey;
 mod permission;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
     owned_visible_window_ids,
 };
-
+pub use hotkey::{
+    GlobalHotkeys, HotkeyError, hotkey_settings_load, hotkey_settings_store, virtual_keycode,
+};
 pub use permission::{
     PermissionError, mark_permission_guide_seen, open_screen_recording_settings,
     permission_guide_seen, request_screen_recording, screen_recording_available,
@@ -39,6 +42,8 @@ pub fn application_active() -> bool {
 pub enum MenuCommand {
     /// Start a capture session.
     StartCapture,
+    /// Open the capture hotkey settings window.
+    HotkeySettings,
     /// Show the Screen Recording permission flow.
     ScreenRecordingPermissions,
 }
@@ -57,6 +62,11 @@ define_class!(
             self.ivars().borrow_mut().push(MenuCommand::StartCapture);
         }
 
+        // SAFETY: AppKit action methods accept a single sender argument.
+        #[unsafe(method(hotkeySettings:))]
+        fn hotkey_settings(&self, _sender: &NSObject) {
+            self.ivars().borrow_mut().push(MenuCommand::HotkeySettings);
+        }
         // SAFETY: AppKit action methods accept a single sender argument.
         #[unsafe(method(screenRecordingPermissions:))]
         fn permissions(&self, _sender: &NSObject) {
@@ -128,10 +138,12 @@ impl MenuBar {
         let command_target = CommandTarget::new(marker);
         for (title, action) in [
             ("开始截图", sel!(startCapture:)),
+            ("截图快捷键…", sel!(hotkeySettings:)),
             ("屏幕录制权限…", sel!(screenRecordingPermissions:)),
         ] {
-            // SAFETY: Both selectors are implemented by CommandTarget with the
-            // AppKit action signature. MenuBar retains the target until menu removal.
+            // SAFETY: All three selectors are implemented by CommandTarget
+            // with the AppKit action signature. MenuBar retains the target
+            // until menu removal.
             let item = unsafe {
                 let item = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(marker),
@@ -217,7 +229,7 @@ impl MenuBar {
         Ok(())
     }
 
-    /// Exercises both actual capture menu actions without starting a capture.
+    /// Exercises all three actual menu commands without starting a capture.
     ///
     /// The startup smoke process has no coordinator consuming commands. This checks
     /// AppKit target/action delivery and command ordering, not permissions or SCK.
@@ -236,7 +248,8 @@ impl MenuBar {
         let application = NSApplication::sharedApplication(self.marker);
         for (index, expected) in [
             (0, sel!(startCapture:)),
-            (1, sel!(screenRecordingPermissions:)),
+            (1, sel!(hotkeySettings:)),
+            (2, sel!(screenRecordingPermissions:)),
         ] {
             let item = menu
                 .itemAtIndex(index)
@@ -254,6 +267,7 @@ impl MenuBar {
         if self.drain_commands()
             != [
                 MenuCommand::StartCapture,
+                MenuCommand::HotkeySettings,
                 MenuCommand::ScreenRecordingPermissions,
             ]
         {

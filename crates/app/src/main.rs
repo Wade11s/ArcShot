@@ -77,7 +77,16 @@ fn run_app(mode: RunMode) -> Result<()> {
                         "status-item-only smoke must not expose a capture window"
                     );
                     println!("capture_window_exclusion_smoke=pass visible_owned_windows=0 no_native_capture=true");
-                    println!("capture_menu_smoke=pass queued_commands=2 no_native_capture=true");
+                    println!("capture_menu_smoke=pass queued_commands=3 no_native_capture=true");
+                    // Native hotkey registration, suspension and cleanup; no
+                    // key event is synthesized, so no session can start.
+                    let mut hotkeys = arcshot_macos::GlobalHotkeys::install()?;
+                    let default = arcshot_core::Hotkey::default();
+                    hotkeys.set_active(default)?;
+                    hotkeys.suspend()?;
+                    hotkeys.resume()?;
+                    drop(hotkeys);
+                    println!("hotkey_registration_smoke=pass default={default} suspend_resume_cleanup=clean");
                     println!(
                         "startup_smoke=pass activation_policy=Accessory quit_action=terminate:"
                     );
