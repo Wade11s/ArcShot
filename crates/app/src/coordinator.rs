@@ -105,7 +105,14 @@ impl Coordinator {
                 UiCommand::CancelCapture(ticket) => {
                     self.action(CaptureAction::CancelAttempt(ticket), cx)
                 }
-                UiCommand::Permission(action) if !self.busy() => self.permission(action, cx),
+                UiCommand::Permission(window_id, action)
+                    if !self.busy()
+                        && self
+                            .notice
+                            .is_some_and(|notice| notice.window_id() == window_id) =>
+                {
+                    self.permission(action, cx)
+                }
                 _ => {}
             }
         }
@@ -211,11 +218,13 @@ impl Coordinator {
     fn submit(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
         // All own visible windows are fixed before submission. No other UI is created
         // until the result is resolved, and the status item cannot reopen a native menu.
+        cx.global_mut::<MenuBarGlobal>().0.hide_for_capture();
         let prepared = native::builtin_display()
             .and_then(|display| native::owned_visible_window_ids().map(|ids| (display, ids)));
         let (display, ids) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
+                cx.global_mut::<MenuBarGlobal>().0.restore_after_capture();
                 log::error!("capture_prepare_failure={error}");
                 let failure = classify_native_failure(&error);
                 self.action(
@@ -228,7 +237,6 @@ impl Coordinator {
                 return;
             }
         };
-        cx.global_mut::<MenuBarGlobal>().0.hide_for_capture();
         let submitted = self.tasks.submit(ticket, Instant::now(), move || {
             let result = native::capture_builtin(display, ids).map_err(|error| {
                 log::error!("capture_failure={error}");
@@ -492,10 +500,11 @@ impl Coordinator {
             },
             move |window, cx| {
                 let close_queue = Rc::clone(&queue);
+                let window_id = window.window_handle().window_id();
                 window.on_window_should_close(cx, move |_, _| {
                     close_queue
                         .borrow_mut()
-                        .push(UiCommand::Permission(PermissionAction::Cancel));
+                        .push(UiCommand::Permission(window_id, PermissionAction::Cancel));
                     true
                 });
                 let entity = cx.new(|cx| NoticeView {

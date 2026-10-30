@@ -69,14 +69,19 @@ fn run_app(mode: RunMode) -> Result<()> {
             let smoke_error_slot = Rc::clone(&launch_error_slot);
             cx.spawn(async move |cx| {
                 Timer::after(STARTUP_SMOKE_DELAY).await;
-                let result = cx.update(|cx| {
+                let result = cx.update(|cx| -> Result<()> {
                     let menu_bar = &cx.global::<MenuBarGlobal>().0;
                     menu_bar.validate_capture_commands()?;
+                    ensure!(
+                        arcshot_macos::owned_visible_window_ids()?.is_empty(),
+                        "status-item-only smoke must not expose a capture window"
+                    );
+                    println!("capture_window_exclusion_smoke=pass visible_owned_windows=0 no_native_capture=true");
                     println!("capture_menu_smoke=pass queued_commands=2 no_native_capture=true");
                     println!(
                         "startup_smoke=pass activation_policy=Accessory quit_action=terminate:"
                     );
-                    menu_bar.perform_quit_action()
+                    Ok(menu_bar.perform_quit_action()?)
                 });
                 match result {
                     Ok(Ok(())) => {}

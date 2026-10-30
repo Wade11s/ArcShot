@@ -9,7 +9,7 @@ use std::{
 
 use apple_cf::cg::{CGRect, Display};
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSApplication;
+use objc2_app_kit::{NSWindow, NSWindowNumberListOptions};
 use screencapturekit::{
     screenshot_manager::SCScreenshotManager,
     shareable_content::SCShareableContent,
@@ -161,26 +161,27 @@ pub fn builtin_display() -> Result<DisplaySnapshot, CaptureError> {
     Ok(snapshot)
 }
 
-/// Enumerates all currently visible AppKit windows owned by this process.
+/// Enumerates visible WindowServer windows owned by this process across Spaces.
 ///
 /// Call on the main thread immediately before scheduling capture. Do not create or
 /// show another window until capture is complete. Each ID is mapped to an SCWindow
 /// inside `capture_builtin`; any missing mapping fails closed.
 ///
 /// # Errors
-/// Returns an error off the main thread or for an invalid or duplicated window number.
+/// Returns an error off the main thread, if enumeration fails, or for invalid/duplicate IDs.
 pub fn owned_visible_window_ids() -> Result<Vec<u32>, CaptureError> {
     let marker = MainThreadMarker::new().ok_or(CaptureError::NotMainThread)?;
-    let windows = NSApplication::sharedApplication(marker).windows();
+    // NSApplication.windows also contains macOS 27 status-bar proxy windows whose
+    // windowNumber is not a CGWindowID. Ask AppKit for actual screen window numbers.
+    let windows = NSWindow::windowNumbersWithOptions(NSWindowNumberListOptions::AllSpaces, marker)
+        .ok_or(CaptureError::Window)?;
     let mut ids = Vec::new();
-    for window in windows.iter() {
-        if window.isVisible() {
-            let id = u32::try_from(window.windowNumber()).map_err(|_| CaptureError::Window)?;
-            if id == 0 || ids.contains(&id) {
-                return Err(CaptureError::Window);
-            }
-            ids.push(id);
+    for number in windows.iter() {
+        let id = u32::try_from(number.longLongValue()).map_err(|_| CaptureError::Window)?;
+        if id == 0 || ids.contains(&id) {
+            return Err(CaptureError::Window);
         }
+        ids.push(id);
     }
     Ok(ids)
 }

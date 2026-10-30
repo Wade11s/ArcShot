@@ -1,13 +1,15 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
 use arcshot_app::{PermissionAction, PermissionNotice};
 use arcshot_core::CaptureTicket;
-use gpui::{Context, FocusHandle, Render, RenderImage, Window, div, img, prelude::*, px, rgb};
+use gpui::{
+    Context, FocusHandle, Render, RenderImage, Window, WindowId, div, img, prelude::*, px, rgb,
+};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum UiCommand {
     CancelCapture(CaptureTicket),
-    Permission(PermissionAction),
+    Permission(WindowId, PermissionAction),
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
@@ -77,7 +79,7 @@ fn button(label: &'static str, command: UiCommand, queue: &UiQueue) -> impl Into
         .on_click(move |_, _, _| queue.borrow_mut().push(command))
 }
 impl Render for NoticeView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body) = match self.notice {
             Some(PermissionNotice::FirstUse) => (
                 "允许 ArcShot 读取屏幕",
@@ -96,7 +98,8 @@ impl Render for NoticeView {
                 self.error.as_deref().unwrap_or("请取消后重试。"),
             ),
         };
-        let cancel = UiCommand::Permission(PermissionAction::Cancel);
+        let window_id = window.window_handle().window_id();
+        let cancel = UiCommand::Permission(window_id, PermissionAction::Cancel);
         let queue = Rc::clone(&self.queue);
         let mut buttons = div().flex().gap_2();
         match self.notice {
@@ -104,12 +107,12 @@ impl Render for NoticeView {
                 buttons = buttons
                     .child(button(
                         "配置权限",
-                        UiCommand::Permission(PermissionAction::Configure),
+                        UiCommand::Permission(window_id, PermissionAction::Configure),
                         &self.queue,
                     ))
                     .child(button(
                         "稍后再说",
-                        UiCommand::Permission(PermissionAction::Later),
+                        UiCommand::Permission(window_id, PermissionAction::Later),
                         &self.queue,
                     ));
             }
@@ -117,12 +120,12 @@ impl Render for NoticeView {
                 buttons = buttons
                     .child(button(
                         "打开系统设置",
-                        UiCommand::Permission(PermissionAction::Configure),
+                        UiCommand::Permission(window_id, PermissionAction::Configure),
                         &self.queue,
                     ))
                     .child(button(
                         "重新检查",
-                        UiCommand::Permission(PermissionAction::Recheck),
+                        UiCommand::Permission(window_id, PermissionAction::Recheck),
                         &self.queue,
                     ))
                     .child(button("取消", cancel, &self.queue));
