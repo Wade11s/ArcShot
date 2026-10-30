@@ -513,3 +513,91 @@ capture_wake_window_submit_us=353701 pixels=[2940, 1912]
 已有证据；这不是所有真实 SCK 错误或硬件超时通过。显示失效测试按用户选择暂缓，
 独立颜色/像素/窗口排除 oracle、性能与压力矩阵仍未完成，#20 保持开放。
 暂停及显示切换的临时工具均已清理，当前正常运行的 Release 未启用故障注入。
+
+## 2026-10-31 验收会话：颜色 oracle、显示失效与采样记录
+
+本节为独立运行，不改写旧报告。代理侧准备（提交 `db0f236`–`18a11f0`）：耗时/资源
+采样脚本、像素精确夹具、5×5 网格探针；干净 SHA 上 `scripts/check-all.sh` exit 0。
+
+### 实测快照
+
+- 实现提交：探针网格 `a2cb304`，夹具 v3 `18a11f0`；分支 `ticket/20-screen-capture`。
+- Release CDHash：`762c17741c04efe7480a008395ca8b1e92b8099e`；GUI 实例路径与 PID
+  每步以 `pgrep` 核实。环境沿用本机记录（Mac14,2 arm64，macOS 27.2 (26B123)，
+  1470×956@2x，rustc 1.99.1，Xcode 27A266a）。
+- 权限：重建后旧条目哈希 `e389e874…` 与新哈希不匹配，仅开关不刷新 TCC 记录的
+  designated requirement；用户删除条目并经新弹窗授权后
+  `screen_recording=true guide_seen=true`，此后预检多次保持 true。
+- 日志：`target/acceptance-preflight*.log`、`target/acceptance-release{,-error}.log`、
+  `target/display-invalidation-execution{,2}.log`、`target/resource-observation.log`。
+
+### MAC-PERMISSION-20-REAUTH（新增子用例）
+
+| 步骤 | 实际 | 结果 |
+| --- | --- | --- |
+| 重建 Release 后仅重新打开既有条目开关 | TCC 日志 `Failed to match existing code requirement`，预检 false；开关不刷新存储哈希 | Fail（预期外行为，流程缺陷而非产品缺陷） |
+| 删除条目 → 应用内新弹窗授权 → 重开 | 预检 `screen_recording=true`；后续全部真实捕获成功 | Pass |
+
+### MAC-COLOR-MANUAL-20-01
+
+夹具：`docs/validation/fixtures/color-oracle-20.png` v3，像素精确 2940×1912，四象限
+纯 sRGB 红/绿/蓝/白 + 中央洋红标记 + 黑色大字（兼清晰度检查）。Preview 全屏呈现。
+探针（`capture_probe_grid`，5×5 内缩网格，行 y=5/25/50/75/95%）实测：
+
+```text
+rows=5f3233ff 613233ff 494a33ff 326233ff 326033ff
+     | ff0000ff ff0000ff 8fbc17ff 03ff00ff 03ff00ff
+     | ff0000ff ff0000ff 8fbc17ff 03ff00ff 03ff00ff
+     | 0000ffff 0000ffff 000000ff ffffffff ffffffff
+     | 0000ffff 0000ffff aeaeffff ffffffff ffffffff
+```
+
+- 方向：红=左上、绿=右上、蓝=左下、白=右下，无上下翻转。Pass。
+- 通道：红/蓝无互换，全 alpha=ff。Pass。
+- 颜色精确度：红 `ff0000`、蓝 `0000ff`、白 `ffffff` 精确；绿 `03ff00`（R +3/255）。
+  以 v2（系统 NSColor）与 v3（显式 sRGB 分量）夹具两次复测同为 +3，判定为内屏
+  display-P3 管线经 SCK 回转 sRGB 的单通道舍入，非产品缺陷。公差内 Pass。
+- 顶行深灰 = 菜单触发时唤出的系统菜单栏条带（非自有窗口）；中央列混合值位于
+  象限分界/文字/标记采样（Preview 按菜单栏下方内容区适配），均不构成 Fail 判据。
+- 自有 UI 排除：网格中无准备窗/旧浮层/菜单残留色块。用户确认冻结画面与原屏一致。
+
+结果：**Pass**（用户观察 + 数值 oracle 双证据；不声明显示校准或 GPU 合成色彩管理）。
+
+### MAC-TARGET-MANUAL-20-01（显示失效）
+
+临时工具（已清理）：Swift `CGDisplaySetDisplayMode`，15 秒倒计时 → 切至
+2560×1664 保持 8 秒 → 显式恢复；执行与恢复均成功（live mode 复核
+1470×956@2940×1912）。
+
+- 第一轮用户未及时进入冻结态，其开始请求在切换窗口内被拒绝：
+  `capture_prepare_failure=built-in display unavailable or changed`（拒绝子路径 Pass）。
+- 第二轮冻结态下切换：用户确认出现「内建显示器已失效或几何/缩放发生变化，截图
+  会话已取消。不会切换到外接屏幕。」提示，无部分画面，恢复原模式后 Esc 返回及
+  再次捕获均正常（后续 `capture_request_us=29151` 等成功样本）。
+
+结果：**Pass**（冻结中失效取消 + 明确报错 + 恢复后正常；切换瞬时画面未单独观察，
+不构成判据）。失效路径未产生 ERROR 级日志，仅 UI 提示；不影响验收，记录为观察。
+
+### 耗时与资源采集（PERF 记录起点 / RESOURCE 子集）
+
+`scripts/perf-samples.sh` 汇总本会话 10 次真实捕获：
+
+```text
+capture_request_us samples=10 median_us=25834 p95_us=189145 max_us=189145
+capture_wake_window_submit_us samples=10 median_us=224596 p95_us=445677 max_us=445677
+```
+
+`scripts/resource-sample.sh` 在 3 次捕获周期内轮询 41 个样本：
+`peak_rss_kb=54528`（≈53 MiB，远低于 2 GiB 准入预算）。
+
+判定：#20 验收条款为“开始记录捕获/唤起耗时”，已满足；PERF-SCK/PERF-REGION 的
+预热+30 样本与门槛判定、GPU/显存观测不属于本票，维持 Not tested。RESOURCE-MAX
+压力矩阵未执行，本记录仅为常驻+捕获周期 RSS 子集证据。
+
+### 本轮后剩余缺口
+
+- MAC-NATIVE-MANUAL-20-01 的真实 SCK 请求错误子集：仅由上轮受控暂停（绝对期限）
+  覆盖，真实回调错误仍 Not tested。
+- PERF 门槛判定、GPU/显存与压力矩阵：Not tested（归属性能/资源票）。
+- 其余原生人工矩阵（权限、捕获、冻结、Esc、剪贴板、颜色、显示失效、恢复）均已
+  取得用户参与证据。
