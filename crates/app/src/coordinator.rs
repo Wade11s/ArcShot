@@ -548,8 +548,11 @@ fn geometry(display: DisplaySnapshot) -> Result<ScreenGeometry, FrameError> {
     )
 }
 
-/// Text-only corner/center probe of an admitted frame for the manual color
-/// oracle. BGRA storage is reported as RRGGBBAA hex; values only, never pixels.
+/// Text-only 5x5 grid probe of an admitted frame for the manual color oracle.
+/// Rows are y = 5/25/50/75/95% of height; columns x = 5/25/50/75/95% of width.
+/// The inset first/last rows avoid the menu bar and Dock strips that any
+/// menu-triggered capture necessarily includes. BGRA storage is reported as
+/// RRGGBBAA hex; values only, never pixels.
 fn capture_probe(frame: &CapturedFrame) -> String {
     let [w, h] = frame.geometry().pixel_size().map(|v| v as usize);
     let stride = frame.stride();
@@ -558,14 +561,13 @@ fn capture_probe(frame: &CapturedFrame) -> String {
         let p = &frame.bgra()[i..i + 4];
         format!("{:02x}{:02x}{:02x}{:02x}", p[2], p[1], p[0], p[3])
     };
-    format!(
-        "capture_probe_rgb_hex tl={} tr={} bl={} br={} center={}",
-        px(0, 0),
-        px(w - 1, 0),
-        px(0, h - 1),
-        px(w - 1, h - 1),
-        px(w / 2, h / 2)
-    )
+    let rows = [0.05, 0.25, 0.50, 0.75, 0.95].map(|f| {
+        let y = (h as f64 * f) as usize;
+        [0.05, 0.25, 0.50, 0.75, 0.95]
+            .map(|g| px((w as f64 * g) as usize, y))
+            .join(" ")
+    });
+    format!("capture_probe_grid rows={}", rows.join(" | "))
 }
 
 #[cfg(test)]
@@ -584,16 +586,18 @@ mod probe_tests {
     }
 
     #[test]
-    fn probe_reports_rgb_corners_and_ignores_padding() {
+    fn probe_reports_rgb_grid_and_ignores_padding() {
         // BGRA storage, row stride 12 with 4 padding bytes per row.
         let bytes = vec![
             0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0xff, 0xEE, 0xEE, 0xEE, 0xEE, //
             0xff, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0xEE, 0xEE, 0xEE, 0xEE,
         ];
         let report = capture_probe(&frame(bytes, 12));
+        let row0 = "ff0000ff ff0000ff 000000ff 000000ff 000000ff";
+        let row1 = "0000ffff 0000ffff 00ff00ff 00ff00ff 00ff00ff";
         assert_eq!(
             report,
-            "capture_probe_rgb_hex tl=ff0000ff tr=000000ff bl=0000ffff br=00ff00ff center=00ff00ff"
+            format!("capture_probe_grid rows={row0} | {row0} | {row1} | {row1} | {row1}")
         );
     }
 }
