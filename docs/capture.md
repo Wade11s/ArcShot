@@ -107,3 +107,16 @@ stderr 的文本诊断包含：
 
 当前只是采集起点，不声明性能通过。PERF-REGION 仍需单独的实际首次呈现计时，
 Release、预热一次及至少 30 个原始样本，按 TEST.md 报告 median/p95/max。
+
+### 采样与资源观测工具
+
+```sh
+scripts/perf-samples.sh target/<manual-log> --min-samples 30
+scripts/resource-sample.sh <arcshot-pid> 1 30
+```
+
+`perf-samples.sh` 聚合日志中的 `capture_request_us`（PERF-SCK 口径）与
+`capture_wake_window_submit_us`（仅上下文），输出 median/p95/max；样本不足
+`--min-samples`（默认 30）时 exit 1。预热样本按 TEST.md 口径在采集时丢弃，
+脚本不自行判定性能达标。`resource-sample.sh` 以 ps 轮询驻留进程 RSS 并
+报告峰值，只输出文本数值，不读取屏幕像素。
