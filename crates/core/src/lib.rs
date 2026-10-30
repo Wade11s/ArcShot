@@ -1,13 +1,16 @@
 //! Platform-neutral data shared by ArcShot's product crates.
 
+mod document;
 mod frame;
 mod hotkey;
 mod session;
 
-pub use frame::{CapturedFrame, FrameError, ScreenGeometry};
+pub use document::{Document, DocumentError, MAX_PNG_BYTES, PixelRect, Selection};
+pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry};
 pub use hotkey::Hotkey;
 pub use session::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
+    OutputFailure, OutputJob,
 };
 
 /// Text displayed by the native menu-bar interface.

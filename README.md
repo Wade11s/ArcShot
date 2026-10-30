@@ -1,10 +1,10 @@
 # ArcShot
 
-ArcShot is a macOS 27 menu-bar screenshot tool written in Rust with GPUI. This
-branch currently contains only the first vertical slice: a real Accessory app
-with a native status item, a working Quit ArcShot command, a real font backend,
-and reproducible build/startup checks. Capture and annotation commands are not
-shown until implemented.
+ArcShot is a macOS 27 menu-bar screenshot tool written in Rust with GPUI. It is
+a real Accessory app with a native status item, global capture hotkey, frozen
+screen on the single built-in display, drag region selection, and Finish to copy
+the selected 2x region as an sRGB PNG. Annotation tools, scroll capture and
+explicit saving are not implemented yet.
 
 ## Build
 
@@ -24,4 +24,5 @@ choose **退出 ArcShot** to exit.
 scripts/check-all.sh
 ```
 
-See [TEST.md](TEST.md) for the individual seams and their limits.
+See [TEST.md](TEST.md) for the individual seams and their limits. Region
+selection and PNG output semantics are in [docs/output.md](docs/output.md).

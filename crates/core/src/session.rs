@@ -1,5 +1,5 @@
 //! Authority for capture preparation, cancellation and native uncertainty.
-use crate::CapturedFrame;
+use crate::{CapturedFrame, Document, PixelRect, Selection};
 use std::{error::Error, fmt};
 
 /// Identifies one capture attempt across permission, worker and window effects.
@@ -46,6 +46,35 @@ pub enum CaptureAction {
     Cancel,
     /// Cancels only the attempt whose overlay produced this input.
     CancelAttempt(CaptureTicket),
+    /// Replaces the region selection from a completed pointer drag, fenced by
+    /// the overlay's attempt ticket. Zero-size or invalid drags change nothing.
+    SelectRegion {
+        /// Attempt whose overlay produced the drag.
+        ticket: CaptureTicket,
+        /// Drag start in display-local logical points.
+        from: [f64; 2],
+        /// Drag end in display-local logical points.
+        to: [f64; 2],
+    },
+    /// Finishes through Enter or the toolbar button when a valid selection exists.
+    Finish {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+    },
+    /// Finishes on a double-click only when the point lies inside the selection.
+    FinishAt {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Double-click point in display-local logical points.
+        point: [f64; 2],
+    },
+    /// Reports the result of one fenced composition/encode/clipboard job.
+    OutputCompleted {
+        /// Exact document version and crop the job was composed from.
+        job: OutputJob,
+        /// `Ok` only after the clipboard reported success.
+        result: Result<(), OutputFailure>,
+    },
     /// Invalidates the built-in screen; never migrates to another display.
     DisplayInvalidated,
     /// The shared output/save mutex contract (I-10): while busy with output
@@ -72,7 +101,67 @@ pub enum CaptureEffect {
     PermissionUnavailable,
     /// Show a classified failure; uncertainty requires relaunch.
     ReportFailure(CaptureFailure),
+    /// Compose and encode exactly this document snapshot outside the UI thread.
+    ComposeOutput(OutputJob),
+    /// Play the short completion sound after successful clipboard output.
+    PlayCompletionSound,
+    /// Report an output failure without discarding the document.
+    ReportOutputFailure(OutputFailure),
 }
+
+/// One version-fenced output job: the document may not change before publishing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputJob {
+    ticket: CaptureTicket,
+    version: u64,
+    crop: PixelRect,
+}
+impl OutputJob {
+    /// Overlay attempt that owns the document.
+    #[must_use]
+    pub const fn ticket(self) -> CaptureTicket {
+        self.ticket
+    }
+    /// Document version the job was composed from.
+    #[must_use]
+    pub const fn version(self) -> u64 {
+        self.version
+    }
+    /// Physical crop inside the immutable base image.
+    #[must_use]
+    pub const fn crop(self) -> PixelRect {
+        self.crop
+    }
+}
+
+/// Output failures that keep the frozen document available for retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputFailure {
+    /// The crop could not be composed within the pixel/memory budget.
+    ResourceLimit,
+    /// Composition or PNG encoding failed.
+    Encode,
+    /// The clipboard rejected the PNG or did not expose the PNG type.
+    Clipboard,
+    /// The encode worker could not run or unwound.
+    Worker,
+}
+impl OutputFailure {
+    fn message(self) -> &'static str {
+        match self {
+            Self::ResourceLimit => "所选区域超出导出尺寸/内存预算，未产生输出，可缩小选区后重试",
+            Self::Encode => "合成或 PNG 编码失败，未产生输出，可重试或取消",
+            Self::Clipboard => "剪贴板未确认写入 PNG，未报告成功；选区已保留，可重试",
+            Self::Worker => "编码工作线程未能完成，未产生输出，可重试",
+        }
+    }
+}
+impl fmt::Display for OutputFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+impl Error for OutputFailure {}
 
 /// Recovery classes shared by the coordinator and pure capture authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,7 +212,7 @@ enum State {
     },
     Frozen {
         ticket: CaptureTicket,
-        frame: CapturedFrame,
+        document: Document,
     },
     Relaunch,
 }
@@ -168,10 +257,31 @@ impl CaptureSession {
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.
     #[must_use]
     pub fn frame(&self) -> Option<&CapturedFrame> {
+        self.document().map(Document::frame)
+    }
+
+    /// Borrows the frozen document, including its selection and version.
+    #[must_use]
+    pub fn document(&self) -> Option<&Document> {
         match &self.state {
-            State::Frozen { frame, .. } => Some(frame),
+            State::Frozen { document, .. } => Some(document),
             _ => None,
         }
+    }
+
+    /// Fences publishing encoded output immediately before the clipboard side effect.
+    ///
+    /// The job must belong to the current attempt, match the current document
+    /// version and crop, and remain inside an active output operation.
+    #[must_use]
+    pub fn may_publish(&self, job: OutputJob) -> bool {
+        let State::Frozen { ticket, document } = &self.state else {
+            return false;
+        };
+        self.output_mutex
+            && *ticket == job.ticket
+            && document.version() == job.version
+            && document.crop().is_ok_and(|crop| crop == job.crop)
     }
 
     /// Fences window presentation immediately before a UI side effect.
@@ -241,7 +351,54 @@ impl CaptureSession {
                     vec![]
                 }
             }
+            CaptureAction::SelectRegion { ticket, from, to } => {
+                let State::Frozen {
+                    ticket: current,
+                    document,
+                } = &mut self.state
+                else {
+                    return vec![];
+                };
+                if *current != ticket || self.output_mutex {
+                    return vec![];
+                }
+                let Ok(selection) = Selection::from_drag(from, to) else {
+                    return vec![];
+                };
+                // An out-of-bounds or over-budget drag leaves the prior selection.
+                let _ = document.select(selection);
+                vec![]
+            }
+            CaptureAction::Finish { ticket } => self.finish(ticket, None),
+            CaptureAction::FinishAt { ticket, point } => self.finish(ticket, Some(point)),
+            CaptureAction::OutputCompleted { job, result } => {
+                let matches_job = match &self.state {
+                    State::Frozen { ticket, document } => {
+                        *ticket == job.ticket
+                            && document.version() == job.version
+                            && document.crop().is_ok_and(|crop| crop == job.crop)
+                    }
+                    _ => false,
+                };
+                // Stale or duplicated results never publish or end another session.
+                if !matches_job || !self.output_mutex {
+                    return vec![];
+                }
+                self.output_mutex = false;
+                match result {
+                    Ok(()) => {
+                        self.state = State::Resident;
+                        vec![
+                            CaptureEffect::DismissOverlay,
+                            CaptureEffect::PlayCompletionSound,
+                        ]
+                    }
+                    Err(error) => vec![CaptureEffect::ReportOutputFailure(error)],
+                }
+            }
             CaptureAction::Cancel | CaptureAction::DisplayInvalidated => {
+                // A cancelled output job may still finish; its fence must fail.
+                self.output_mutex = false;
                 let invalid = matches!(action, CaptureAction::DisplayInvalidated);
                 self.state = match self.state {
                     State::Preparing(ticket) | State::Draining { ticket, .. } => State::Draining {
@@ -262,6 +419,41 @@ impl CaptureSession {
                 vec![]
             }
         }
+    }
+
+    fn finish(&mut self, ticket: CaptureTicket, point: Option<[f64; 2]>) -> Vec<CaptureEffect> {
+        if self.output_mutex {
+            return vec![]; // Editing, duplicate Finish and save are disabled.
+        }
+        let job = {
+            let State::Frozen {
+                ticket: current,
+                document,
+            } = &self.state
+            else {
+                return vec![];
+            };
+            if *current != ticket {
+                return vec![];
+            }
+            if point.is_some_and(|point| {
+                !document
+                    .selection()
+                    .is_some_and(|selection| selection.contains(point))
+            }) {
+                return vec![]; // Double-click outside the selection is not Finish.
+            }
+            let Ok(crop) = document.crop() else {
+                return vec![];
+            };
+            OutputJob {
+                ticket,
+                version: document.version(),
+                crop,
+            }
+        };
+        self.output_mutex = true;
+        vec![CaptureEffect::ComposeOutput(job)]
     }
 
     fn begin(&mut self) -> Vec<CaptureEffect> {
@@ -305,7 +497,10 @@ impl CaptureSession {
         }
         match result {
             Ok(frame) => {
-                self.state = State::Frozen { ticket, frame };
+                self.state = State::Frozen {
+                    ticket,
+                    document: Document::new(frame),
+                };
                 vec![CaptureEffect::PresentFrozen(ticket)]
             }
             Err(error) => vec![

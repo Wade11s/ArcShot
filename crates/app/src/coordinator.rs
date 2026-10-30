@@ -5,11 +5,12 @@ use crate::{
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, GuideHistory, HotkeyAction, HotkeyEffect, HotkeyFlow,
-    HotkeyNotice, HotkeyOutcome, PermissionAction, PermissionEffect, PermissionFlow,
+    HotkeyNotice, HotkeyOutcome, OutputSubmitError, OutputTasks, PermissionAction,
+    PermissionEffect, PermissionFlow,
 };
 use arcshot_core::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
-    CapturedFrame, FrameError, ScreenGeometry,
+    CapturedFrame, Document, FrameError, OutputFailure, OutputJob, ScreenGeometry,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -32,6 +33,7 @@ const PREPARE_SETTLE: Duration = Duration::from_millis(80);
 struct Coordinator {
     session: CaptureSession,
     tasks: CaptureTasks,
+    output_tasks: OutputTasks,
     permissions: PermissionFlow,
     hotkeys: Option<native::GlobalHotkeys>,
     hotkey_flow: HotkeyFlow,
@@ -40,6 +42,7 @@ struct Coordinator {
     hotkey_error: Option<String>,
     queue: UiQueue,
     overlay: Option<WindowHandle<CaptureView>>,
+    overlay_error: Option<String>,
     notice: Option<WindowHandle<NoticeView>>,
     pending: Option<(CaptureTicket, Instant)>,
     preview_task: Option<Task<()>>,
@@ -58,6 +61,7 @@ pub(crate) fn launch(cx: &mut App) {
     let coordinator = cx.new(|_| Coordinator {
         session: CaptureSession::default(),
         tasks: CaptureTasks::default(),
+        output_tasks: OutputTasks::default(),
         permissions: PermissionFlow::new(if native::permission_guide_seen() {
             GuideHistory::Handled
         } else {
@@ -70,6 +74,7 @@ pub(crate) fn launch(cx: &mut App) {
         hotkey_error: None,
         queue: Rc::new(RefCell::new(Vec::new())),
         overlay: None,
+        overlay_error: None,
         notice: None,
         pending: None,
         preview_task: None,
@@ -130,6 +135,23 @@ impl Coordinator {
             match command {
                 UiCommand::CancelCapture(ticket) => {
                     self.action(CaptureAction::CancelAttempt(ticket), cx)
+                }
+                UiCommand::SelectRegion { ticket, from, to } => {
+                    if self.session.may_present(ticket) {
+                        self.overlay_error = None;
+                        self.action(CaptureAction::SelectRegion { ticket, from, to }, cx);
+                    }
+                }
+                UiCommand::FinishCapture { ticket, point } => {
+                    if self.session.may_present(ticket) {
+                        self.action(
+                            match point {
+                                Some(point) => CaptureAction::FinishAt { ticket, point },
+                                None => CaptureAction::Finish { ticket },
+                            },
+                            cx,
+                        );
+                    }
                 }
                 UiCommand::Permission(window_id, action)
                     if !self.busy()
@@ -206,6 +228,9 @@ impl Coordinator {
         if let Some((ticket, result)) = self.tasks.poll(Instant::now()) {
             cx.global_mut::<MenuBarGlobal>().0.restore_after_capture();
             self.action(CaptureAction::Completed { ticket, result }, cx);
+        }
+        if let Some((job, encoded)) = self.output_tasks.poll() {
+            self.publish_output(job, encoded, cx);
         }
         // No SCK call is made for this continuous screen validity check.
         if let Some(frame) = self.session.frame() {
@@ -454,7 +479,92 @@ impl Coordinator {
                     };
                     self.show_error(message.into(), cx);
                 }
+                CaptureEffect::ComposeOutput(job) => {
+                    self.overlay_error = None;
+                    let Some(frame) = self.session.frame().cloned() else {
+                        effects.extend(self.session.dispatch(CaptureAction::OutputCompleted {
+                            job,
+                            result: Err(OutputFailure::Worker),
+                        }));
+                        continue;
+                    };
+                    let submitted = self.output_tasks.submit(job, move || {
+                        arcshot_image::compose_crop(&frame, job.crop())
+                            .and_then(|composed| arcshot_image::encode_png(&composed))
+                            .map_err(classify_compose_failure)
+                    });
+                    if let Err(error) = submitted {
+                        log::error!("output_submit_failure={error}");
+                        effects.extend(self.session.dispatch(CaptureAction::OutputCompleted {
+                            job,
+                            result: Err(match error {
+                                OutputSubmitError::Busy | OutputSubmitError::WorkerUnavailable => {
+                                    OutputFailure::Worker
+                                }
+                            }),
+                        }));
+                    }
+                }
+                CaptureEffect::PlayCompletionSound => {
+                    if !native::play_completion_sound() {
+                        log::warn!("completion_sound_unavailable");
+                    }
+                }
+                CaptureEffect::ReportOutputFailure(error) => {
+                    log::error!("output_failure={error}");
+                    self.overlay_error = Some(error.to_string());
+                }
             }
+        }
+        self.refresh_capture_view(cx);
+    }
+
+    /// Fences the document version, then writes the already-encoded PNG bytes.
+    fn publish_output(
+        &mut self,
+        job: OutputJob,
+        encoded: Result<Vec<u8>, OutputFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.session.may_publish(job) {
+            log::info!(
+                "output_stale version={} encoded={}",
+                job.version(),
+                encoded.is_ok()
+            );
+            return;
+        }
+        let result = match encoded {
+            Ok(png) => match native::write_png_to_clipboard(&png) {
+                Ok(()) => {
+                    log::info!("output_published bytes={}", png.len());
+                    Ok(())
+                }
+                Err(error) => {
+                    log::error!("clipboard_failure={error}");
+                    Err(OutputFailure::Clipboard)
+                }
+            },
+            Err(error) => Err(error),
+        };
+        self.action(CaptureAction::OutputCompleted { job, result }, cx);
+    }
+
+    fn refresh_capture_view(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.overlay else {
+            return;
+        };
+        let selection = self.session.document().and_then(Document::selection);
+        let busy = self.session.output_busy();
+        let error = self.overlay_error.take();
+        let updated = handle.update(cx, |view, _, cx| {
+            view.selection = selection;
+            view.busy = busy;
+            view.error = error;
+            cx.notify();
+        });
+        if updated.is_err() {
+            self.overlay = None;
         }
     }
 
@@ -624,6 +734,12 @@ impl Coordinator {
                 let entity = cx.new(|cx| CaptureView {
                     ticket,
                     image: None,
+                    selection: None,
+                    busy: false,
+                    error: None,
+                    scale: 2.0,
+                    logical_size: [0.0, 0.0],
+                    drag: None,
                     focus: cx.focus_handle(),
                     queue,
                 });
@@ -642,6 +758,7 @@ impl Coordinator {
         image: Arc<RenderImage>,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        self.overlay_error = None;
         let [_, _, w, h] = screen.source_rect();
         let display_id = cx
             .displays()
@@ -677,6 +794,12 @@ impl Coordinator {
                 let entity = cx.new(|cx| CaptureView {
                     ticket,
                     image: Some(image),
+                    selection: None,
+                    busy: false,
+                    error: None,
+                    scale: screen.scale(),
+                    logical_size: [w, h],
+                    drag: None,
                     focus: cx.focus_handle(),
                     queue,
                 });
@@ -771,6 +894,13 @@ impl Coordinator {
         }
     }
 }
+fn classify_compose_failure(error: arcshot_image::ComposeError) -> OutputFailure {
+    match error {
+        arcshot_image::ComposeError::ResourceLimit => OutputFailure::ResourceLimit,
+        _ => OutputFailure::Encode,
+    }
+}
+
 fn classify_native_failure(error: &native::CaptureError) -> CaptureFailure {
     match error {
         native::CaptureError::Display => CaptureFailure::DisplayInvalid,

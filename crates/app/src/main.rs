@@ -87,6 +87,15 @@ fn run_app(mode: RunMode) -> Result<()> {
                     hotkeys.resume()?;
                     drop(hotkeys);
                     println!("hotkey_registration_smoke=pass default={default} suspend_resume_cleanup=clean");
+                    // Native PNGf path plus AppKit in-memory decode on a private
+                    // pasteboard; the user's clipboard is never modified.
+                    let composed = arcshot_image::ComposedImage::try_new(2, 2, vec![255; 16])?;
+                    let png = arcshot_image::encode_png(&composed)?;
+                    let decoded = arcshot_macos::validate_png_pasteboard(&png, 2, 2)?;
+                    println!(
+                        "clipboard_pngf_smoke=pass width={} height={} private_pasteboard=true",
+                        decoded.width, decoded.height
+                    );
                     println!(
                         "startup_smoke=pass activation_policy=Accessory quit_action=terminate:"
                     );

@@ -1,12 +1,17 @@
 //! Safe macOS adapters for ArcShot.
 
 mod capture;
+mod clipboard;
 mod hotkey;
 mod permission;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
     owned_visible_window_ids,
+};
+pub use clipboard::{
+    ClipboardError, ClipboardSmoke, play_completion_sound, validate_png_pasteboard,
+    write_png_to_clipboard,
 };
 pub use hotkey::{
     GlobalHotkeys, HotkeyError, hotkey_settings_load, hotkey_settings_store, virtual_keycode,

@@ -1,8 +1,9 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
 use arcshot_app::{PermissionAction, PermissionNotice};
-use arcshot_core::{CaptureTicket, Hotkey};
+use arcshot_core::{CaptureTicket, Hotkey, Selection};
 use gpui::{
     Context, FocusHandle, Render, RenderImage, Window, WindowId, div, img, prelude::*, px, rgb,
+    rgba,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -16,36 +17,217 @@ pub(crate) enum UiCommand {
     HotkeyRecording(WindowId, bool),
     /// The hotkey settings window closed.
     HotkeySettingsClosed(WindowId),
+    /// A completed pointer drag to commit as the document selection.
+    SelectRegion {
+        ticket: CaptureTicket,
+        from: [f64; 2],
+        to: [f64; 2],
+    },
+    /// Enter, the toolbar button, or a double-click point inside the selection.
+    FinishCapture {
+        ticket: CaptureTicket,
+        point: Option<[f64; 2]>,
+    },
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
 pub(crate) struct CaptureView {
     pub(crate) ticket: CaptureTicket,
     pub(crate) image: Option<Arc<RenderImage>>,
+    /// Authoritative selection mirrored from the capture document.
+    pub(crate) selection: Option<Selection>,
+    pub(crate) busy: bool,
+    pub(crate) error: Option<String>,
+    /// Point-to-pixel scale of the frozen screen; never used for view sizing.
+    pub(crate) scale: f64,
+    /// Display-local logical size of the frozen screen.
+    pub(crate) logical_size: [f64; 2],
+    /// View-only rubber band; core owns the committed selection.
+    pub(crate) drag: Option<([f64; 2], [f64; 2])>,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
 }
+
+fn pointer(event: &gpui::Point<gpui::Pixels>) -> [f64; 2] {
+    [f64::from(event.x), f64::from(event.y)]
+}
+
+/// Logical rubber-band bounds in points, rejecting a zero-size drag.
+fn band(a: [f64; 2], b: [f64; 2]) -> Option<(f32, f32, f32, f32)> {
+    let x = a[0].min(b[0]);
+    let y = a[1].min(b[1]);
+    let width = (a[0] - b[0]).abs();
+    let height = (a[1] - b[1]).abs();
+    (width > 0.0 && height > 0.0).then_some((x as f32, y as f32, width as f32, height as f32))
+}
+
+fn region(x: f32, y: f32, width: f32, height: f32) -> gpui::Div {
+    div()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(width))
+        .h(px(height))
+}
+
+impl CaptureView {
+    fn clamp(&self, point: [f64; 2]) -> [f64; 2] {
+        [
+            point[0].clamp(0.0, self.logical_size[0]),
+            point[1].clamp(0.0, self.logical_size[1]),
+        ]
+    }
+}
+
 impl Render for CaptureView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let queue = Rc::clone(&self.queue);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ticket = self.ticket;
-        div()
+        let busy = self.busy;
+        let frozen = self.image.is_some();
+        let scale = self.scale;
+        let preview = self
+            .drag
+            .and_then(|(start, end)| band(start, end))
+            .or_else(|| {
+                self.selection.and_then(|selection| {
+                    band(
+                        [selection.x(), selection.y()],
+                        [
+                            selection.x() + selection.width(),
+                            selection.y() + selection.height(),
+                        ],
+                    )
+                })
+            });
+        let finish_enabled = frozen && self.selection.is_some() && !busy;
+        let error = self.error.clone();
+        let image = self
+            .image
+            .as_ref()
+            .map(|image| img(Arc::clone(image)).size_full());
+
+        let mut root = div()
+            .id("capture-overlay")
             .size_full()
             .relative()
             .bg(rgb(0x15171b))
             .track_focus(&self.focus)
-            .on_key_down(move |event, _, cx| {
-                if event.keystroke.key == "escape" {
-                    queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+            .on_key_down({
+                let queue = Rc::clone(&self.queue);
+                move |event, _, cx| match event.keystroke.key.as_str() {
+                    "escape" => {
+                        queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+                        cx.stop_propagation();
+                    }
+                    "enter" if !busy => {
+                        queue.borrow_mut().push(UiCommand::FinishCapture {
+                            ticket,
+                            point: None,
+                        });
+                        cx.stop_propagation();
+                    }
+                    _ => {}
+                }
+            })
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let entity = cx.entity();
+                move |event, _, cx| {
+                    let point = pointer(&event.position);
+                    let double = event.click_count >= 2;
+                    entity.update(cx, |view, cx| {
+                        if !frozen || view.busy {
+                            return;
+                        }
+                        if double {
+                            // Core checks whether the point is actually inside
+                            // the selection; the toolbar is not the background.
+                            view.queue.borrow_mut().push(UiCommand::FinishCapture {
+                                ticket,
+                                point: Some(point),
+                            });
+                            return;
+                        }
+                        let point = view.clamp(point);
+                        view.drag = Some((point, point));
+                        cx.notify();
+                    });
                     cx.stop_propagation();
                 }
             })
-            .children(
-                self.image
-                    .as_ref()
-                    .map(|image| img(Arc::clone(image)).size_full()),
-            )
-            .child(
+            .on_mouse_move({
+                let entity = cx.entity();
+                move |event, _, cx| {
+                    entity.update(cx, |view, cx| {
+                        let Some((start, _)) = view.drag else {
+                            return;
+                        };
+                        let point = view.clamp(pointer(&event.position));
+                        view.drag = Some((start, point));
+                        cx.notify();
+                    });
+                }
+            })
+            .on_mouse_up(gpui::MouseButton::Left, {
+                let entity = cx.entity();
+                let queue = Rc::clone(&self.queue);
+                move |event, _, cx| {
+                    let end = pointer(&event.position);
+                    entity.update(cx, |view, _| {
+                        let Some((start, _)) = view.drag.take() else {
+                            return;
+                        };
+                        let end = view.clamp(end);
+                        if let Some(_band) = band(start, end) {
+                            queue.borrow_mut().push(UiCommand::SelectRegion {
+                                ticket,
+                                from: start,
+                                to: end,
+                            });
+                        }
+                    });
+                }
+            });
+
+        if let Some(image) = image {
+            root = root.child(image);
+        }
+
+        if let Some((x, y, width, height)) = preview {
+            let full_width = self.logical_size[0] as f32;
+            let full_height = self.logical_size[1] as f32;
+            // Dim only outside the selection; the region itself stays untouched.
+            root = root
+                .child(region(0.0, 0.0, full_width, y).bg(rgba(0x00000099)))
+                .child(region(0.0, y, x, height).bg(rgba(0x00000099)))
+                .child(region(x + width, y, full_width - x - width, height).bg(rgba(0x00000099)))
+                .child(
+                    region(0.0, y + height, full_width, full_height - y - height)
+                        .bg(rgba(0x00000099)),
+                )
+                .child(
+                    region(x, y, width, height)
+                        .border_1()
+                        .border_color(rgb(0xffffff)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px((y - 26.0).max(4.0)))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgba(0x000000cc))
+                        .text_color(rgb(0xffffff))
+                        .text_sm()
+                        .child(format!(
+                            "{} × {}",
+                            (f64::from(width) * scale).round() as u64,
+                            (f64::from(height) * scale).round() as u64
+                        )),
+                );
+        } else if !frozen {
+            root = root.child(
                 div()
                     .absolute()
                     .top_4()
@@ -56,12 +238,80 @@ impl Render for CaptureView {
                     .bg(rgb(0x20242b))
                     .text_color(rgb(0xffffff))
                     .text_sm()
-                    .child(if self.image.is_some() {
-                        "画面已冻结 · Esc 取消（本阶段不输出）"
-                    } else {
-                        "正在准备截图… · Esc 取消"
+                    .child("正在准备截图… · Esc 取消"),
+            );
+        }
+
+        if frozen {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_3()
+                    .right_3()
+                    .flex()
+                    .gap_2()
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child({
+                        let queue = Rc::clone(&self.queue);
+                        let mut button = div()
+                            .id("finish-capture")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .text_color(rgb(0xffffff))
+                            .bg(if finish_enabled {
+                                rgb(0x007aff)
+                            } else {
+                                rgb(0x3b465b)
+                            })
+                            .child("完成");
+                        if finish_enabled {
+                            button = button
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x0062d6)))
+                                .on_click(move |_, _, _| {
+                                    queue.borrow_mut().push(UiCommand::FinishCapture {
+                                        ticket,
+                                        point: None,
+                                    });
+                                });
+                        }
+                        button
                     }),
-            )
+            );
+        }
+
+        if let Some(error) = error {
+            root = root.child(
+                div()
+                    .absolute()
+                    .left_6()
+                    .bottom_6()
+                    .px_4()
+                    .py_3()
+                    .rounded_md()
+                    .bg(rgba(0x7a1f1fcc))
+                    .text_color(rgb(0xffffff))
+                    .text_sm()
+                    .child(error),
+            );
+        } else if frozen && self.selection.is_none() && self.drag.is_none() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .left_6()
+                    .bottom_6()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgba(0x000000aa))
+                    .text_color(rgb(0xffffff))
+                    .text_sm()
+                    .child("拖动选择区域 · Enter 完成 · Esc 取消"),
+            );
+        }
+
+        root
     }
 }
 
