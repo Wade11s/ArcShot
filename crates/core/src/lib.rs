@@ -1,5 +1,13 @@
 //! Platform-neutral data shared by ArcShot's product crates.
 
+mod frame;
+mod session;
+
+pub use frame::{CapturedFrame, FrameError, ScreenGeometry};
+pub use session::{
+    CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
+};
+
 /// Text displayed by the native menu-bar interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MenuBarText {

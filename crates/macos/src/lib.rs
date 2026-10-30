@@ -1,15 +1,77 @@
 //! Safe macOS adapters for ArcShot.
 
-use std::{error::Error, fmt};
+mod capture;
+mod permission;
+
+pub use capture::{
+    CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
+    owned_visible_window_ids,
+};
+
+pub use permission::{
+    PermissionError, mark_permission_guide_seen, open_screen_recording_settings,
+    permission_guide_seen, request_screen_recording, screen_recording_available,
+};
+
+use std::{cell::RefCell, error::Error, fmt};
 
 use arcshot_core::{MenuBarText, StatusItemIcon};
 use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, rc::Retained, sel};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    rc::Retained, sel,
+};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem,
     NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
 };
-use objc2_foundation::{NSData, NSSize, NSString};
+use objc2_foundation::{NSData, NSObject, NSSize, NSString};
+
+/// Whether this application is active. Returns false when called off the main thread.
+#[must_use]
+pub fn application_active() -> bool {
+    MainThreadMarker::new()
+        .is_some_and(|marker| NSApplication::sharedApplication(marker).isActive())
+}
+
+/// Commands queued by native menu actions for later consumption by the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuCommand {
+    /// Start a capture session.
+    StartCapture,
+    /// Show the Screen Recording permission flow.
+    ScreenRecordingPermissions,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements and this class has no Drop.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = RefCell<Vec<MenuCommand>>]
+    struct CommandTarget;
+
+    impl CommandTarget {
+        // SAFETY: AppKit action methods accept a single sender argument.
+        #[unsafe(method(startCapture:))]
+        fn start_capture(&self, _sender: &NSObject) {
+            self.ivars().borrow_mut().push(MenuCommand::StartCapture);
+        }
+
+        // SAFETY: AppKit action methods accept a single sender argument.
+        #[unsafe(method(screenRecordingPermissions:))]
+        fn permissions(&self, _sender: &NSObject) {
+            self.ivars().borrow_mut().push(MenuCommand::ScreenRecordingPermissions);
+        }
+    }
+);
+
+impl CommandTarget {
+    fn new(marker: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(marker).set_ivars(RefCell::new(Vec::new()));
+        // SAFETY: NSObject's init consumes the allocated object and returns it retained.
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 /// Standard status-item point size; the 36-pixel asset renders at 2x without scaling.
 const STATUS_ITEM_SIDE_POINTS: f64 = 18.0;
@@ -20,10 +82,11 @@ pub struct MenuBar {
     status_bar: Retained<NSStatusBar>,
     status_item: Retained<NSStatusItem>,
     quit_item: Retained<NSMenuItem>,
+    command_target: Retained<CommandTarget>,
 }
 
 impl MenuBar {
-    /// Creates the status item and its single implemented command, Quit ArcShot.
+    /// Creates the status item, command queue, and Quit ArcShot item.
     ///
     /// GPUI's crates.io macOS backend selects the Regular activation policy immediately
     /// before its launch callback. This adapter switches back to Accessory before exposing
@@ -62,6 +125,25 @@ impl MenuBar {
 
         let menu =
             NSMenu::initWithTitle(NSMenu::alloc(marker), &NSString::from_str(text.tooltip()));
+        let command_target = CommandTarget::new(marker);
+        for (title, action) in [
+            ("开始截图", sel!(startCapture:)),
+            ("屏幕录制权限…", sel!(screenRecordingPermissions:)),
+        ] {
+            // SAFETY: Both selectors are implemented by CommandTarget with the
+            // AppKit action signature. MenuBar retains the target until menu removal.
+            let item = unsafe {
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(marker),
+                    &NSString::from_str(title),
+                    Some(action),
+                    &NSString::from_str(""),
+                );
+                item.setTarget(Some(&command_target));
+                item
+            };
+            menu.addItem(&item);
+        }
         // SAFETY: `terminate:` is an AppKit-declared selector with the required
         // target/action signature. The item uses the responder chain as its target.
         let quit_item = unsafe {
@@ -81,9 +163,28 @@ impl MenuBar {
             status_bar,
             status_item,
             quit_item,
+            command_target,
         };
         menu_bar.validate()?;
         Ok(menu_bar)
+    }
+
+    /// Hides the status item before enumerating windows for capture.
+    ///
+    /// This prevents its menu reopening but does not dismiss an already-open menu.
+    pub fn hide_for_capture(&self) {
+        self.status_item.setVisible(false);
+    }
+
+    /// Restores the status item after the capture worker result or watchdog timeout.
+    /// This does not cancel a native request or authorize a retry.
+    pub fn restore_after_capture(&self) {
+        self.status_item.setVisible(true);
+    }
+
+    /// Drains commands queued by AppKit actions, without invoking app callbacks.
+    pub fn drain_commands(&self) -> Vec<MenuCommand> {
+        std::mem::take(&mut *self.command_target.ivars().borrow_mut())
     }
 
     /// Checks the observable native startup invariants without opening a window.
@@ -112,6 +213,51 @@ impl MenuBar {
         }
         if self.quit_item.action() != Some(sel!(terminate:)) {
             return Err(MenuBarError::MissingQuitAction);
+        }
+        Ok(())
+    }
+
+    /// Exercises both actual capture menu actions without starting a capture.
+    ///
+    /// The startup smoke process has no coordinator consuming commands. This checks
+    /// AppKit target/action delivery and command ordering, not permissions or SCK.
+    ///
+    /// # Errors
+    /// Returns an error if a menu action is missing, cannot be sent, or queues wrongly.
+    pub fn validate_capture_commands(&self) -> Result<(), MenuBarError> {
+        self.validate()?;
+        if !self.drain_commands().is_empty() {
+            return Err(MenuBarError::CaptureCommands);
+        }
+        let menu = self
+            .status_item
+            .menu(self.marker)
+            .ok_or(MenuBarError::MissingMenu)?;
+        let application = NSApplication::sharedApplication(self.marker);
+        for (index, expected) in [
+            (0, sel!(startCapture:)),
+            (1, sel!(screenRecordingPermissions:)),
+        ] {
+            let item = menu
+                .itemAtIndex(index)
+                .ok_or(MenuBarError::CaptureCommands)?;
+            if item.action() != Some(expected) {
+                return Err(MenuBarError::CaptureCommands);
+            }
+            let target = item.target().ok_or(MenuBarError::CaptureCommands)?;
+            // SAFETY: The expected selectors are checked above and implemented by
+            // our retained CommandTarget. Its actions only enqueue enum values.
+            if !unsafe { application.sendAction_to_from(expected, Some(&target), Some(&item)) } {
+                return Err(MenuBarError::CaptureCommands);
+            }
+        }
+        if self.drain_commands()
+            != [
+                MenuCommand::StartCapture,
+                MenuCommand::ScreenRecordingPermissions,
+            ]
+        {
+            return Err(MenuBarError::CaptureCommands);
         }
         Ok(())
     }
@@ -182,6 +328,8 @@ pub enum MenuBarError {
     MissingMenu,
     /// The quit menu item does not have the expected action.
     MissingQuitAction,
+    /// Native capture commands did not reach their retained target in order.
+    CaptureCommands,
 }
 
 impl fmt::Display for MenuBarError {
@@ -195,6 +343,7 @@ impl fmt::Display for MenuBarError {
             Self::MissingStatusImage => "the status item has no image",
             Self::MissingMenu => "the status item has no menu",
             Self::MissingQuitAction => "the quit item has no terminate action",
+            Self::CaptureCommands => "capture menu actions could not be delivered",
         };
         formatter.write_str(message)
     }

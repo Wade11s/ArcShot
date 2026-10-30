@@ -1,5 +1,8 @@
 //! Image assets and future image processing for ArcShot.
 
+mod preview;
+pub use preview::{CapturePreview, PreviewError, capture_preview};
+
 use arcshot_core::StatusItemIcon;
 
 /// Returns the built-in status item icon as an encoded PNG.
