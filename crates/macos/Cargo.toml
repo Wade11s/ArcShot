@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 arcshot-core.workspace = true
+log = "0.4"
 screencapturekit = { version = "=11.1.1", default-features = false, features = ["macos_15_0"] }
 apple-cf = { version = "=0.11.7", default-features = false, features = ["cg"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }

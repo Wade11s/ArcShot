@@ -1,9 +1,11 @@
 //! Platform-neutral data shared by ArcShot's product crates.
 
 mod frame;
+mod hotkey;
 mod session;
 
 pub use frame::{CapturedFrame, FrameError, ScreenGeometry};
+pub use hotkey::Hotkey;
 pub use session::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
 };

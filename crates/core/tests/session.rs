@@ -208,3 +208,62 @@ fn app_async_04_cancelled_preflight_cannot_submit_native_work() {
     );
     assert!(!s.may_capture(ticket));
 }
+
+#[test]
+fn core_session_06_output_mutex_ignores_hotkey_start_until_released() {
+    let mut s = CaptureSession::default();
+    let ticket = start(&mut s);
+    s.dispatch(CaptureAction::Completed {
+        ticket,
+        result: Ok(frame()),
+    });
+    // The shared output/save mutex: output processing or an open save dialog
+    // must ignore the capture hotkey without disturbing the session.
+    s.dispatch(CaptureAction::SetOutputBusy { busy: true });
+    assert!(s.output_busy());
+    assert!(s.dispatch(CaptureAction::Start).is_empty());
+    assert_eq!(s.phase(), CapturePhase::Frozen);
+    assert!(s.frame().is_some());
+    // Back to editing or resident: the hotkey works again.
+    s.dispatch(CaptureAction::SetOutputBusy { busy: false });
+    assert!(!s.output_busy());
+    let effects = s.dispatch(CaptureAction::Start);
+    assert_eq!(effects.first(), Some(&CaptureEffect::DismissOverlay));
+    assert!(matches!(effects[1], CaptureEffect::CheckPermission(_)));
+}
+
+#[test]
+fn core_session_07_hotkey_restart_discards_old_frame_and_failure_does_not_restore_it() {
+    let mut s = CaptureSession::default();
+    let old = start(&mut s);
+    s.dispatch(CaptureAction::Completed {
+        ticket: old,
+        result: Ok(frame()),
+    });
+    assert!(s.frame().is_some());
+    let effects = s.dispatch(CaptureAction::Start);
+    assert_eq!(effects.first(), Some(&CaptureEffect::DismissOverlay));
+    let CaptureEffect::CheckPermission(new) = effects[1] else {
+        panic!("expected new preflight");
+    };
+    assert_ne!(new, old);
+    assert!(s.frame().is_none());
+    assert!(!s.may_present(old));
+    s.dispatch(CaptureAction::PermissionChecked {
+        ticket: new,
+        available: true,
+    });
+    // The new capture fails: back to resident, no old-session restoration.
+    assert_eq!(
+        s.dispatch(CaptureAction::Completed {
+            ticket: new,
+            result: Err(CaptureFailure::InvalidFrame),
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::ReportFailure(CaptureFailure::InvalidFrame)
+        ]
+    );
+    assert_eq!(s.phase(), CapturePhase::Resident);
+    assert!(s.frame().is_none());
+}

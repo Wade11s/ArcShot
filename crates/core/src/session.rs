@@ -48,6 +48,13 @@ pub enum CaptureAction {
     CancelAttempt(CaptureTicket),
     /// Invalidates the built-in screen; never migrates to another display.
     DisplayInvalidated,
+    /// The shared output/save mutex contract (I-10): while busy with output
+    /// processing or an open save dialog, `Start` from the capture hotkey or
+    /// menu is ignored. Output slices own setting and releasing it.
+    SetOutputBusy {
+        /// Whether an output action or save dialog is currently in flight.
+        busy: bool,
+    },
 }
 
 /// Tasks to execute outside the pure core, guarded by their attempt ticket.
@@ -126,12 +133,14 @@ enum State {
 pub struct CaptureSession {
     epoch: u64,
     state: State,
+    output_mutex: bool,
 }
 impl Default for CaptureSession {
     fn default() -> Self {
         Self {
             epoch: 0,
             state: State::Resident,
+            output_mutex: false,
         }
     }
 }
@@ -148,6 +157,12 @@ impl CaptureSession {
             State::Frozen { .. } => CapturePhase::Frozen,
             State::Relaunch => CapturePhase::RelaunchRequired,
         }
+    }
+
+    /// Whether the shared output/save mutex currently suppresses `Start`.
+    #[must_use]
+    pub const fn output_busy(&self) -> bool {
+        self.output_mutex
     }
 
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.
@@ -174,6 +189,9 @@ impl CaptureSession {
     /// Applies a semantic action and returns explicit effects for the app coordinator.
     pub fn dispatch(&mut self, action: CaptureAction) -> Vec<CaptureEffect> {
         match action {
+            // The shared output/save mutex ignores the capture hotkey and the
+            // menu Start alike; output slices release it explicitly.
+            CaptureAction::Start if self.output_mutex => vec![],
             CaptureAction::Start => match self.state {
                 State::Relaunch => vec![CaptureEffect::ReportFailure(
                     CaptureFailure::NativeUncertain,
@@ -238,6 +256,10 @@ impl CaptureSession {
                     effects.push(CaptureEffect::ReportFailure(CaptureFailure::DisplayInvalid));
                 }
                 effects
+            }
+            CaptureAction::SetOutputBusy { busy } => {
+                self.output_mutex = busy;
+                vec![]
             }
         }
     }

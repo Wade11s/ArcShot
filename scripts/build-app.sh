@@ -25,5 +25,16 @@ if [ "$configuration" = debug ]; then
     plutil -insert CFBundleDisplayName -string 'ArcShot Debug' "$app_dir/Contents/Info.plist"
 fi
 plutil -lint "$app_dir/Contents/Info.plist"
-codesign --force --sign - --timestamp=none "$app_dir"
+# The stable "ArcShot Dev" identity keeps the designated requirement (and the
+# TCC Screen Recording grant) valid across rebuilds; ad-hoc is cdhash-bound and
+# invalidates the grant on every build. Run scripts/create-dev-signing-identity.sh
+# once to create it; without it this falls back to ad-hoc.
+signing_identity='ArcShot Dev'
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$signing_identity\""; then
+    codesign --force --sign "$signing_identity" --timestamp=none "$app_dir"
+    printf 'signing=identity name=%s\n' "$signing_identity"
+else
+    codesign --force --sign - --timestamp=none "$app_dir"
+    printf 'signing=adhoc\n'
+fi
 printf 'app_bundle=%s\n' "$app_dir"

@@ -83,11 +83,27 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | `crates/app/tests/permission_flow.rs` | APP-EFFECT-01～03：稍后及重启、设置返回重检、按需配置/取消 | 系统权限提示与真实持久偏好 |
 | `crates/image/tests/preview.rs` | IMAGE-LIMIT-01～02：padding/通道、不修改底图、原尺寸保留单物理像素细线和末尾像素 | 最终合成与输出、原生显示观感 |
 | `crates/macos/tests/native_preflight.rs` | 失效身份先于 SCK 拒绝、内屏预检、错误分级、AppKit worker 拒绝 | 实际屏幕捕获 |
-| `scripts/check-startup.sh` | 新增 MAC-MENU-20-01：真实 NSMenu 两个 action 各入队，未启动 coordinator/SCK | 真人点击和捕获 |
+| `scripts/check-startup.sh` | 新增 MAC-MENU-20-01：真实 NSMenu 三个 action 各入队，未启动 coordinator/SCK | 真人点击和捕获 |
+| `scripts/check-startup.sh` | 新增 MAC-HOTKEY-21-01：注册默认 ⌘⇧X、suspend、resume 与清理均成功；无合成按键，不启动会话 | 真实按键事件投递、冲突/恢复的人工复现 |
 | `scripts/check-startup.sh` | MAC-WINDOW-20-01：只有真实状态项的进程枚举到零个可捕获自有窗口，不把 macOS 27 状态栏代理编号误当 CGWindowID | SCK 实际窗口匹配/像素排除 |
 | `scripts/check-startup.sh` | MAC-BUNDLE-ID-20-01：启动前核对配置对应的 ID/名称，Debug 为 dev.arcshot.app.debug / ArcShot Debug，Release 为 dev.arcshot.app / ArcShot | 系统按 ID 重启的解析另需原生验收 |
 
 例如单文件执行 `cargo test --locked -p arcshot-app --test capture_tasks`。
+
+### #21 的稳定自动化入口
+
+热键与重启切片只覆盖已确认接缝：core 语义动作、app 副作用策略、启动冒烟的原生注册。
+真实按键投递、系统冲突、偏好跨重启与设置窗口人工操作属于 MAC-START，仍为用户参与项。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/hotkey.rs` | CORE-HOTKEY-01～04：默认组合、合法性矩阵、显示顺序、存储编解码与畸形值拒绝 | 键盘布局、非 ANSI 键 |
+| `crates/core/tests/session.rs` | CORE-SESSION-06：输出/保存对话框互斥期间忽略 Start，释放后恢复；CORE-SESSION-07：热键重启丢弃旧底图、新捕获失败回驻留且不恢复旧会话 | 输出动作本身（后续切片） |
+| `crates/app/tests/hotkey_flow.rs` | APP-EFFECT-04～10：启动注册/失败提示、保存成功替换并持久化、保存失败保留旧配置并恢复注册、恢复失败明确报错、暂挂失败退出录入、Esc 取消不保存、未变更保存无操作 | 原生注册结果与真实按键 |
+| `crates/app/src/main.rs`（`--smoke-test`） | MAC-HOTKEY-21-01：默认 ⌘⇧X 注册、suspend、resume 与 Drop 清理 | 事件投递、冲突、用户按键 |
+
+热键实测记录见 `docs/validation/21-hotkey.md`。这不是 MAC-START 其余必测项的替代。
+
 实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
 `docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
 
