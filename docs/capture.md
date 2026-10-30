@@ -55,9 +55,12 @@ target/bundle/debug/ArcShot.app/Contents/MacOS/arcshot --check-capture-environme
 `dev.arcshot.app` / ArcShot，Debug 使用 `dev.arcshot.app.debug` / ArcShot Debug，
 授权与偏好相互独立。旧 Debug 曾与 Release 共用 ID；本次已注销旧 Debug 的系统
 启动注册，并按新身份重新注册，Release 保持原签名与授权。
-同一配置重新编译仍可能改变 ad-hoc designated requirement 中的 CDHash。若 TCC
-日志出现 `Failed to match existing code requirement`，先核对实际路径、ID 和签名，
-不要直接重置全局权限。
+本地测试构建使用固定的自签名身份 `ArcShot Dev`
+（`scripts/create-dev-signing-identity.sh` 一次性创建并信任于当前用户域）。
+其 designated requirement 为 `identifier + certificate leaf`，不随 CDHash 变化，
+因此 TCC 屏幕录制授权可跨重建保留；未创建该身份时回退 ad-hoc，此时每次重建都
+可能使授权失效。若 TCC 日志出现 `Failed to match existing code requirement`，
+先核对实际路径、ID 和签名，不要直接重置全局权限。
 
 测试 Release 时先退出已有 ArcShot，再明确新建实例并核实进程路径：
 
