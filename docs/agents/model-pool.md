@@ -1,6 +1,6 @@
 # Model Pools
 
-`arcshot-delegation` 在派遣子代理前读取本文件。这里是模型选择的唯一来源；技能文件只描述路由、并发与隔离。
+仅当当前 harness 为 Pi 时，`arcshot-delegation` 在派遣子代理前读取本文件。本文件是 Pi harness 的模型选择唯一来源；技能文件只描述路由、并发与隔离。其他 harness 使用自身的模型选择与子代理规则，本文件不适用。
 
 ## 模型池
 

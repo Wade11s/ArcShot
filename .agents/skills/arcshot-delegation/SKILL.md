@@ -1,9 +1,11 @@
 ---
 name: arcshot-delegation
-description: ArcShot 的子代理派遣规则：按触发的 skill 或 workflow 选择 model pool，遵守并发上限 2，安排交叉验证与 worktree 隔离，并统一回报。派遣子代理、选择模型、并行委派实现或审查、或要求交叉验证时使用。
+description: 仅在当前 harness 为 Pi 时使用的 ArcShot 子代理派遣规则：按触发的 skill 或 workflow 选择 model pool，遵守并发上限 2，安排交叉验证与 worktree 隔离，并统一回报。Pi 中派遣子代理、选择模型、并行委派实现或审查、或要求交叉验证时使用。
 ---
 
 # ArcShot Delegation
+
+本 skill 及其引用的 `docs/agents/model-pool.md` 仅适用于 Pi harness。其他 harness 使用自身的原生子代理工具与规则，不应用这两份文档。
 
 派遣子代理前，先读 [model pool](../../../docs/agents/model-pool.md)。会写文件的子代理，同时读 `arcshot-git` skill 创建自己的 worktree 与分支。
 

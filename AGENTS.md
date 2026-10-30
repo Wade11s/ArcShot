@@ -18,7 +18,7 @@ See `docs/agents/source-map.md` when locating product code or research/prototype
 
 ### Delegation
 
-Dispatch subagents with the `arcshot-delegation` skill; model pools live in `docs/agents/model-pool.md`.
+Only when the current harness is Pi, dispatch subagents with the `arcshot-delegation` skill and use `docs/agents/model-pool.md`. Other harnesses use their native subagent tools and policies; these two Pi-specific documents do not apply.
 
 ### Git workflow
 
