@@ -110,3 +110,25 @@ SDK 可用性与上游维护是主要风险；不得引入未经确认的预编�
 捕获前隐藏状态栏图标以防其菜单重新打开，捕获完成前不得显示或新建窗口；
 任一窗口未能精确映射时拒绝捕获。正式产品的
 权限、显示几何、窗口排除、命名 sRGB 色彩及生命周期证据仍须实机取得。
+
+## 全局热键适配（#21）
+
+普通键全局热键不引入新第三方依赖，由 macos crate 直接绑定 Carbon
+HIToolbox 系统框架的 `RegisterEventHotKey` / `InstallEventHandler` /
+`UnregisterEventHotKey`（`crates/macos/src/hotkey.rs`）。常量取值以本机
+macOS 27 SDK 头文件为准（`CarbonEvents.h`：`kEventClassKeyboard='keyb'`、
+`kEventHotKeyPressed=5`、`typeEventHotKeyID='hkid'`；`Events.h` 修饰键位），
+未沿用研究报告的数值记忆。research 分支评估过 global-hotkey 0.9.0
+（同样基于该 Carbon 路径）；本票不引入它：一是维持 Rust 自有代码绑定系统
+框架的路线，二是避免新增依赖的供应链与主线程约束需要重新记录。注册为
+非独占（options=0），注册成功只表示本进程会收到通知，不承诺系统独占；
+注册失败以 `Result` 返回，失败路径不 panic。
+
+适配器安全边界：全部方法仅限主线程（`MainThreadMarker` 检查）；安装时把
+按键计数器以 `Rc<RefCell<u32>>` 传入 Carbon handler，handler 在 Drop 中先
+移除再释放，指针生命周期不越过所有权；`set_active` 采用“先注册新组合、
+成功后注销旧组合”，拒绝时旧注册保持原状。持久化使用 NSUserDefaults 的
+`GlobalCaptureHotkey` 键，格式为 `command+control+option+shift+<键>`，
+非法或缺省回退默认 `command+shift+x`。真实按键投递、系统冲突与跨重启
+记忆属 MAC-START，需要用户实机参与，本票只提供注册/暂挂/恢复/清理的
+自动化冒烟（MAC-HOTKEY-21-01）。
