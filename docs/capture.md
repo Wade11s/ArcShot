@@ -120,3 +120,17 @@ scripts/resource-sample.sh <arcshot-pid> 1 30
 `--min-samples`（默认 30）时 exit 1。预热样本按 TEST.md 口径在采集时丢弃，
 脚本不自行判定性能达标。`resource-sample.sh` 以 ps 轮询驻留进程 RSS 并
 报告峰值，只输出文本数值，不读取屏幕像素。
+
+## 颜色/方向 oracle（MAC-COLOR-MANUAL-20-01）
+
+接纳成功后 stderr 会输出一行文本探针：
+
+```text
+capture_probe_rgb_hex tl=… tr=… bl=… br= center=…
+```
+
+值为全屏夹具四角与中心物理像素的 RRGGBBAA（BGRA 存储换算，忽略行 padding，
+alpha 恒为 ff）。实机步骤：全屏显示已知角点颜色的夹具（如四象限纯色
+红/绿/蓝/白），菜单开始截图，从日志读取探针值并与夹具定义比对——同时验证
+无上下翻转（tl/tr 与 bl/br 位置对应）、无通道交换（R/B 不互串）与不透明。
+仅记录数值文本，不保存取证图像。

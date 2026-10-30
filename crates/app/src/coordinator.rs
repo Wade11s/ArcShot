@@ -252,7 +252,7 @@ impl Coordinator {
                 result.display.scale
             );
             let screen = geometry(result.display).map_err(|_| CaptureFailure::InvalidFrame)?;
-            CapturedFrame::try_from_srgb_bgra(
+            let frame = CapturedFrame::try_from_srgb_bgra(
                 screen,
                 result.width,
                 result.height,
@@ -262,7 +262,9 @@ impl Coordinator {
             .map_err(|error| match error {
                 FrameError::Budget => CaptureFailure::ResourceLimit,
                 _ => CaptureFailure::InvalidFrame,
-            })
+            })?;
+            log::info!("{}", capture_probe(&frame));
+            Ok(frame)
         });
         if let Err(error) = submitted {
             cx.global_mut::<MenuBarGlobal>().0.restore_after_capture();
@@ -544,4 +546,54 @@ fn geometry(display: DisplaySnapshot) -> Result<ScreenGeometry, FrameError> {
         display.height,
         display.scale,
     )
+}
+
+/// Text-only corner/center probe of an admitted frame for the manual color
+/// oracle. BGRA storage is reported as RRGGBBAA hex; values only, never pixels.
+fn capture_probe(frame: &CapturedFrame) -> String {
+    let [w, h] = frame.geometry().pixel_size().map(|v| v as usize);
+    let stride = frame.stride();
+    let px = |x: usize, y: usize| -> String {
+        let i = y * stride + x * 4;
+        let p = &frame.bgra()[i..i + 4];
+        format!("{:02x}{:02x}{:02x}{:02x}", p[2], p[1], p[0], p[3])
+    };
+    format!(
+        "capture_probe_rgb_hex tl={} tr={} bl={} br={} center={}",
+        px(0, 0),
+        px(w - 1, 0),
+        px(0, h - 1),
+        px(w - 1, h - 1),
+        px(w / 2, h / 2)
+    )
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    fn frame(bytes: Vec<u8>, stride: usize) -> CapturedFrame {
+        CapturedFrame::try_from_srgb_bgra(
+            ScreenGeometry::try_new(1, 0.0, 0.0, 1.0, 1.0, 2.0).unwrap(),
+            2,
+            2,
+            stride,
+            bytes,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn probe_reports_rgb_corners_and_ignores_padding() {
+        // BGRA storage, row stride 12 with 4 padding bytes per row.
+        let bytes = vec![
+            0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0xff, 0xEE, 0xEE, 0xEE, 0xEE, //
+            0xff, 0x00, 0x00, 0xff, 0x00, 0xff, 0x00, 0xff, 0xEE, 0xEE, 0xEE, 0xEE,
+        ];
+        let report = capture_probe(&frame(bytes, 12));
+        assert_eq!(
+            report,
+            "capture_probe_rgb_hex tl=ff0000ff tr=000000ff bl=0000ffff br=00ff00ff center=00ff00ff"
+        );
+    }
 }
