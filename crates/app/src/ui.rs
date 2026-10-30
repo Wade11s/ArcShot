@@ -207,13 +207,18 @@ impl HotkeyView {
             return false;
         };
         let modifiers = &keystroke.modifiers;
-        self.candidate = Some(Hotkey::new(
+        let candidate = Hotkey::new(
             key,
             modifiers.platform,
             modifiers.control,
             modifiers.alt,
             modifiers.shift,
-        ));
+        );
+        log::info!(
+            "hotkey_recorded keystroke_key={:?} candidate={candidate}",
+            keystroke.key
+        );
+        self.candidate = Some(candidate);
         cx.notify();
         true
     }
@@ -326,6 +331,7 @@ impl Render for HotkeyView {
                                     view.recording = false;
                                     cx.notify();
                                 });
+                                log::info!("hotkey_save_pushed window_id={window_id:?}");
                                 queue.borrow_mut().push(command);
                             }),
                     );

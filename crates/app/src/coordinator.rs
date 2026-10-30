@@ -50,6 +50,11 @@ struct Coordinator {
 pub(crate) fn launch(cx: &mut App) {
     let hotkeys = native::GlobalHotkeys::install().ok();
     let hotkey_flow = HotkeyFlow::new(native::hotkey_settings_load());
+    log::info!(
+        "hotkey_launch config={} adapter={:?}",
+        hotkey_flow.config(),
+        hotkeys.is_some()
+    );
     let coordinator = cx.new(|_| Coordinator {
         session: CaptureSession::default(),
         tasks: CaptureTasks::default(),
@@ -101,7 +106,10 @@ impl Coordinator {
         for command in commands {
             match command {
                 MenuCommand::StartCapture => self.start_capture(cx),
-                MenuCommand::HotkeySettings => self.open_hotkey_settings(cx),
+                MenuCommand::HotkeySettings => {
+                    log::info!("menu_hotkey_settings");
+                    self.open_hotkey_settings(cx);
+                }
                 MenuCommand::ScreenRecordingPermissions if !self.busy() => {
                     self.action(CaptureAction::Cancel, cx);
                     self.permission(PermissionAction::Check, cx);
@@ -136,6 +144,7 @@ impl Coordinator {
                         .hotkey_settings
                         .is_some_and(|settings| settings.window_id() == window_id) =>
                 {
+                    log::info!("hotkey_save_requested candidate={candidate}");
                     // Saving while recording keeps the old registration
                     // suspended: the flow registers the candidate first and
                     // restores the suspended value if registration fails.
@@ -220,6 +229,7 @@ impl Coordinator {
 
     /// Drives the hotkey policy, executing its native and persistence effects.
     fn hotkey(&mut self, action: HotkeyAction, cx: &mut Context<Self>) {
+        log::info!("hotkey_dispatch action={action:?}");
         let mut effects: VecDeque<_> = self.hotkey_flow.dispatch(action).into();
         while let Some(effect) = effects.pop_front() {
             match effect {
@@ -228,6 +238,7 @@ impl Coordinator {
                         .with_hotkeys(|hotkeys| hotkeys.set_active(value))
                         .map(|()| HotkeyOutcome::Applied)
                         .unwrap_or(HotkeyOutcome::Failed);
+                    log::info!("hotkey_register value={value} outcome={outcome:?}");
                     effects.extend(
                         self.hotkey_flow
                             .dispatch(HotkeyAction::RegisterResult(outcome)),
@@ -238,6 +249,7 @@ impl Coordinator {
                         .with_hotkeys(native::GlobalHotkeys::suspend)
                         .map(|()| HotkeyOutcome::Applied)
                         .unwrap_or(HotkeyOutcome::Failed);
+                    log::info!("hotkey_suspend outcome={outcome:?}");
                     effects.extend(
                         self.hotkey_flow
                             .dispatch(HotkeyAction::SuspendResult(outcome)),
@@ -248,12 +260,16 @@ impl Coordinator {
                         .with_hotkeys(native::GlobalHotkeys::resume)
                         .map(|()| HotkeyOutcome::Applied)
                         .unwrap_or(HotkeyOutcome::Failed);
+                    log::info!("hotkey_resume outcome={outcome:?}");
                     effects.extend(
                         self.hotkey_flow
                             .dispatch(HotkeyAction::ResumeResult(outcome)),
                     );
                 }
-                HotkeyEffect::Store(value) => native::hotkey_settings_store(value),
+                HotkeyEffect::Store(value) => {
+                    log::info!("hotkey_store value={value}");
+                    native::hotkey_settings_store(value);
+                }
                 HotkeyEffect::Notice(notice) => self.hotkey_notice(notice),
             }
         }
@@ -316,7 +332,7 @@ impl Coordinator {
         let current = self.hotkey_flow.config();
         let active = self.hotkey_flow.registered() == Some(current);
         let error = self.hotkey_view_error.take();
-        let _ = settings.update(cx, |view, _, cx| {
+        let updated = settings.update(cx, |view, _, cx| {
             view.current = current;
             view.active = active;
             view.error = error;
@@ -325,6 +341,11 @@ impl Coordinator {
             }
             cx.notify();
         });
+        if updated.is_err() {
+            // The window closed without our close command; drop the handle so
+            // later refreshes do not keep targeting a missing window.
+            self.hotkey_settings = None;
+        }
     }
 
     fn open_hotkey_settings(&mut self, cx: &mut Context<Self>) {
