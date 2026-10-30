@@ -57,6 +57,7 @@ open target/bundle/release/ArcShot.app
 | dispatch2 0.3.1 | 将退出 action 安全排队回主队列 | 替代为自写 GCD FFI，未采用；`MainThreadBound` 避免自写 `unsafe impl Send`。 |
 | image 0.25.10（app，关闭默认特性） | 把内存 BGRA 预览包装成 GPUI 要求的 Frame 类型 | 已由 GPUI 带入同版本；不使用编码、磁盘或网络加载。替代为 PNG 中转会增加编码和内存副本，未采用。 |
 | log 0.4.34（app） | 文本诊断和捕获/窗口提交耗时 | 已在依赖图中；自有 stderr logger 无网络、遥测和像素日志。替代为每处直接打印未采用。 |
+| log 0.4.34（macos，#21） | Carbon 热键适配器在注销/移除失败与 Drop 异常路径记录诊断 | 与 app 共用同一 crate 与 stderr logger；适配器不做窗口或用户界面，失败仍以 `Result` 返回。 |
 
 四个本地 crate 均为 path dependency。依赖方向由 `scripts/check-architecture.sh`
 检查：app → core/image/macos；image/macos → core；image 与 macos 不互依赖；
@@ -124,11 +125,14 @@ macOS 27 SDK 头文件为准（`CarbonEvents.h`：`kEventClassKeyboard='keyb'`�
 非独占（options=0），注册成功只表示本进程会收到通知，不承诺系统独占；
 注册失败以 `Result` 返回，失败路径不 panic。
 
-适配器安全边界：全部方法仅限主线程（`MainThreadMarker` 检查）；安装时把
-按键计数器以 `Rc<RefCell<u32>>` 传入 Carbon handler，handler 在 Drop 中先
-移除再释放，指针生命周期不越过所有权；`set_active` 采用“先注册新组合、
-成功后注销旧组合”，拒绝时旧注册保持原状。持久化使用 NSUserDefaults 的
-`GlobalCaptureHotkey` 键，格式为 `command+control+option+shift+<键>`，
-非法或缺省回退默认 `command+shift+x`。真实按键投递、系统冲突与跨重启
-记忆属 MAC-START，需要用户实机参与，本票只提供注册/暂挂/恢复/清理的
-自动化冒烟（MAC-HOTKEY-21-01）。
+适配器安全边界：Carbon 路径（`install` / `set_active` / `suspend` / `resume`）
+仅限主线程并由 `MainThreadMarker` 检查；NSUserDefaults 持久化按 Apple 文档为
+线程安全，不附加主线程检查。安装时把按键计数器以 `Rc<RefCell<u32>>` 传入
+Carbon handler；`Drop` 先移除 handler 再释放，移除失败时 `mem::forget` 该
+计数器副本，避免 handler 仍被调用时释放其引用数据；注销失败的
+`EventHotKeyRef` 记入 retired 列表并在 `Drop` 重试。`set_active` 采用
+“先注册新组合、成功后注销旧组合”，拒绝时旧注册保持原状。持久化使用
+NSUserDefaults 的 `GlobalCaptureHotkey` 键，格式为
+`command+control+option+shift+<键>`，非法或缺省回退默认 `command+shift+x`。
+真实按键投递、系统冲突与跨重启记忆属 MAC-START，需要用户实机参与，本票只
+提供注册/暂挂/恢复/清理的自动化冒烟（MAC-HOTKEY-21-01）。

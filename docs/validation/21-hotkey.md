@@ -7,8 +7,10 @@
 ## 实测来源与环境
 
 - 基线 SHA：`b06c787a`（main）。
-- 实测实现/脚本 SHA：`5e30db06c49cd39b711994adba0e47e5c646778f`。
-- 时间：2026-10-30T17:08:08Z（环境采集与完整入口执行；实现 SHA 之后未再改产品源码）。
+- 实测实现/脚本 SHA：`6b290ed3b7873a73939a75a65d2de5cf9cf534b0`（含双轴审查修正；
+  其后的纯文档提交不改产品源码）。
+- 时间：2026-10-30T17:22:37Z（证据采集；42 测试完整入口与 Debug/Release 冒烟均在该
+  实现 SHA 上执行，之后未再改产品源码）。
 - 构建配置：Debug 与 Release。Rust 自动化为 Debug；两种 bundle 均运行启动/菜单/
   热键注册/退出冒烟。
 - Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
@@ -43,11 +45,19 @@ scripts/record-validation.sh --configuration release \
   --logs target/21-check-all.log,target/startup-smoke-release.log
 ```
 
-完整入口 exit 0：fmt、Clippy warnings-as-errors、**41 个 Rust 集成测试通过**、
+完整入口 exit 0：fmt、Clippy warnings-as-errors、**42 个 Rust 集成测试通过**、
 doc、验证工具/依赖/架构/真实文字后端、Debug 与 Release 原生驻留/菜单/热键注册/
 退出冒烟、驻留 socket 检查（`privacy_smoke=pass network_sockets=0`）全部通过。
 传递依赖 block/proc-macro-error2 的 future incompatibility 提示仍存在，不是当前
 编译或 Clippy 失败。
+
+双轴代码审查（Standards/Spec 并行子代理）后的修正已包含在上述结果内：Drop 在
+handler 移除失败时泄漏按键计数器副本以避免 use-after-free、注销失败的
+`EventHotKeyRef` 记入 retired 列表并在 Drop 重试、录入中显示候选组合及合法性、
+暂挂失败时退出录入、保存不再先恢复旧注册（避免恢复失败误报）、`is_valid` 文档
+补充平台键映射归属、显示/存储共用修饰键表。审查另确认：合成 CGEvent 按键投递
+不可作为自动化证据（见下），输出互斥对菜单 Start 同样生效与 I-10“统一输出/
+对话框互斥”一致。
 
 ## 稳定自动化子用例
 
@@ -69,6 +79,7 @@ doc、验证工具/依赖/架构/真实文字后端、Debug 与 Release 原生�
 | APP-EFFECT-08 | 保存失败后恢复也失败 | 明确报错且不得显示生效 | `RestoreFailed`，`registered=None` | Pass |
 | APP-EFFECT-09 | 暂挂失败 | 保留注册并退出录入 | `SuspendFailed`，旧组合仍生效 | Pass |
 | APP-EFFECT-10 | Esc 取消录入 / 保存未变更组合 | 恢复注册，不保存 | `Resume`；未变更保存无效果 | Pass |
+| APP-EFFECT-11 | 录入中保存成功 / 失败 | 成功只替换并持久化，不恢复旧注册；失败恢复一次 | `Store`；`SaveRejected`+`Resume` | Pass |
 | MAC-HOTKEY-21-01 | `--smoke-test`（Debug 与 Release）注册默认 ⌘⇧X、suspend、resume、Drop | 原生注册/暂挂/恢复/清理成功，未启动会话 | `hotkey_registration_smoke=pass default=⌘⇧X suspend_resume_cleanup=clean` | Pass |
 
 ## 原生冒烟与人工项
