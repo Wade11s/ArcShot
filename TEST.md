@@ -81,13 +81,18 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | `crates/core/tests/frame.rs` | CORE-COORD-01～02：global/display-local 与物理尺寸、畸形几何；APP-FRAME-01～02：行 padding、尺寸/stride/字节数/溢出/alpha/预算 | 颜色来源；native 必须先转换 named sRGB |
 | `crates/app/tests/capture_tasks.rs` | APP-ASYNC-05～07：独立绝对期限、worker unwind、单在途与已知结果释放 | 真实原生请求退出确认 |
 | `crates/app/tests/permission_flow.rs` | APP-EFFECT-01～03：稍后及重启、设置返回重检、按需配置/取消 | 系统权限提示与真实持久偏好 |
-| `crates/image/tests/preview.rs` | IMAGE-LIMIT-01～02：padding/通道、不修改底图、4M 预览上限 | 最终合成与输出 |
+| `crates/image/tests/preview.rs` | IMAGE-LIMIT-01～02：padding/通道、不修改底图、原尺寸保留单物理像素细线和末尾像素 | 最终合成与输出、原生显示观感 |
 | `crates/macos/tests/native_preflight.rs` | 失效身份先于 SCK 拒绝、内屏预检、错误分级、AppKit worker 拒绝 | 实际屏幕捕获 |
 | `scripts/check-startup.sh` | 新增 MAC-MENU-20-01：真实 NSMenu 两个 action 各入队，未启动 coordinator/SCK | 真人点击和捕获 |
+| `scripts/check-startup.sh` | MAC-WINDOW-20-01：只有真实状态项的进程枚举到零个可捕获自有窗口，不把 macOS 27 状态栏代理编号误当 CGWindowID | SCK 实际窗口匹配/像素排除 |
+| `scripts/check-startup.sh` | MAC-BUNDLE-ID-20-01：启动前核对配置对应的 ID/名称，Debug 为 dev.arcshot.app.debug / ArcShot Debug，Release 为 dev.arcshot.app / ArcShot | 系统按 ID 重启的解析另需原生验收 |
 
 例如单文件执行 `cargo test --locked -p arcshot-app --test capture_tasks`。
 实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
 `docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
+
+权限提示替换竞态的原生冒烟记录见上述验证报告：真实 GPUI Esc 先入队、替换提示后
+消费，旧 Esc 不关闭新提示，当前 Esc 正常关闭；该场景未纳入常驻自动化入口。
 
 新增子用例必须记录稳定 ID、前置、步骤、预期与实际，不通过删除规格边界来减少
 测试。模拟成功不能证明权限、焦点、IME、原生捕获或真实资源生命周期成功。

@@ -17,22 +17,27 @@
   通道收到消息便允许重启。panic 只在应用 worker 边界防护，普通错误使用 Result。
 - 使用固定单内屏的身份、逻辑几何与 2x scale。native 捕获前后、呈现前、Frozen
   驻留期间持续核对；任何失效结束整个会话，不迁移到外屏。
-- 自有准备窗口先可见并等待 80 ms 注册，主线程列举其精确窗口 ID，在同一个 SCK
-  display filter 中排除；任何映射失败不捕获。采样期间隐藏状态项，禁止新建自有
+- 自有准备窗口先可见并等待 80 ms 注册，隐藏状态项后，主线程用 AppKit
+  `windowNumbersWithOptions(AllSpaces)` 列举真实自有屏幕窗口，在同一个 SCK display
+  filter 中精确排除；不把 `NSApplication.windows()` 中的状态栏代理窗口当作
+  CGWindowID。任何枚举/映射失败不捕获，并恢复状态项。采样期间禁止新建自有
   窗口；成功后才替换准备窗为冻结覆盖层。取消只关闭窗口，不解除原生请求栅栏。
 - Screen Recording 的首引导可以稍后或关闭；用户处理后持久记忆。菜单/截图仍按需
   检查真实权限。显式“配置权限/打开系统设置”才请求该权限，返回应用时重检；
   “重新检查”不重发请求。普通截图不检查 AX / Input Monitoring。
+- 权限及错误提示的按钮、Esc 和原生关闭事件携带来源窗口 ID；提示替换或关闭后，
+  旧窗口的排队事件不能关闭新提示或执行权限副作用。
 - 原生仅走 SCScreenshotManager.capture_image。sourceRect 为 display-local
   (0,0,width,height) 逻辑点，global screen origin 仅用于身份/几何核对；
   输出物理像素由 filter.pointPixelScale=2 决定。
 - 显式 sRGB、SDR、BGRA、无光标；通过命名 kCGColorSpaceSRGB 的 8-bit CGContext
   转换后，验证尺寸、stride、字节数与所有 alpha=255，才进入中性 CapturedFrame。
 - 分配前限制 24M 像素、边长 16384，native 原始存储 ≤192,000,000 字节。
-  中性帧接纳还预留 8 个行跨度表面和 272 MiB 预览/运行时余量，合计 ≤2 GiB；
-  这是保守 admission accounting，不是实测 footprint。预览 ≤4M 像素，使用
-  image 的 presentation-only 采样，原始 2x 底图不缩小。取消释放底图、预览及
-  GPUI image cache 引用；不承诺安全擦除。
+  中性帧接纳还预留 8 个行跨度表面和 272 MiB 缩略预览/运行时余量，合计 ≤2 GiB；
+  这是保守 admission accounting，不是实测 footprint。普通冻结画面以原始物理
+  分辨率呈现，image 只移除行 padding，不降采样；该表面及 GPUI 上传/纹理包含
+  在全尺寸表面预算中。4M 上限仅用于缩略预览（含滚动缩略预览）。取消释放底图、
+  冻结表面及 GPUI image cache 引用；不承诺安全擦除。
 
 ## 无捕获预检
 
@@ -43,6 +48,35 @@ target/bundle/debug/ArcShot.app/Contents/MacOS/arcshot --check-capture-environme
 
 只报告内屏 ID/逻辑几何/scale、Screen Recording preflight 和首引导偏好。
 不请求权限、不读取像素。不要把该预检的成功当成捕获成功。
+
+### 固定授权对象与启动方式
+
+实机测试先选定 Debug 或 Release，授权后保持同一个 bundle 和签名。Release 使用
+`dev.arcshot.app` / ArcShot，Debug 使用 `dev.arcshot.app.debug` / ArcShot Debug，
+授权与偏好相互独立。旧 Debug 曾与 Release 共用 ID；本次已注销旧 Debug 的系统
+启动注册，并按新身份重新注册，Release 保持原签名与授权。
+同一配置重新编译仍可能改变 ad-hoc designated requirement 中的 CDHash。若 TCC
+日志出现 `Failed to match existing code requirement`，先核对实际路径、ID 和签名，
+不要直接重置全局权限。
+
+测试 Release 时先退出已有 ArcShot，再明确新建实例并核实进程路径：
+
+```sh
+open -n target/bundle/release/ArcShot.app
+pgrep -fl 'ArcShot.app/Contents/MacOS/arcshot'
+```
+
+后者必须只显示目标 Release 路径；只看到菜单栏图标不能证明运行的是哪个构建。
+从 agent/终端直接调用可执行文件时，TCC 可能把权限归属到启动它的终端应用；
+需要证明 GUI 授权时，通过 LaunchServices 运行无捕获预检并查看其输出日志：
+
+```sh
+open -n --stdout "$PWD/target/capture-preflight.log" \
+  target/bundle/release/ArcShot.app --args --check-capture-environment
+```
+
+等待该短暂进程退出后读取 `target/capture-preflight.log`；该入口不会显示 GUI、
+请求权限或捕获像素。后续 GUI 测试仍使用上述明确启动的同一个 Release bundle。
 
 ## 需用户参与的稳定子用例
 
