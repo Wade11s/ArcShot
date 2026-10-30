@@ -1,9 +1,6 @@
-//! Bounded presentation-only sampling; the immutable physical-pixel base is retained.
+//! Native-resolution frozen presentation; the immutable captured base is retained.
 use arcshot_core::CapturedFrame;
 use std::{error::Error, fmt};
-
-/// V1's physical-pixel cap for a preview surface, independent of the document cap.
-const MAX_PREVIEW_PIXELS: u32 = 4_000_000;
 
 /// Packed opaque BGRA pixels intended only for presenting the frozen screen.
 #[derive(Debug)]
@@ -16,37 +13,30 @@ pub struct CapturePreview {
     pub bgra: Vec<u8>,
 }
 
-/// Creates a bounded preview without changing or downscaling the authoritative base.
+/// Creates a native-resolution frozen surface without modifying the captured base.
 ///
-/// Integer nearest-neighbor sampling is only a UI preview, never output data. Source
-/// pixels come from the previously checked frame contract and do not include padding.
+/// Copies packed rows from the admitted frame, dropping only row padding. Frozen
+/// presentation shares the document pixel limit and its full-surface memory budget;
+/// the separate thumbnail limit does not downsample the screen background.
 ///
 /// # Errors
-/// Returns an allocation error before any over-budget preview surface is constructed.
+/// Returns an allocation error if the admitted full-resolution surface cannot be reserved.
 pub fn capture_preview(frame: &CapturedFrame) -> Result<CapturePreview, PreviewError> {
     let [width, height] = frame.geometry().pixel_size();
-    let mut divisor = 1;
-    while width.div_ceil(divisor) * height.div_ceil(divisor) > MAX_PREVIEW_PIXELS {
-        divisor += 1;
-    }
-    let w = width.div_ceil(divisor);
-    let h = height.div_ceil(divisor);
-    let length = w as usize * h as usize * 4;
+    let row_bytes = width as usize * 4;
+    let length = row_bytes * height as usize;
     let mut bgra = Vec::new();
     bgra.try_reserve_exact(length).map_err(|_| PreviewError)?;
-    for y in 0..h {
-        for x in 0..w {
-            let offset = (y * divisor) as usize * frame.stride() + (x * divisor) as usize * 4;
-            bgra.extend_from_slice(&frame.bgra()[offset..offset + 4]);
-        }
+    for row in frame.bgra().chunks_exact(frame.stride()) {
+        bgra.extend_from_slice(&row[..row_bytes]);
     }
     Ok(CapturePreview {
-        width: w,
-        height: h,
+        width,
+        height,
         bgra,
     })
 }
-/// The preview allocation could not be reserved within the admitted pixel budget.
+/// The frozen surface allocation could not be reserved within the admitted frame budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreviewError;
 impl fmt::Display for PreviewError {

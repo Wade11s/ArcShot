@@ -131,8 +131,9 @@ impl CapturedFrame {
         let length = stride
             .checked_mul(height as usize)
             .ok_or(FrameError::Stride)?;
-        // Reserve room for native image, normalized frame, GPUI upload/texture and
-        // processing snapshots (8 full surfaces), plus preview/runtime headroom.
+        // Reserve room for native/normalized frames, the full-resolution frozen
+        // surface, GPUI upload/texture and snapshots (8 full surfaces), plus
+        // thumbnail/runtime headroom.
         // This is admission accounting, not a claim of measured physical footprint.
         const CAPTURE_HEADROOM: usize = 272 * 1024 * 1024;
         const PROCESS_BUDGET: usize = 2 * 1024 * 1024 * 1024;
