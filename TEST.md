@@ -34,6 +34,7 @@ cargo doc --locked --workspace --no-deps
 scripts/test-validation-tools.sh
 scripts/check-validation.sh
 scripts/test-dependency-inspection.py
+cargo fetch --locked
 scripts/inspect-dependencies.py
 scripts/check-architecture.sh
 scripts/check-text-backend.sh
@@ -151,13 +152,15 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | 层 | `agent-desktop` 实测能力 | 用途 |
 | --- | --- | --- |
 | AppKit 状态项与 NSMenu | 状态项与四个菜单项以 role `menuitem` 暴露，`native_id` 就是 selector（`startCapture:`、`hotkeySettings:`、`screenRecordingPermissions:`、`terminate:`）；可 headless `click`，不需要打开菜单、不需要前台 | 驱动全部菜单命令 |
-| 带标题栏的 GPUI 窗口（快捷键设置、权限提示） | 出现在 `list-windows --app`，含 id、尺寸与 `is_focused`；窗口内 `AXChildren` 为 0 | 断言窗口出现、尺寸与前台；不能断言窗口内容 |
-| 无标题栏的冻结覆盖层 | 实测不出现在 `list-windows`/`snapshot`/`list-surfaces`（`titlebar: None`，无标题、无 AX 子节点），只在 `CGWindowListCopyWindowInfo` 可见（`layer 101`） | 出现只能由产品 stderr 诊断行证明；关闭目前无观察手段（§4.5） |
+| 带标题栏的 GPUI 窗口（快捷键设置、权限提示） | 出现在 `list-windows --app`（尺寸/`is_focused`）；窗口内按 #53/#54 有可寻址节点：`group` 根节点带可见名称，文本是 `statictext`（值即文本），控件是 `button` 且 `native_id` 为稳定 `AXIdentifier`（`arcshot.notice.close`、`arcshot.hotkey.recorder`…） | 读窗口内容并按名字/标识驱动 |
+| 无标题栏的冻结覆盖层 | 仍不出现在 `list-windows`（`titlebar: None`，非激活 borderless），但按 #55 有可寻址 AX 子树：`group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel` | 用 `snapshot --app` 观察与取消，不靠 `--headed` Esc |
 
-GPUI 0.2.2 不上报 accessibility 子树，因此窗口内容（按钮、输入区、冻结画面、标注
-工具）不能被 `snapshot`/`find`/`click` 观察或驱动。E2E 的观察合同因此固定为：
+基座是 `gpui-pre` 0.3.11（ADR-0001），它上报 accessibility 子树；产品在 #53/#54/#55
+给三个窗口加了 `id` + `role` + `aria_label` + `accessibility_id` + `on_a11y_action`。
+E2E 的观察合同因此是**双通道**：
 
-1. **驱动**只用 AX 可寻址对象：状态项、四个菜单项、标题栏窗口本身。
+1. **驱动**用 AX：状态项与四个菜单项，以及窗口内的 `button` 节点（按 `native_id`
+   或名字命中）。
 2. **状态**以产品 stderr 诊断行为准（`capture_phase from=… to=… action=…`、
    `capture_request_us=`、`capture_probe_grid`、`capture_wake_window_submit_us=`、
    `menu_hotkey_settings`、`hotkey_register …`）。`capture_phase` 是会话相位的唯一
@@ -168,16 +171,23 @@ GPUI 0.2.2 不上报 accessibility 子树，因此窗口内容（按钮、输入
    自有窗口；冻结覆盖层存在时它同样为空，因为该窗口无标题栏不被枚举。所以这个断言
    既不能证明覆盖层存在，也不能证明它已关闭，只能证明没有可捕获的自有窗口。
 4. **按键**分两类。全局组合用不带 `--headed` 的 `press`（physical 投递，不要求
-   ArcShot 在前台，但必须先用一个未注册组合做阴性对照）；窗口内按键（如 Esc）只能
-   用 `press … --headed` 投到前台应用，并且只在产品刚报告会话或提示窗口打开（产品
-   自己 `activate`）之后发出。headless `press --app` 在无焦点 AX 元素时必然
-   `ACTION_FAILED`；`--headed` 坐标点击不属于稳定断言，不能用于验收。
+   ArcShot 在前台，但必须先用一个未注册组合做阴性对照）；窗口内按键（录制新组合、
+   Esc）只能用 `press … --headed` 投到前台应用，并且只在产品刚报告会话或提示窗口
+   打开（产品自己 `activate`）之后发出。headless `press --app` 在无焦点 AX 元素时
+   必然 `ACTION_FAILED`；`--headed` 坐标点击不属于稳定断言，不能用于验收。
+5. **AX 语义**：`AXPress` **不会**触发 `on_click`，两条路径都必须显式注册
+   `on_a11y_action(AccessibleAction::Click, …)`，且两条路径入同一个 `UiQueue`；每次
+   AX 激活另写一行 `a11y_action=<surface>.<control> action=Click`，E2E 以该行证明
+   动作真的到达产品。
+6. **懒激活**：Accessibility 在第一个辅助技术客户端连接时才建立，窗口刚打开的第一
+   次 `snapshot --app` 可能是空树；必须先重读再下结论（脚本里的 `wait_node`）。
 
 ### 4.3 稳定用例
 
 本轮实测环境：Debug 与 Release 构建、正式 bundle 可执行文件、内建屏
-`1470x956 scale=2`、屏幕录制权限已授予。本轮观测与限制见
-`docs/validation/e2e-agent-desktop.md`。
+`1470x956 scale=2`、屏幕录制权限已授予。基座迁移见
+`docs/validation/e2e-agent-desktop.md`，可访问性接线见
+`docs/validation/56-a11y-e2e.md`。
 
 | 稳定 ID | 前置与步骤 | 必须观察 | 明确不覆盖 |
 | --- | --- | --- | --- |
@@ -191,6 +201,9 @@ GPUI 0.2.2 不上报 accessibility 子树，因此窗口内容（按钮、输入
 | MAC-E2E-07 | 点击 屏幕录制权限… 后 `press escape --headed` | 出现 `560x282` 自有窗口；Esc 后 `list-windows --app` 为空 | 真实 TCC 提示、设置返回重检、运行中撤权 |
 | MAC-E2E-08 | 点击 退出 ArcShot | 进程退出；`agent-desktop find --surface menu-bar-extras --app "ArcShot Debug"` 返回 `APP_NOT_FOUND`；`list-apps --app "ArcShot"` 为空 | 系统按 ID 重启、登录项、状态项像素残留 |
 | MAC-E2E-09 | 启动前后 `agent-desktop list-apps --app "ArcShot"` | 只出现被测 `bundle_id` 与显示名（Debug/Release 各一） | 系统按 bundle ID 解析到哪一份拷贝 |
+| MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
+| MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
+| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区/标注（尚未实现） |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -225,13 +238,14 @@ agent-desktop press escape --headed
 - 已落地：会话每次相位转换（`Resident` / `CheckingPermission` / `Preparing` /
   `Draining` / `Frozen` / `RelaunchRequired`，附语义动作名）各有一行纯文本 stderr
   事件，因此 MAC-E2E-05b 与重启/失败路径不再依赖坐标或截图。
-- 仍未落地：NSWindow 销毁级证据（冻结覆盖层没有标题栏，既不在 `list-windows`，也
-  无法由外部脚本区分“已关闭”与“仍在屏”）。需要外部窗口探针或 GPUI 可访问性，
-  在此之前该子项只算会话层证据。
-- GPUI 0.2.2 不上报 accessibility 子树：窗口内按钮、输入区、冻结画面与标注工具
-  全部不可寻址。若要让 MAC-REGION / MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 进入
-  E2E，需要为 app 接入 accessibility（`accesskit` 或等价的 AX 桥），接入后用
-  `snapshot --app` 证明元素真的可见。
+- 仍未落地：覆盖层的窗口级枚举。`WindowKind::PopUp` + `titlebar: None` 的非激活
+  borderless 窗口在 0.3.11 下仍不出现在 `list-windows`；#55 改以 `snapshot --app`
+  证明“可寻址”，NSWindow 销毁级证据仍缺外部探针。
+- 已落地（#53/#54/#55）：权限提示、快捷键设置与冻结覆盖层的元素都有
+  `id` + `role` + `aria_label` + `accessibility_id` + `on_a11y_action`，
+  `snapshot --app` 可见、可驱动。**尚未**标注的是未来的产品面：区域选区、标注工具、
+  文字编辑与滚动预览。它们落地时必须沿用 §4.2 的约定，否则 MAC-REGION /
+  MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 仍无法进入 E2E。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 
@@ -247,25 +261,25 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 
 | 稳定用例组 | 实机范围 | 本轮 `agent-desktop` 可行性 |
 | --- | --- | --- |
-| MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出见 §4.3；热键录入、保存与偏好界面无 AX 节点，不可驱动 |
-| MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭见 MAC-E2E-07；TCC 授权与设置返回属 §4.4 |
-| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 否：选区在 GPUI 内，无 AX 节点 |
-| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 否：同 MAC-REGION |
-| MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：无 AX 节点；IME 候选窗另属 §4.4 |
+| MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出见 §4.3；热键录入与保存已可由 AX 驱动（MAC-E2E-11），冲突恢复与登录项仍不可驱动 |
+| MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；TCC 授权与设置返回属 §4.4 |
+| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 否：选区尚无实现，落地时须按 §4.2 加 AX 标注才能进入 E2E |
+| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 否：同 MAC-REGION（工具尚未实现） |
+| MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
-| MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层在 GPUI 内 |
-| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 否：双击/拖拽只能靠 `--headed` 坐标，不是稳定断言 |
-| MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖 GPUI 内的可视结果 |
+| MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层尚未实现，落地时须补 AX 标注 |
+| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 否：双击/拖拽只能靠 `--headed` 坐标；单帧与 Esc 可用 AX 动作表达 |
+| MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖视觉结果，需 `screenshot` 或人工（§4.4） |
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
 | MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分：本机 `agent-desktop 1.1.0` 无剪贴板子命令，字节比对仍需脚本 |
-| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 否：对话框与按钮在 GPUI 内 |
+| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 否：对话框尚未实现；落地后按 §4.2 加 AX 后可驱动 |
 | MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分：退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
 
 权限切换若先触发焦点停止，只能记录实际时序，不能冒称“运行中直接撤权”已验证。
 负面用例通过只表示安全处理，不外推为任意应用、动态内容、显示器或滚动速度兼容。
-GPUI 窗口内的用例在 GPUI 提供 accessibility 子树之前保持 **Not tested**；不得用
-`--headed` 坐标点击冒充这些用例的通过证据。
+尚未实现的产品面（选区、标注、文字、滚动）在落地前保持 **Not tested**；落地时必须
+同时按 §4.2 加 AX 标注，不得用 `--headed` 坐标点击冒充这些用例的通过证据。
 
 ## 6. 性能与资源门槛
 

@@ -16,6 +16,7 @@ arcshot-image.workspace = true
 arcshot-macos.workspace = true
 anyhow.workspace = true
 gpui.workspace = true
+gpui-platform.workspace = true
 image = { version = "0.25", default-features = false }
 log = "0.4"
 

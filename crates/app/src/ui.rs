@@ -2,7 +2,8 @@
 use arcshot_app::{PermissionAction, PermissionNotice};
 use arcshot_core::{CaptureTicket, Hotkey};
 use gpui::{
-    Context, FocusHandle, Render, RenderImage, Window, WindowId, div, img, prelude::*, px, rgb,
+    AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Window, WindowId, div, img,
+    prelude::*, px, rgb, text,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -27,16 +28,28 @@ pub(crate) struct CaptureView {
 }
 impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let key_queue = Rc::clone(&self.queue);
         let queue = Rc::clone(&self.queue);
+        let a11y_queue = Rc::clone(&self.queue);
         let ticket = self.ticket;
+        let status = if self.image.is_some() {
+            "画面已冻结 · Esc 取消（本阶段不输出）"
+        } else {
+            "正在准备截图… · Esc 取消"
+        };
         div()
+            .id("overlay-root")
+            .role(Role::Group)
+            .aria_label("ArcShot 截图覆盖层")
             .size_full()
             .relative()
             .bg(rgb(0x15171b))
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
-                    queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+                    key_queue
+                        .borrow_mut()
+                        .push(UiCommand::CancelCapture(ticket));
                     cx.stop_propagation();
                 }
             })
@@ -46,7 +59,13 @@ impl Render for CaptureView {
                     .map(|image| img(Arc::clone(image)).size_full()),
             )
             .child(
+                // The hint doubles as the accessible cancel affordance: it is the
+                // only action a Frozen session offers at this stage.
                 div()
+                    .id("capture-badge")
+                    .role(Role::Button)
+                    .aria_label(status)
+                    .accessibility_id("arcshot.overlay.cancel")
                     .absolute()
                     .top_4()
                     .left_4()
@@ -56,11 +75,17 @@ impl Render for CaptureView {
                     .bg(rgb(0x20242b))
                     .text_color(rgb(0xffffff))
                     .text_sm()
-                    .child(if self.image.is_some() {
-                        "画面已冻结 · Esc 取消（本阶段不输出）"
-                    } else {
-                        "正在准备截图… · Esc 取消"
-                    }),
+                    .hover(|style| style.bg(rgb(0x2a2f3a)))
+                    .on_click(move |_, _, _| {
+                        queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+                    })
+                    .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                        log::info!("a11y_action=arcshot.overlay.cancel action=Click");
+                        a11y_queue
+                            .borrow_mut()
+                            .push(UiCommand::CancelCapture(ticket));
+                    })
+                    .child(status),
             )
     }
 }
@@ -71,10 +96,19 @@ pub(crate) struct NoticeView {
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
 }
-fn button(label: &'static str, command: UiCommand, queue: &UiQueue) -> impl IntoElement {
-    let queue = Rc::clone(queue);
+fn button(
+    a11y_id: &'static str,
+    label: &'static str,
+    command: UiCommand,
+    queue: &UiQueue,
+) -> impl IntoElement {
+    let click_queue = Rc::clone(queue);
+    let a11y_queue = Rc::clone(queue);
     div()
         .id(label)
+        .role(Role::Button)
+        .aria_label(label)
+        .accessibility_id(a11y_id)
         .px_3()
         .py_2()
         .rounded_md()
@@ -82,7 +116,13 @@ fn button(label: &'static str, command: UiCommand, queue: &UiQueue) -> impl Into
         .bg(rgb(0x3b465b))
         .hover(|style| style.bg(rgb(0x52617b)))
         .child(label)
-        .on_click(move |_, _, _| queue.borrow_mut().push(command))
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        // AXPress never reaches `on_click`, so the accessible path enqueues the
+        // same command explicitly and reports itself for end-to-end checks.
+        .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+            log::info!("a11y_action={a11y_id} action=Click");
+            a11y_queue.borrow_mut().push(command);
+        })
 }
 impl Render for NoticeView {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -112,11 +152,13 @@ impl Render for NoticeView {
             Some(PermissionNotice::FirstUse) => {
                 buttons = buttons
                     .child(button(
+                        "arcshot.notice.configure",
                         "配置权限",
                         UiCommand::Permission(window_id, PermissionAction::Configure),
                         &self.queue,
                     ))
                     .child(button(
+                        "arcshot.notice.later",
                         "稍后再说",
                         UiCommand::Permission(window_id, PermissionAction::Later),
                         &self.queue,
@@ -125,20 +167,25 @@ impl Render for NoticeView {
             Some(PermissionNotice::Unavailable) => {
                 buttons = buttons
                     .child(button(
+                        "arcshot.notice.settings",
                         "打开系统设置",
                         UiCommand::Permission(window_id, PermissionAction::Configure),
                         &self.queue,
                     ))
                     .child(button(
+                        "arcshot.notice.recheck",
                         "重新检查",
                         UiCommand::Permission(window_id, PermissionAction::Recheck),
                         &self.queue,
                     ))
-                    .child(button("取消", cancel, &self.queue));
+                    .child(button("arcshot.notice.cancel", "取消", cancel, &self.queue));
             }
-            _ => buttons = buttons.child(button("关闭", cancel, &self.queue)),
+            _ => {
+                buttons = buttons.child(button("arcshot.notice.close", "关闭", cancel, &self.queue))
+            }
         }
         div()
+            .id("notice-root")
             .size_full()
             .p_6()
             .flex()
@@ -147,6 +194,8 @@ impl Render for NoticeView {
             .bg(rgb(0x20242b))
             .text_color(rgb(0xffffff))
             .text_size(px(15.0))
+            .role(Role::Group)
+            .aria_label("ArcShot 权限提示")
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
@@ -154,8 +203,8 @@ impl Render for NoticeView {
                     cx.stop_propagation();
                 }
             })
-            .child(div().text_xl().child(title.to_owned()))
-            .child(div().flex_1().child(body.to_owned()))
+            .child(div().text_xl().child(text!(id = "notice-title", title)))
+            .child(div().flex_1().child(text!(id = "notice-body", body)))
             .child(buttons)
     }
 }
@@ -228,6 +277,7 @@ impl Render for HotkeyView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_id = window.window_handle().window_id();
         let entity = cx.entity();
+        let key_entity = entity.clone();
         let current = self.current;
         let active = self.active;
         let candidate = self.candidate;
@@ -236,7 +286,30 @@ impl Render for HotkeyView {
         let save_command = candidate
             .filter(|candidate| candidate.is_valid())
             .map(|candidate| UiCommand::HotkeySave(window_id, candidate));
+        // One source for the visible text and the accessible name, so assistive
+        // technology reads the same recording state a pointer user sees.
+        let recorder_label = match (recording, candidate) {
+            (true, Some(candidate)) => format!(
+                "{candidate}{}",
+                if candidate.is_valid() {
+                    " · Esc 取消录入"
+                } else {
+                    "（不合法）· Esc 取消录入"
+                }
+            ),
+            (true, None) => "按下新组合 · Esc 取消录入".to_owned(),
+            (false, Some(candidate)) => format!(
+                "{candidate}{}",
+                if candidate.is_valid() {
+                    ""
+                } else {
+                    "（不合法）"
+                }
+            ),
+            (false, None) => "点击录入新组合".to_owned(),
+        };
         div()
+            .id("hotkey-root")
             .size_full()
             .p_6()
             .flex()
@@ -245,23 +318,28 @@ impl Render for HotkeyView {
             .bg(rgb(0x20242b))
             .text_color(rgb(0xffffff))
             .text_size(px(15.0))
+            .role(Role::Group)
+            .aria_label("ArcShot 截图快捷键")
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
-                let consumed = entity.update(cx, |view, cx| {
+                let consumed = key_entity.update(cx, |view, cx| {
                     view.record(&event.keystroke, window_id, cx)
                 });
                 if consumed {
                     cx.stop_propagation();
                 }
             })
-            .child(div().text_xl().child("截图快捷键"))
-            .child(div().child(format!(
-                "当前：{current}{}",
-                if active { "" } else { "（未生效）" }
+            .child(div().text_xl().child(text!(id = "hotkey-title", "截图快捷键")))
+            .child(div().child(text!(
+                id = "hotkey-current",
+                format!("当前：{current}{}", if active { "" } else { "（未生效）" })
             )))
             .child(
                 div()
                     .id("hotkey-recorder")
+                    .role(Role::Button)
+                    .aria_label(recorder_label.clone())
+                    .accessibility_id("arcshot.hotkey.recorder")
                     .rounded_md()
                     .px_4()
                     .py_4()
@@ -289,36 +367,45 @@ impl Render for HotkeyView {
                                 .push(UiCommand::HotkeyRecording(window_id, true));
                         }
                     })
-                    .child(match (recording, candidate) {
-                        (true, Some(candidate)) => format!(
-                            "{candidate}{}",
-                            if candidate.is_valid() {
-                                " · Esc 取消录入"
-                            } else {
-                                "（不合法）· Esc 取消录入"
-                            }
-                        ),
-                        (true, None) => "按下新组合 · Esc 取消录入".to_owned(),
-                        (false, Some(candidate)) => format!(
-                            "{candidate}{}",
-                            if candidate.is_valid() { "" } else { "（不合法）" }
-                        ),
-                        (false, None) => "点击录入新组合".to_owned(),
-                    }),
+                    // AX activation must reach the same state change and queue
+                    // push as a pointer click; `AXPress` never calls `on_click`.
+                    .on_a11y_action(AccessibleAction::Click, {
+                        let entity = entity.clone();
+                        let queue = Rc::clone(&self.queue);
+                        move |_, _, cx| {
+                            log::info!("a11y_action=arcshot.hotkey.recorder action=Click");
+                            entity.update(cx, |view, cx| {
+                                view.recording = true;
+                                view.error = None;
+                                view.candidate = None;
+                                cx.notify();
+                            });
+                            queue
+                                .borrow_mut()
+                                .push(UiCommand::HotkeyRecording(window_id, true));
+                        }
+                    })
+                    .child(recorder_label),
             )
             .child(
-                div()
-                    .text_color(rgb(0x9aa4b5))
-                    .child("合法组合需包含 Command / Control / Option 至少一个修饰键和一个普通键，可加 Shift；仅 Shift 加普通键不合法。"),
+                div().text_color(rgb(0x9aa4b5)).child(text!(
+                    id = "hotkey-rule",
+                    "合法组合需包含 Command / Control / Option 至少一个修饰键和一个普通键，可加 Shift；仅 Shift 加普通键不合法。"
+                )),
             )
             .child({
                 let mut buttons = div().flex().gap_2();
                 if let Some(command) = save_command {
                     let queue = Rc::clone(&self.queue);
                     let entity = cx.entity();
+                    let a11y_entity = entity.clone();
+                    let a11y_queue = Rc::clone(&self.queue);
                     buttons = buttons.child(
                         div()
                             .id("hotkey-save")
+                            .role(Role::Button)
+                            .aria_label("保存")
+                            .accessibility_id("arcshot.hotkey.save")
                             .px_3()
                             .py_2()
                             .rounded_md()
@@ -333,10 +420,19 @@ impl Render for HotkeyView {
                                 });
                                 log::info!("hotkey_save_pushed window_id={window_id:?}");
                                 queue.borrow_mut().push(command);
+                            })
+                            .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+                                log::info!("a11y_action=arcshot.hotkey.save action=Click");
+                                a11y_entity.update(cx, |view, cx| {
+                                    view.recording = false;
+                                    cx.notify();
+                                });
+                                a11y_queue.borrow_mut().push(command);
                             }),
                     );
                 }
                 buttons.child(button(
+                    "arcshot.hotkey.close",
                     "关闭",
                     UiCommand::HotkeySettingsClosed(window_id),
                     &self.queue,
@@ -346,7 +442,7 @@ impl Render for HotkeyView {
                 div()
                     .id("hotkey-error")
                     .text_color(rgb(0xff6b6b))
-                    .child(error)
+                    .child(text!(id = "hotkey-error-text", error))
             }))
     }
 }

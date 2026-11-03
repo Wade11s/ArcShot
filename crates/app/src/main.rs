@@ -9,7 +9,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use anyhow::{Result, anyhow, ensure};
 use arcshot_core::MenuBarText;
 use arcshot_macos::MenuBar;
-use gpui::{App, Application, Global, Timer, px};
+use gpui::{App, Global, px};
 
 /// A readable probe size with distinct Helvetica advances; changing it changes reported metrics.
 const TEXT_PROBE_FONT_SIZE: f32 = 16.0;
@@ -27,7 +27,7 @@ struct MenuBarGlobal(MenuBar);
 impl Global for MenuBarGlobal {}
 
 fn check_text_backend() -> Result<()> {
-    let application = Application::new();
+    let application = gpui_platform::headless();
     let text_system = application.text_system();
     let font_id = text_system.resolve_font(&gpui::font("Helvetica"));
     let narrow = text_system
@@ -49,7 +49,7 @@ fn run_app(mode: RunMode) -> Result<()> {
     let error_slot = Rc::new(RefCell::new(None::<String>));
     let launch_error_slot = Rc::clone(&error_slot);
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         let menu_bar = match MenuBar::try_new(arcshot_image::status_item_icon(), MenuBarText::new())
         {
             Ok(menu_bar) => menu_bar,
@@ -68,7 +68,7 @@ fn run_app(mode: RunMode) -> Result<()> {
         if mode == RunMode::StartupSmoke {
             let smoke_error_slot = Rc::clone(&launch_error_slot);
             cx.spawn(async move |cx| {
-                Timer::after(STARTUP_SMOKE_DELAY).await;
+                cx.background_executor().timer(STARTUP_SMOKE_DELAY).await;
                 let result = cx.update(|cx| -> Result<()> {
                     let menu_bar = &cx.global::<MenuBarGlobal>().0;
                     menu_bar.validate_capture_commands()?;
@@ -93,14 +93,10 @@ fn run_app(mode: RunMode) -> Result<()> {
                     Ok(menu_bar.perform_quit_action()?)
                 });
                 match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        *smoke_error_slot.borrow_mut() = Some(error.to_string());
-                        let _ = cx.update(|cx| cx.quit());
-                    }
+                    Ok(()) => {}
                     Err(error) => {
-                        *smoke_error_slot.borrow_mut() =
-                            Some(format!("could not dispatch startup smoke action: {error}"));
+                        *smoke_error_slot.borrow_mut() = Some(error.to_string());
+                        cx.update(|cx| cx.quit());
                     }
                 }
             })

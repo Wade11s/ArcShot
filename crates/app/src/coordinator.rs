@@ -13,7 +13,7 @@ use arcshot_core::{
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
-    App, AppContext, Bounds, Context, Point, RenderImage, Task, Timer, WindowBounds, WindowHandle,
+    App, AppContext, Bounds, Context, Point, RenderImage, Task, WindowBounds, WindowHandle,
     WindowKind, WindowOptions, px, size,
 };
 use std::{
@@ -82,12 +82,16 @@ pub(crate) fn launch(cx: &mut App) {
         state.hotkey(HotkeyAction::Launch, cx);
     });
     // The foreground task owns the coordinator; workers never own GPUI or AppKit state.
+    //
+    // The task keeps the strong handle on purpose: `Entity::update` on `AsyncApp` no
+    // longer reports a released entity, and a weak handle would release the
+    // coordinator as soon as this closure is the only remaining owner. The loop is
+    // therefore tied to the app lifetime, not to an entity-liveness probe: GPUI stops
+    // polling foreground tasks once the app is torn down after `cx.quit()`.
     cx.spawn(async move |cx| {
         loop {
-            Timer::after(POLL_INTERVAL).await;
-            if coordinator.update(cx, |state, cx| state.tick(cx)).is_err() {
-                break;
-            }
+            cx.background_executor().timer(POLL_INTERVAL).await;
+            coordinator.update(cx, |state, cx| state.tick(cx));
         }
     })
     .detach();
@@ -372,16 +376,17 @@ impl Coordinator {
                         .push(UiCommand::HotkeySettingsClosed(window_id));
                     true
                 });
-                let entity = cx.new(|cx| HotkeyView {
+                let focus = cx.focus_handle();
+                let entity = cx.new(|_| HotkeyView {
                     current,
                     active,
                     candidate: None,
                     recording: false,
                     error: None,
-                    focus: cx.focus_handle(),
+                    focus: focus.clone(),
                     queue,
                 });
-                entity.update(cx, |view, _| window.focus(&view.focus));
+                window.focus(&focus, cx);
                 entity
             },
         );
@@ -636,13 +641,14 @@ impl Coordinator {
                         .push(UiCommand::CancelCapture(ticket));
                     true
                 });
-                let entity = cx.new(|cx| CaptureView {
+                let focus = cx.focus_handle();
+                let entity = cx.new(|_| CaptureView {
                     ticket,
                     image: None,
-                    focus: cx.focus_handle(),
+                    focus: focus.clone(),
                     queue,
                 });
-                entity.update(cx, |view, _| window.focus(&view.focus));
+                window.focus(&focus, cx);
                 entity
             },
         )?);
@@ -661,7 +667,7 @@ impl Coordinator {
         let display_id = cx
             .displays()
             .into_iter()
-            .find(|display| u32::from(display.id()) == screen.display_id())
+            .find(|display| u64::from(display.id()) == u64::from(screen.display_id()))
             .ok_or_else(|| anyhow::anyhow!("built-in display absent from GPUI"))?
             .id();
         let queue = Rc::clone(&self.queue);
@@ -689,13 +695,14 @@ impl Coordinator {
                         .push(UiCommand::CancelCapture(ticket));
                     true
                 });
-                let entity = cx.new(|cx| CaptureView {
+                let focus = cx.focus_handle();
+                let entity = cx.new(|_| CaptureView {
                     ticket,
                     image: Some(image),
-                    focus: cx.focus_handle(),
+                    focus: focus.clone(),
                     queue,
                 });
-                entity.update(cx, |view, _| window.focus(&view.focus));
+                window.focus(&focus, cx);
                 entity
             },
         )?);
@@ -767,13 +774,14 @@ impl Coordinator {
                         .push(UiCommand::Permission(window_id, PermissionAction::Cancel));
                     true
                 });
-                let entity = cx.new(|cx| NoticeView {
+                let focus = cx.focus_handle();
+                let entity = cx.new(|_| NoticeView {
                     notice,
                     error,
-                    focus: cx.focus_handle(),
+                    focus: focus.clone(),
                     queue,
                 });
-                entity.update(cx, |view, _| window.focus(&view.focus));
+                window.focus(&focus, cx);
                 entity
             },
         );
