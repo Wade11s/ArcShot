@@ -1,15 +1,16 @@
+
 # Model Pools
 
-仅当当前 harness 为 Pi 时，`arcshot-delegation` 在派遣子代理前读取本文件。本文件是 Pi harness 的模型选择唯一来源；技能文件只描述路由、并发与隔离。其他 harness 使用自身的模型选择与子代理规则，本文件不适用。
+仅当当前 harness 为 Pi 时，`arcshot-delegation` 在派遣子代理前读取本文件。本文件是 Pi harness 的模型选择来源；技能文件只描述路由、并发与隔离。
 
 ## 模型池
 
 | 模型池 | 首选 | 备选 | 兜底 |
 |---|---|---|---|
-| 研究 | `openai-codex/gpt-6.1-terra` (`high`) | `xai/grok-4.7` (`xhigh`) | `stepfun/step-5-preview` (`high`) |
-| 探索 | `command-code/deepseek/deepseek-v4.1-flash` (`max`) | `openai-codex/gpt-6.1-terra` (`xhigh`) | `zai-coding-cn/glm-5.3` (`max`) |
-| 实现 | `command-code/deepseek/deepseek-v4.1-flash` (`max`) | `openai-codex/gpt-6.1-terra` (`high`) | `openai-codex/gpt-6-luna` (`max`) |
-| 审查 | `openai-codex/gpt-6.1-sol` (`high`) | `xai/grok-4.7` (`xhigh`) | `stepfun/step-5-preview` (`high`) |
+| 研究 | `magpie/workbuddy/deepseek-v.4.1-flash` (`max`) | `xai/grok-4.7` (`xhigh`) | `stepfun/step-5-preview` (`high`) |
+| 探索 | `magpie/workbuddy/glm-5.3-flash` (`high`) | `magpie/workbuddy/deepseek-v.4.1-flash` (`high`) | `zai-coding-cn/glm-5.3` (`high`) |
+| 实现 | `magpie/workbuddy/deepseek-v.4.1-flash` (`max`) | `zai-coding-cn/glm-5.3` (`high`) | `magpie/longcat/LongCat-2.5` (`high`) |
+| 审查 | `kimi-coding/k3.1-pro` (`high`) | `xai/grok-4.7` (`xhigh`) | `stepfun/step-5-preview` (`high`) |
 
 模型写作 `provider/model`，括号内为 thinking level。
 
@@ -21,9 +22,3 @@
 - **派遣前核对**：确认对应 provider 已登录、模型出现在 `pi --list-models` 中。
 - **显式传参**：派遣时传 `--provider`、`--model`、`--thinking`；不要回传 `$PI_PROVIDER`、`$PI_MODEL`、`$PI_REASONING_LEVEL`。
 - **如实报告**：实际发生降级时，写明所用模型与原因。
-
-## 状态
-
-本表是初始配置，除 `kimi-coding/k3.1-pro` 在早期研究任务中实际运行过外，尚未逐项验证。表中出现不代表该模型在当前账号、thinking level 或任务类型下一定可用。
-
-调整模型或 thinking level 时只改本表。

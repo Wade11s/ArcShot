@@ -2,7 +2,8 @@
 use arcshot_app::{PermissionAction, PermissionNotice};
 use arcshot_core::{CaptureTicket, Hotkey};
 use gpui::{
-    Context, FocusHandle, Render, RenderImage, Window, WindowId, div, img, prelude::*, px, rgb,
+    AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Window, WindowId, div, img,
+    prelude::*, px, rgb, text,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -71,10 +72,19 @@ pub(crate) struct NoticeView {
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
 }
-fn button(label: &'static str, command: UiCommand, queue: &UiQueue) -> impl IntoElement {
-    let queue = Rc::clone(queue);
+fn button(
+    a11y_id: &'static str,
+    label: &'static str,
+    command: UiCommand,
+    queue: &UiQueue,
+) -> impl IntoElement {
+    let click_queue = Rc::clone(queue);
+    let a11y_queue = Rc::clone(queue);
     div()
         .id(label)
+        .role(Role::Button)
+        .aria_label(label)
+        .accessibility_id(a11y_id)
         .px_3()
         .py_2()
         .rounded_md()
@@ -82,7 +92,13 @@ fn button(label: &'static str, command: UiCommand, queue: &UiQueue) -> impl Into
         .bg(rgb(0x3b465b))
         .hover(|style| style.bg(rgb(0x52617b)))
         .child(label)
-        .on_click(move |_, _, _| queue.borrow_mut().push(command))
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        // AXPress never reaches `on_click`, so the accessible path enqueues the
+        // same command explicitly and reports itself for end-to-end checks.
+        .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+            log::info!("a11y_action={a11y_id} action=Click");
+            a11y_queue.borrow_mut().push(command);
+        })
 }
 impl Render for NoticeView {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -112,11 +128,13 @@ impl Render for NoticeView {
             Some(PermissionNotice::FirstUse) => {
                 buttons = buttons
                     .child(button(
+                        "arcshot.notice.configure",
                         "配置权限",
                         UiCommand::Permission(window_id, PermissionAction::Configure),
                         &self.queue,
                     ))
                     .child(button(
+                        "arcshot.notice.later",
                         "稍后再说",
                         UiCommand::Permission(window_id, PermissionAction::Later),
                         &self.queue,
@@ -125,20 +143,25 @@ impl Render for NoticeView {
             Some(PermissionNotice::Unavailable) => {
                 buttons = buttons
                     .child(button(
+                        "arcshot.notice.settings",
                         "打开系统设置",
                         UiCommand::Permission(window_id, PermissionAction::Configure),
                         &self.queue,
                     ))
                     .child(button(
+                        "arcshot.notice.recheck",
                         "重新检查",
                         UiCommand::Permission(window_id, PermissionAction::Recheck),
                         &self.queue,
                     ))
-                    .child(button("取消", cancel, &self.queue));
+                    .child(button("arcshot.notice.cancel", "取消", cancel, &self.queue));
             }
-            _ => buttons = buttons.child(button("关闭", cancel, &self.queue)),
+            _ => {
+                buttons = buttons.child(button("arcshot.notice.close", "关闭", cancel, &self.queue))
+            }
         }
         div()
+            .id("notice-root")
             .size_full()
             .p_6()
             .flex()
@@ -147,6 +170,8 @@ impl Render for NoticeView {
             .bg(rgb(0x20242b))
             .text_color(rgb(0xffffff))
             .text_size(px(15.0))
+            .role(Role::Group)
+            .aria_label("ArcShot 权限提示")
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
@@ -154,8 +179,8 @@ impl Render for NoticeView {
                     cx.stop_propagation();
                 }
             })
-            .child(div().text_xl().child(title.to_owned()))
-            .child(div().flex_1().child(body.to_owned()))
+            .child(div().text_xl().child(text!(id = "notice-title", title)))
+            .child(div().flex_1().child(text!(id = "notice-body", body)))
             .child(buttons)
     }
 }
@@ -337,6 +362,7 @@ impl Render for HotkeyView {
                     );
                 }
                 buttons.child(button(
+                    "arcshot.hotkey.close",
                     "关闭",
                     UiCommand::HotkeySettingsClosed(window_id),
                     &self.queue,
