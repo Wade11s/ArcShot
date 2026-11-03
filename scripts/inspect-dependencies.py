@@ -19,6 +19,11 @@ def load_metadata(args, root: Path):
             print(f"dependency inspection failed: {error}", file=sys.stderr)
             return None
 
+    # `--offline` keeps the inspection reading exactly the committed lock, but the
+    # lock resolves packages for targets this machine does not build (for example
+    # `gpui-pre-linux` / `gpui-pre-windows` / `gpui-pre-web`), so a plain build or
+    # test run does not download them. Run `cargo fetch --locked` first; the
+    # `failed to download` path below is the honest failure when that was skipped.
     result = subprocess.run(
         ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
         cwd=root,

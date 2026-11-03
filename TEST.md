@@ -34,6 +34,7 @@ cargo doc --locked --workspace --no-deps
 scripts/test-validation-tools.sh
 scripts/check-validation.sh
 scripts/test-dependency-inspection.py
+cargo fetch --locked
 scripts/inspect-dependencies.py
 scripts/check-architecture.sh
 scripts/check-text-backend.sh
@@ -154,8 +155,10 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | 带标题栏的 GPUI 窗口（快捷键设置、权限提示） | 出现在 `list-windows --app`，含 id、尺寸与 `is_focused`；窗口内 `AXChildren` 为 0 | 断言窗口出现、尺寸与前台；不能断言窗口内容 |
 | 无标题栏的冻结覆盖层 | 实测不出现在 `list-windows`/`snapshot`/`list-surfaces`（`titlebar: None`，无标题、无 AX 子节点），只在 `CGWindowListCopyWindowInfo` 可见（`layer 101`） | 出现只能由产品 stderr 诊断行证明；关闭目前无观察手段（§4.5） |
 
-GPUI 0.2.2 不上报 accessibility 子树，因此窗口内容（按钮、输入区、冻结画面、标注
-工具）不能被 `snapshot`/`find`/`click` 观察或驱动。E2E 的观察合同因此固定为：
+#52 起基座是 `gpui-pre` 0.3.11，它**能**上报 accessibility 子树，但产品代码还没有
+任何 `role` / `accessibility_id` / `on_a11y_action` 标注（#53/#54/#55），因此窗口内容
+（按钮、输入区、冻结画面、标注工具）仍然不能被 `snapshot`/`find`/`click` 观察或驱动。
+E2E 的观察合同因此固定为：
 
 1. **驱动**只用 AX 可寻址对象：状态项、四个菜单项、标题栏窗口本身。
 2. **状态**以产品 stderr 诊断行为准（`capture_phase from=… to=… action=…`、
@@ -226,12 +229,13 @@ agent-desktop press escape --headed
   `Draining` / `Frozen` / `RelaunchRequired`，附语义动作名）各有一行纯文本 stderr
   事件，因此 MAC-E2E-05b 与重启/失败路径不再依赖坐标或截图。
 - 仍未落地：NSWindow 销毁级证据（冻结覆盖层没有标题栏，既不在 `list-windows`，也
-  无法由外部脚本区分“已关闭”与“仍在屏”）。需要外部窗口探针或 GPUI 可访问性，
-  在此之前该子项只算会话层证据。
-- GPUI 0.2.2 不上报 accessibility 子树：窗口内按钮、输入区、冻结画面与标注工具
-  全部不可寻址。若要让 MAC-REGION / MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 进入
-  E2E，需要为 app 接入 accessibility（`accesskit` 或等价的 AX 桥），接入后用
-  `snapshot --app` 证明元素真的可见。
+  无法由外部脚本区分“已关闭”与“仍在屏”）。需要外部窗口探针，或在 #53 起给覆盖层
+  加 AX 标注后用 `snapshot` 观察；在此之前该子项只算会话层证据。
+- #52 已把基座换到 `gpui-pre` 0.3.11（AccessKit 子树可用），但产品尚未做任何
+  accessibility 标注：窗口内按钮、输入区、冻结画面与标注工具仍全部不可寻址。
+  要让 MAC-REGION / MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 进入 E2E，需要在
+  #53/#54/#55 里给元素加 `id` + `role` + `aria_label` + `accessibility_id` 与
+  `on_a11y_action`，加完后用 `snapshot --app` 证明元素真的可见、可驱动。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 
