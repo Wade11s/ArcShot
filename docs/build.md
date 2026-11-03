@@ -57,13 +57,60 @@ open target/bundle/release/ArcShot.app
 
 | 依赖（锁定版本） | 用途 | 替代与风险决策 |
 | --- | --- | --- |
-| GPUI 0.2.2，默认特性关闭 + `font-kit` | app 的 run loop、文字系统、后续窗口/渲染 | pre-1.0 API 与 macOS 生命周期变化风险高；锁定版本，升级须重跑文字与原生矩阵。未采用 `NoopTextSystem`。 |
+| GPUI 基座：`gpui-pre` 0.3.11 + `gpui-pre-platform` 0.3.11（Cargo.toml 中重命名为 `gpui` / `gpui-platform`），默认特性关闭 + `font-kit` | app 的 run loop、文字系统、窗口/渲染，以及 #53 起的可访问性入口 | Zed 官方预发布快照，`=0.3.11` 精确 pin、整族原子升级（ADR-0001，见下节）。pre-1.0 API 与 macOS 生命周期变化风险高；升级须重跑文字、原生与 E2E 矩阵。未采用 `NoopTextSystem`，也未使用会静默关闭可访问性的 `Application::new_inaccessible`。 |
 | anyhow 1.0.104 | 可执行文件启动错误上下文 | 不进入其他 crate 的公共错误 API。 |
 | objc2 0.6.5、objc2-app-kit / foundation 0.3.2 | NSStatusItem、NSMenu、NSImage、NSApplication 的 Rust 绑定 | 替代是更老 cocoa/objc 或手写 FFI；当前选择减少 unsafe 并与主线程类型集成。generated binding feature/可用性风险由锁版与 MAC-START 检查控制。 |
 | dispatch2 0.3.1 | 将退出 action 安全排队回主队列 | 替代为自写 GCD FFI，未采用；`MainThreadBound` 避免自写 `unsafe impl Send`。 |
 | image 0.25.10（app，关闭默认特性） | 把内存 BGRA 预览包装成 GPUI 要求的 Frame 类型 | 已由 GPUI 带入同版本；不使用编码、磁盘或网络加载。替代为 PNG 中转会增加编码和内存副本，未采用。 |
 | log 0.4.34（app） | 文本诊断和捕获/窗口提交耗时 | 已在依赖图中；自有 stderr logger 无网络、遥测和像素日志。替代为每处直接打印未采用。 |
 | log 0.4.34（macos，#21） | Carbon 热键适配器在注销/移除失败与 Drop 异常路径记录诊断 | 与 app 共用同一 crate 与 stderr logger；适配器不做窗口或用户界面，失败仍以 `Result` 返回。 |
+
+### GPUI 基座与升级流程（ADR-0001）
+
+基座是 Zed 官方发布的预发布快照 **`gpui-pre` 0.3.11**（crates.io，`repository = https://github.com/zed-industries/zed`，crate 元数据记录 `zed-rev = f816e1f…`，Apache-2.0，checksum 在 `Cargo.lock` 中），
+并同时依赖 **`gpui-pre-platform` 0.3.11** 取得 macOS 平台实现。`crates.io` 上包名 `gpui`
+的最新版仍是 0.2.2，完全不上报 accessibility 子树；决策与被否选项见
+[`docs/adr/0001-gpui-a11y-base.md`](adr/0001-gpui-a11y-base.md)，0.2.2 → 0.3.11 的 API 漂移清单见
+[`docs/gpui-pre-0.3.11-drift.md`](gpui-pre-0.3.11-drift.md)。
+
+- 重命名而非改写：`gpui-pre` 的 lib 名就是 `gpui`，`gpui-pre-platform` 是 `gpui_platform`，
+  所以 `Cargo.toml` 用 `package =` 重命名，产品代码里的 `use gpui::…` 不机械改写。
+  `scripts/check-architecture.sh` 因此匹配上游包名（`gpui-pre v` / `gpui-pre-platform v`），
+  并仍然拒绝旧包名 `gpui v`。
+- 启动入口：`gpui_platform::application()`（驻留）与 `gpui_platform::headless()`（`--check-text-backend` 的纯文字探测）。
+  `Application::new()` 已删除；`Application::new_inaccessible()` 会让 `role()` / `on_a11y_action` 静默 no-op，不得使用。
+- `font-kit` 必须显式打开，且必须在 **`gpui-platform`** 上打开：0.3.11 的链路是
+  `gpui-pre-platform/font-kit → gpui-pre-macos/font-kit → gpui-pre-apple/font-kit → zed-font-kit`，
+  `gpui-pre` 自身的 `font-kit` 已是空 feature。TEXT-01（`scripts/check-text-backend.sh`）
+  继续用真实 Helvetica `i < W` 度量守住“没有退化到 `NoopTextSystem`”。
+- `default-features = false` 同时关掉 `gpui-pre-platform` 的 `default = ["multithreaded"]`（只影响 wasm 后端），
+  macOS 上没有副作用。
+
+**Pin 规则**：两个依赖都写精确版本 `=0.3.11`；同一快照族的 20 个 crate
+（`gpui-pre-apple/-macos/-platform/-collections/-scheduler/-util/…`）由上游以 `=0.3.11`
+互相锁定，`Cargo.lock` 里不得出现混版。不使用 `^0.3`、不使用 git 依赖、不使用 `[patch]` 覆盖；
+每周快照只有精确 pin 才可复现。
+
+**整组原子升级流程**（ADR-0001“重估触发条件 2”）：
+
+1. 只评估一次最新快照，不逐周追新；先读该版本的 `zed-rev`、`accesskit` 版本与 release 说明。
+2. 在**同一个提交**里把 `Cargo.toml` 的两个 `=0.3.x` 一起改掉，再执行
+   `cargo update -p gpui-pre -p gpui-pre-platform`（必要时对首个未跟上的成员用
+   `--precise` 补齐），使整族落在同一版本。
+3. 审计锁文件：确认所有 `gpui-pre*` 条目版本一致、没有和第二份快照族并存，并在同一提交提交 `Cargo.lock`。
+4. `cargo fetch --locked` 后跑完整入口 `scripts/check-all.sh`，再跑
+   `scripts/e2e-agent-desktop.py` 与 `--release`；TEXT-01 的真实文字度量、依赖来源/重复包数、
+   Debug/Release 原生驻留与退出都必须重新取证。
+5. 新快照回归时按 ADR 的版本矩阵**整族回退**到上一个已验证版本并记录首个阻塞点，
+   不允许只回退一两个 crate 造成两族并存。
+6. 升级会改变非本机目标（`gpui-pre-linux/-windows/-web/-ios`）的解析结果；旧锁里遗留的
+   外来目标重复版本（如 `windows` 0.61/0.62 并存）在版本区间允许时用
+   `cargo update -p <crate> --precise <version>` 收敛，避免 `duplicate_package_names` 虚增。
+
+依赖来源审查仍只允许 `path` 与 `registry+https://github.com/rust-lang/crates.io-index`
+（`scripts/inspect-dependencies.py` 的 `dependency_sources` 行）。该检查读取
+`cargo metadata --locked --offline`，而锁文件会解析本机不构建的目标成员，所以必须先
+`cargo fetch --locked`；`scripts/check-all.sh` 已显式包含这一步。
 
 四个本地 crate 均为 path dependency。依赖方向由 `scripts/check-architecture.sh`
 检查：app → core/image/macos；image/macos → core；image 与 macos 不互依赖；
@@ -72,8 +119,9 @@ core 无产品反向依赖或系统 I/O，GPUI 只在 app。
 ### GPUI Kit 评估（本切片不引入）
 
 用户提出的 longbridge/gpui-kit 已按 v0.8.1 manifest 与 facade 源码核对。其默认
-上游后端锁定 `gpui-pre 0.3.9`，不是本切片已验证的 crates.io GPUI 0.2.2；即使
-关闭默认 component/assets，也仍引入 Base 层。它提供应用窗口与后续组件/测试
+上游后端曾锁定 `gpui-pre 0.3.9`（0.8.1 → `=0.3.10`、0.9.0 → `=0.3.11`），与
+ADR-0001 选定的基座同族；本仓库不采用它的理由是范围与耦合，不是版本不可解析：
+即使关闭默认 component/assets，也仍引入 Base 层。它提供应用窗口与后续组件/测试
 facade，但不提供本票的 NSStatusItem 生命周期。#19 时没有 GPUI 窗口或组件可复用；
 #20 的少量权限按钮与底图覆盖层沿用已验证 GPUI，不迁移后端或额外引入 Base 层。
 不形成两套后端，也不增加无实际职责的依赖。后续工具坞/标注 UI
@@ -84,19 +132,24 @@ facade，但不提供本票的 NSStatusItem 生命周期。#19 时没有 GPUI �
 
 ## 重要传递原生/构建依赖
 
-- GPUI 0.2.2 带入 cocoa 0.26.0 / objc 0.2.7、metal 0.29.0、core-text 21.0.0、
-  core-graphics 0.24.0 与 zed-font-kit 0.14.1-zed，分别用于其既有 AppKit、
-  Metal 与真实文字后端。它们链接 Apple 系统框架；升级风险随 GPUI 锁版管理。
-- GPUI 构建使用 bindgen 0.71.1（需要 Xcode 自带 libclang）、cbindgen 0.28.0
-  以及上述 Metal 工具链。没有 ArcShot 维护的 Swift/Objective-C/C/C++ 产品桥。
-- GPUI 的传递图包含 reqwest、TLS、socket 与图像 codec 等通用能力，但
-  `Application::new()` 在本版本安装 `NullHttpClient`，本切片没有设置真实 HTTP
-  client 或发起请求。后续不得擅自改接网络 client；驻留 socket 由
-  `scripts/check-no-network.sh` 实测。重复版本可由 `cargo tree --duplicates`
-  审查，不能据此推断实际网络行为。
-- 重要传递依赖包含 ring（TLS 的 C/汇编）与 GPUI 自带 Metal shader；这些均随
-  crates.io 源码构建。其用途来自 GPUI 通用能力，本切片未调用网络路径。若需
-  消除该供应面，应在 GPUI 依赖治理中评估，而不是另写未批准的替代路线。
+- GPUI 基座带入 `gpui-pre-macos` / `gpui-pre-apple`（objc2 0.6.5、core-text 21.0.0、
+  core-graphics 0.24.0、objc2-metal 0.3.2）、`accesskit` 0.24.1 / `accesskit_macos`
+  0.26.3 与经 `font-kit` 链路的 `zed-font-kit 0.14.1-zed`，分别用于 AppKit 窗口、
+  Metal 渲染、可访问性树与真实文字后端。它们链接 Apple 系统框架；升级风险随
+  GPUI 锁版管理。0.3.11 已不再拉 `cocoa 0.26` / `block 0.1.6`（0.2.2 有此遗留），
+  但仍经 `accesskit_macos` 解析出 `objc2 0.5.3`，与产品/`gpui-pre-apple` 的
+  `objc2 0.6.5` 并存，记录在案。
+- GPUI 构建使用 cbindgen 0.28.0 与 Metal 工具链编译其自带 shader；0.3.11 已不再需要
+  bindgen/libclang。没有 ArcShot 维护的 Swift/Objective-C/C/C++ 产品桥。
+- GPUI 的传递图包含通用 HTTP client 抽象与图像 codec 等能力，但
+  `gpui_platform::application()` 内部走 `Application::with_platform()`，安装的是
+  `NullHttpClient`，本切片没有设置真实 HTTP client 或发起请求。后续不得擅自改接网络
+  client；驻留 socket 由 `scripts/check-no-network.sh` 实测。重复版本可由
+  `cargo tree --duplicates` 审查，不能据此推断实际网络行为。
+- 0.3.11 的传递图不再包含 TLS/HTTP 栈：`ring`、`rustls`、`hyper`、`socket2` 都已
+  不在 `Cargo.lock` 里（0.2.2 曾带入 ring/rustls/hyper）。仍随 crates.io 源码构建的
+  原生件是 GPUI 自带的 Metal shader 与 screencapturekit 的 SwiftPM 桥。本切片未调用
+  网络路径；驻留 socket 由 `scripts/check-no-network.sh` 实测，不靠依赖图推断。
   重复版本先由 `scripts/inspect-dependencies.py` 报告数量；只在需要审查时以
   `scripts/inspect-dependencies.py --show-duplicates` 展开有界列表。
 

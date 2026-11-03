@@ -14,7 +14,8 @@ arcshot-core = { path = "crates/core" }
 arcshot-image = { path = "crates/image" }
 arcshot-macos = { path = "crates/macos" }
 anyhow = "1"
-gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
+gpui = { package = "gpui-pre", version = "=0.3.11", default-features = false, features = ["font-kit"] }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.11", default-features = false, features = ["font-kit"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
