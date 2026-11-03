@@ -164,6 +164,66 @@ def wait_window_size(app: str, width: float, height: float, timeout: float) -> d
     fail(f"expected one {width}x{height} window, saw {last}")
 
 
+def snapshot_tree(app: str) -> dict:
+    return agent("snapshot", "--app", app).get("tree", {})
+
+
+def find_nodes(
+    tree: dict,
+    *,
+    role: str | None = None,
+    name: str | None = None,
+    native_id: str | None = None,
+    require_ref: bool = False,
+) -> list[dict]:
+    """Collects matching nodes.
+
+    Group containers carry a name but no ref, so container lookups leave
+    `require_ref` off; click targets set it.
+    """
+    found: list[dict] = []
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if (
+            (role is None or node.get("role") == role)
+            and (name is None or node.get("name") == name)
+            and (
+                native_id is None
+                or (node.get("native_id") or {}).get("value") == native_id
+            )
+            and (node.get("ref_id") or not require_ref)
+        ):
+            found.append(node)
+        stack.extend(node.get("children") or [])
+    return found
+
+
+def wait_node(app: str, predicate, timeout: float) -> dict:
+    """Waits for an accessibility node.
+
+    Accessibility is activated lazily: the first snapshot after a window opens
+    can be empty, so this re-reads instead of treating one read as the answer.
+    """
+    deadline = time.monotonic() + timeout
+    last: dict = {}
+    while time.monotonic() < deadline:
+        try:
+            last = snapshot_tree(app)
+        except Failure as error:
+            # A window closing between two commands yields WINDOW_NOT_FOUND;
+            # that is a race in the observation, not a product failure.
+            if "WINDOW_NOT_FOUND" not in str(error):
+                raise
+            last = {}
+        else:
+            node = predicate(last)
+            if node:
+                return node
+        time.sleep(POLL)
+    fail(f"accessibility node did not appear in {timeout}s; last tree: {json.dumps(last)[:600]}")
+
+
 def press(combo: str, *, headed: bool) -> None:
     args = ["press", combo] + (["--headed"] if headed else [])
     data = agent(*args)
@@ -314,12 +374,151 @@ def main() -> int:
         wait_windows(app, 0, 10.0)
         note(f"mac_e2e_07=pass notice_size={size['width']}x{size['height']} escape_closed=true")
 
+        # MAC-E2E-10: the notice is readable and drivable through AX alone.
+        click(app, "屏幕录制权限…")
+        wait_window_size(app, 560.0, 282.0, 10.0)
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 权限提示") or [None]
+            )[0],
+            10.0,
+        )
+        texts = find_nodes(root, role="statictext")
+        if len(texts) < 2:
+            fail(f"notice exposes fewer than two readable texts: {texts}")
+        safe_ids = [
+            "arcshot.notice.close",
+            "arcshot.notice.cancel",
+            "arcshot.notice.later",
+            "arcshot.notice.recheck",
+        ]
+        button = next(
+            (
+                node
+                for native in safe_ids
+                for node in find_nodes(root, native_id=native, require_ref=True)
+            ),
+            None,
+        )
+        if button is None:
+            fail(
+                "notice variant offers no non-navigating button; refusing to open "
+                f"System Settings from the harness: {[n.get('native_id') for n in find_nodes(root, role='button')]}"
+            )
+        if not find_nodes(root, native_id=button["native_id"]["value"], require_ref=True):
+            fail("notice button has no stable AXIdentifier")
+        debug_text = [node.get("value") for node in texts]
+        agent("click", button["ref_id"])
+        wait_log(log, f"a11y_action={button['native_id']['value']} action=Click", 10.0)
+        wait_windows(app, 0, 10.0)
+        note(
+            "mac_e2e_10=pass notice_texts="
+            f"{len(texts)} action={button['native_id']['value']} "
+            f"readable={len(' '.join(filter(None, debug_text)))}"
+        )
+
         # MAC-E2E-06: the hotkey settings window opens as an addressable window.
         click(app, "截图快捷键…")
         wait_log(log, "menu_hotkey_settings", 10.0)
         settings = wait_window_size(app, 480.0, 362.0, 10.0)
         size = settings.get("bounds", {})
         note(f"mac_e2e_06=pass settings_size={size['width']}x{size['height']}")
+
+        # MAC-E2E-11: the settings window is readable and drivable through AX.
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图快捷键") or [None]
+            )[0],
+            10.0,
+        )
+        recorder = find_nodes(root, native_id="arcshot.hotkey.recorder", require_ref=True)
+        if not recorder:
+            fail("hotkey recorder is not addressable")
+        current = next(
+            (
+                node["value"]
+                for node in find_nodes(root, role="statictext")
+                if (node.get("value") or "").startswith("当前：")
+            ),
+            None,
+        )
+        if current is None:
+            fail("hotkey settings do not expose the current combination")
+        first_label = recorder[0].get("name")
+        agent("click", recorder[0]["ref_id"])
+        wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
+        original = next(
+            line.split("config=", 1)[1].split(" ", 1)[0]
+            for line in read_log(log)
+            if "hotkey_launch config=" in line
+        )
+        temporary = "⌃⌥9" if original != "⌃⌥9" else "⌃⌥8"
+        press(hotkey_combo(temporary), headed=False)
+        wait_log(log, f"candidate={temporary}", 10.0)
+        save = wait_node(
+            app,
+            lambda tree: (find_nodes(tree, native_id="arcshot.hotkey.save", require_ref=True) or [None])[0],
+            10.0,
+        )
+        agent("click", save["ref_id"])
+        wait_log(log, f"hotkey_store value={temporary}", 10.0)
+        # Restore the user's combination through the same AX path.
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图快捷键") or [None]
+            )[0],
+            10.0,
+        )
+        recorder = find_nodes(root, native_id="arcshot.hotkey.recorder", require_ref=True)[0]
+        agent("click", recorder["ref_id"])
+        wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
+        press(hotkey_combo(original), headed=False)
+        wait_log(log, f"candidate={original}", 10.0)
+        save = wait_node(
+            app,
+            lambda tree: (find_nodes(tree, native_id="arcshot.hotkey.save", require_ref=True) or [None])[0],
+            10.0,
+        )
+        agent("click", save["ref_id"])
+        wait_log(log, f"hotkey_store value={original}", 10.0)
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图快捷键") or [None]
+            )[0],
+            10.0,
+        )
+        close = find_nodes(root, native_id="arcshot.hotkey.close", require_ref=True)[0]
+        agent("click", close["ref_id"])
+        wait_log(log, "a11y_action=arcshot.hotkey.close action=Click", 10.0)
+        wait_windows(app, 0, 10.0)
+        note(
+            f"mac_e2e_11=pass recorder_name={first_label!r} "
+            f"round_trip={original}->{temporary}->{original}"
+        )
+
+        # MAC-E2E-12: the frozen overlay is addressable and cancels through AX.
+        click(app, "开始截图")
+        wait_log(log, "capture_wake_window_submit_us=", 15.0)
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        cancel = find_nodes(root, native_id="arcshot.overlay.cancel", require_ref=True)
+        if not cancel:
+            fail("frozen overlay exposes no cancel action")
+        agent("click", cancel[0]["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.cancel action=Click", 10.0)
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        if windows(app):
+            fail(f"AX-cancelled session left own windows: {windows(app)}")
+        note("mac_e2e_12=pass overlay_cancel=ax phase=Resident")
 
         # MAC-E2E-08: Quit removes process, status item and windows.
         click(app, "退出 ArcShot")
@@ -347,7 +546,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=9")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=12")
     return 0
 
 
