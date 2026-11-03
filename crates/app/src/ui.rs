@@ -28,16 +28,28 @@ pub(crate) struct CaptureView {
 }
 impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let key_queue = Rc::clone(&self.queue);
         let queue = Rc::clone(&self.queue);
+        let a11y_queue = Rc::clone(&self.queue);
         let ticket = self.ticket;
+        let status = if self.image.is_some() {
+            "画面已冻结 · Esc 取消（本阶段不输出）"
+        } else {
+            "正在准备截图… · Esc 取消"
+        };
         div()
+            .id("overlay-root")
+            .role(Role::Group)
+            .aria_label("ArcShot 截图覆盖层")
             .size_full()
             .relative()
             .bg(rgb(0x15171b))
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
-                    queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+                    key_queue
+                        .borrow_mut()
+                        .push(UiCommand::CancelCapture(ticket));
                     cx.stop_propagation();
                 }
             })
@@ -47,7 +59,13 @@ impl Render for CaptureView {
                     .map(|image| img(Arc::clone(image)).size_full()),
             )
             .child(
+                // The hint doubles as the accessible cancel affordance: it is the
+                // only action a Frozen session offers at this stage.
                 div()
+                    .id("capture-badge")
+                    .role(Role::Button)
+                    .aria_label(status)
+                    .accessibility_id("arcshot.overlay.cancel")
                     .absolute()
                     .top_4()
                     .left_4()
@@ -57,11 +75,17 @@ impl Render for CaptureView {
                     .bg(rgb(0x20242b))
                     .text_color(rgb(0xffffff))
                     .text_sm()
-                    .child(if self.image.is_some() {
-                        "画面已冻结 · Esc 取消（本阶段不输出）"
-                    } else {
-                        "正在准备截图… · Esc 取消"
-                    }),
+                    .hover(|style| style.bg(rgb(0x2a2f3a)))
+                    .on_click(move |_, _, _| {
+                        queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
+                    })
+                    .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                        log::info!("a11y_action=arcshot.overlay.cancel action=Click");
+                        a11y_queue
+                            .borrow_mut()
+                            .push(UiCommand::CancelCapture(ticket));
+                    })
+                    .child(status),
             )
     }
 }
