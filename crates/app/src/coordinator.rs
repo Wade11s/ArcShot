@@ -402,12 +402,27 @@ impl Coordinator {
         }
     }
 
+    /// Reports one semantic action to the capture authority.
+    ///
+    /// Every phase change is logged as one text line so end-to-end checks can
+    /// observe session state without reading GPUI windows or pixels.
+    fn dispatch(&mut self, action: CaptureAction) -> VecDeque<CaptureEffect> {
+        let name = action_name(&action);
+        let before = self.session.phase();
+        let effects: VecDeque<_> = self.session.dispatch(action).into();
+        let after = self.session.phase();
+        if after != before {
+            log::info!("capture_phase from={before:?} to={after:?} action={name}");
+        }
+        effects
+    }
+
     fn action(&mut self, action: CaptureAction, cx: &mut Context<Self>) {
-        let mut effects: VecDeque<_> = self.session.dispatch(action).into();
+        let mut effects = self.dispatch(action);
         while let Some(effect) = effects.pop_front() {
             match effect {
                 CaptureEffect::CheckPermission(ticket) => {
-                    effects.extend(self.session.dispatch(CaptureAction::PermissionChecked {
+                    effects.extend(self.dispatch(CaptureAction::PermissionChecked {
                         ticket,
                         available: native::screen_recording_available(),
                     }));
@@ -419,7 +434,7 @@ impl Coordinator {
                     self.close_notice(cx);
                     if let Err(error) = self.open_preparing(ticket, cx) {
                         self.show_error(format!("无法打开截图准备窗口：{error}"), cx);
-                        effects.extend(self.session.dispatch(CaptureAction::Completed {
+                        effects.extend(self.dispatch(CaptureAction::Completed {
                             ticket,
                             result: Err(CaptureFailure::WorkerUnavailable),
                         }));
@@ -789,6 +804,19 @@ fn geometry(display: DisplaySnapshot) -> Result<ScreenGeometry, FrameError> {
         display.height,
         display.scale,
     )
+}
+
+/// Diagnostic label for one semantic action; frame payloads are never printed.
+const fn action_name(action: &CaptureAction) -> &'static str {
+    match action {
+        CaptureAction::Start => "Start",
+        CaptureAction::PermissionChecked { .. } => "PermissionChecked",
+        CaptureAction::Completed { .. } => "Completed",
+        CaptureAction::Cancel => "Cancel",
+        CaptureAction::CancelAttempt(_) => "CancelAttempt",
+        CaptureAction::DisplayInvalidated => "DisplayInvalidated",
+        CaptureAction::SetOutputBusy { .. } => "SetOutputBusy",
+    }
 }
 
 /// Text-only 5x5 grid probe of an admitted frame for the manual color oracle.
