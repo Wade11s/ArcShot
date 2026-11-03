@@ -253,6 +253,7 @@ impl Render for HotkeyView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_id = window.window_handle().window_id();
         let entity = cx.entity();
+        let key_entity = entity.clone();
         let current = self.current;
         let active = self.active;
         let candidate = self.candidate;
@@ -261,7 +262,30 @@ impl Render for HotkeyView {
         let save_command = candidate
             .filter(|candidate| candidate.is_valid())
             .map(|candidate| UiCommand::HotkeySave(window_id, candidate));
+        // One source for the visible text and the accessible name, so assistive
+        // technology reads the same recording state a pointer user sees.
+        let recorder_label = match (recording, candidate) {
+            (true, Some(candidate)) => format!(
+                "{candidate}{}",
+                if candidate.is_valid() {
+                    " · Esc 取消录入"
+                } else {
+                    "（不合法）· Esc 取消录入"
+                }
+            ),
+            (true, None) => "按下新组合 · Esc 取消录入".to_owned(),
+            (false, Some(candidate)) => format!(
+                "{candidate}{}",
+                if candidate.is_valid() {
+                    ""
+                } else {
+                    "（不合法）"
+                }
+            ),
+            (false, None) => "点击录入新组合".to_owned(),
+        };
         div()
+            .id("hotkey-root")
             .size_full()
             .p_6()
             .flex()
@@ -270,23 +294,28 @@ impl Render for HotkeyView {
             .bg(rgb(0x20242b))
             .text_color(rgb(0xffffff))
             .text_size(px(15.0))
+            .role(Role::Group)
+            .aria_label("ArcShot 截图快捷键")
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
-                let consumed = entity.update(cx, |view, cx| {
+                let consumed = key_entity.update(cx, |view, cx| {
                     view.record(&event.keystroke, window_id, cx)
                 });
                 if consumed {
                     cx.stop_propagation();
                 }
             })
-            .child(div().text_xl().child("截图快捷键"))
-            .child(div().child(format!(
-                "当前：{current}{}",
-                if active { "" } else { "（未生效）" }
+            .child(div().text_xl().child(text!(id = "hotkey-title", "截图快捷键")))
+            .child(div().child(text!(
+                id = "hotkey-current",
+                format!("当前：{current}{}", if active { "" } else { "（未生效）" })
             )))
             .child(
                 div()
                     .id("hotkey-recorder")
+                    .role(Role::Button)
+                    .aria_label(recorder_label.clone())
+                    .accessibility_id("arcshot.hotkey.recorder")
                     .rounded_md()
                     .px_4()
                     .py_4()
@@ -314,36 +343,45 @@ impl Render for HotkeyView {
                                 .push(UiCommand::HotkeyRecording(window_id, true));
                         }
                     })
-                    .child(match (recording, candidate) {
-                        (true, Some(candidate)) => format!(
-                            "{candidate}{}",
-                            if candidate.is_valid() {
-                                " · Esc 取消录入"
-                            } else {
-                                "（不合法）· Esc 取消录入"
-                            }
-                        ),
-                        (true, None) => "按下新组合 · Esc 取消录入".to_owned(),
-                        (false, Some(candidate)) => format!(
-                            "{candidate}{}",
-                            if candidate.is_valid() { "" } else { "（不合法）" }
-                        ),
-                        (false, None) => "点击录入新组合".to_owned(),
-                    }),
+                    // AX activation must reach the same state change and queue
+                    // push as a pointer click; `AXPress` never calls `on_click`.
+                    .on_a11y_action(AccessibleAction::Click, {
+                        let entity = entity.clone();
+                        let queue = Rc::clone(&self.queue);
+                        move |_, _, cx| {
+                            log::info!("a11y_action=arcshot.hotkey.recorder action=Click");
+                            entity.update(cx, |view, cx| {
+                                view.recording = true;
+                                view.error = None;
+                                view.candidate = None;
+                                cx.notify();
+                            });
+                            queue
+                                .borrow_mut()
+                                .push(UiCommand::HotkeyRecording(window_id, true));
+                        }
+                    })
+                    .child(recorder_label),
             )
             .child(
-                div()
-                    .text_color(rgb(0x9aa4b5))
-                    .child("合法组合需包含 Command / Control / Option 至少一个修饰键和一个普通键，可加 Shift；仅 Shift 加普通键不合法。"),
+                div().text_color(rgb(0x9aa4b5)).child(text!(
+                    id = "hotkey-rule",
+                    "合法组合需包含 Command / Control / Option 至少一个修饰键和一个普通键，可加 Shift；仅 Shift 加普通键不合法。"
+                )),
             )
             .child({
                 let mut buttons = div().flex().gap_2();
                 if let Some(command) = save_command {
                     let queue = Rc::clone(&self.queue);
                     let entity = cx.entity();
+                    let a11y_entity = entity.clone();
+                    let a11y_queue = Rc::clone(&self.queue);
                     buttons = buttons.child(
                         div()
                             .id("hotkey-save")
+                            .role(Role::Button)
+                            .aria_label("保存")
+                            .accessibility_id("arcshot.hotkey.save")
                             .px_3()
                             .py_2()
                             .rounded_md()
@@ -358,6 +396,14 @@ impl Render for HotkeyView {
                                 });
                                 log::info!("hotkey_save_pushed window_id={window_id:?}");
                                 queue.borrow_mut().push(command);
+                            })
+                            .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+                                log::info!("a11y_action=arcshot.hotkey.save action=Click");
+                                a11y_entity.update(cx, |view, cx| {
+                                    view.recording = false;
+                                    cx.notify();
+                                });
+                                a11y_queue.borrow_mut().push(command);
                             }),
                     );
                 }
@@ -372,7 +418,7 @@ impl Render for HotkeyView {
                 div()
                     .id("hotkey-error")
                     .text_color(rgb(0xff6b6b))
-                    .child(error)
+                    .child(text!(id = "hotkey-error-text", error))
             }))
     }
 }
