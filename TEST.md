@@ -343,6 +343,30 @@ AX 标识已落地；权限通知与滚动控制窗的 AX 标识由 APP-EFFECT �
 
 实测记录见 `docs/validation/33-scroll-stitch.md`。
 
+### #34 的稳定自动化入口
+
+显式部分结果只走已确认接缝：core 的 `AwaitingPartialChoice` 状态与接受/放弃动作、
+app 的纯选择分类与控制窗 AX 按钮、自有 GPUI 精确像素夹具的原子跳变 E2E。已知
+状态停止（内容变化、歧义重叠、目标/权限/输入保护/资源）且有已验证历史时，只
+提供「使用已验证部分 / 放弃并返回原选区」两项显式选择，不自动输出；无已验证
+结果时只放弃；原生不确定终态与内屏失效从不提供部分、禁止会话内重启。接受
+部分后编码/复制失败保留结果供重试/放弃，不显示成功预览；成功复用共享输出路径。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/scroll_loop.rs` | CORE-SESSION-67～76：拼接拒绝带已验证历史时提供部分选择且不自动输出、全部已知采集期停止（内容/重叠/目标/输入/帧/资源）提供选择、采集前失败只放弃、放弃返回原选区且迟到结果忽略、接受后输出失败保留重试/放弃、显式取消不提供部分、不确定/内屏失效不提供部分、热键重启/重入不能篡改选择、成功后迟到结果不重复输出；CORE-SESSION-57/58/64/65 的采集期停止期望同步改为部分选择 | 真实原生故障注入、三秒完成预览 |
+| `crates/app/tests/scroll_partial_flow.rs` | APP-EFFECT-45～49：已知失败族×有已验证结果恰好两项、无结果/不确定只放弃、标签与「不完整、确认后才复制」警告、选择映射到显式会话动作、接受后编码/复制失败仍提供重试/放弃；APP-ASYNC-21～22：等待选择时 tap 命令不路由、等待时不确定终态丢弃部分 | 真实 SCK 请求状态确认 |
+| `crates/app/src/scroll_partial_flow.rs` | `partial_offered` / `partial_choices` / `partial_action` 纯分类与共享标签常量，被控制窗按钮与 E2E 断言复用 | GPUI 排版像素 |
+| `crates/app/src/bin/scroll-fixture.rs` | I-13 目标类 1：按键 `j` 原子跳变 +1000 行（`fixture_jump` 回执），供无重叠缺口的受控负例；大滚轮会被拆成逐步事件并可能扩展，不用作缺口证据 | TextEdit/Safari 目标（§4.4） |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-28：慢速扩展后原子跳变造成 Gap 停止，AX 断言两项选择与不完整警告、点击前无输出；放弃返回原选区且无输出，接受经共享 Clipboard 路径输出；MAC-E2E-24 同步：采集期已知停止改走部分放弃回到覆盖层 | 真实 TCC 切换、第三方目标、动态/固定表头等其余负例的实机通过（仅注入式安全处理） |
+
+控制窗在部分选择时以 `arcshot.scroll.partial.use` / `arcshot.scroll.partial.abandon`
+两个 `button` 暴露选择，`arcshot.scroll.hint` 承载不完整警告；输入保护在进入
+等待时退役（`scroll_input_retired`），控制窗与已验证预览保留，原始帧队列清空
+（未验证帧丢弃）。
+
+实测记录见 `docs/validation/34-scroll-partial-recovery.md`。
+
 ### #29 的稳定自动化入口
 
 选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
@@ -472,6 +496,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
 | MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
 | MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 且 `from=Frozen to=Resident action=OutputCompleted` | 三秒完成预览、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
+| MAC-E2E-28 | 由脚本启动同一夹具；选区内慢速下滚 2 次扩展已验证历史，按键 `j` 触发夹具原子跳变 +1000 行造成无重叠 Gap 停止；AX 读控制窗选择；分别点击放弃与接受 | `scroll_stitch_refused … gap` 与 `scroll_phase … to=AwaitingPartialChoice`；`scroll_partial_choice available=true … pixels=460x424`；点击前无 `output_publish`；`arcshot.scroll.partial.use` / `.abandon` 均可寻址且 `arcshot.scroll.hint` 含“不完整”；放弃出现 `scroll_partial_choice action=abandon` 与 `action=AbandonScrollPartial`，覆盖层与选区返回且无输出；接受出现 `action=accept` 后才 `output_publish target=Clipboard` 与 `from=Frozen to=Resident action=OutputCompleted` | 其余负例（动态/固定表头/重复低纹理/横向·对角·嵌套/目标·权限·输入保护失效）的实机通过仅由注入式用例证明安全处理；真实 TCC 切换、TextEdit/Safari、原生故障注入与视觉观感 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -553,6 +578,16 @@ agent-desktop press escape --headed
   pixels=… document=… extensions=… duplicates=…`；预览放置写
   `scroll_preview placed=right|left|inner frame=[…]`。原始帧队列与背压由
   APP-ASYNC-17～20 守护。
+- 已落地（#34）：已知状态停止且有已验证历史时，控制窗切换为显式部分选择：
+  `arcshot.scroll.partial.use`（使用已验证部分）与
+  `arcshot.scroll.partial.abandon`（放弃并返回原选区）两个 `button`，
+  `arcshot.scroll.hint` 承载“已验证部分不完整；确认后才会复制”，`arcshot.scroll.status`
+  承载停止原因；诊断写 `scroll_partial_choice available=true|false … pixels=…`、
+  `scroll_partial_choice action=accept|abandon …` 与相位
+  `to=AwaitingPartialChoice`。等待时输入保护退役（`scroll_input_retired`），
+  控制窗与已验证预览保留、未验证队列清空；无已验证结果时写
+  `available=false` 并直接返回覆盖层（只放弃）。夹具按键 `j` 的原子跳变写
+  `fixture_jump offset_points=…`，供 MAC-E2E-28 的 Gap 受控停止。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。

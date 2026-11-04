@@ -1512,6 +1512,32 @@ def main() -> int:
                             10.0,
                             after=mark,
                         )
+                if control is None:
+                    # #34: a known-state stop during collection (dynamic or
+                    # low-texture target content) offers the explicit partial
+                    # choice in the control window instead of returning
+                    # straight to the overlay. Abandon it to restore the
+                    # region session asserted below.
+                    try:
+                        wait_log(
+                            log, "scroll_partial_choice available=true", 3.0, after=mark
+                        )
+                        abandon = wait_node(
+                            app,
+                            lambda tree: (
+                                find_nodes(
+                                    tree,
+                                    native_id="arcshot.scroll.partial.abandon",
+                                    require_ref=True,
+                                )
+                                or [None]
+                            )[0],
+                            10.0,
+                        )
+                        agent("click", abandon["ref_id"])
+                        wait_log(log, "action=AbandonScrollPartial", 10.0, after=mark)
+                    except Failure:
+                        pass
         # The region session and its selection are preserved.
         wait_node(
             app,
@@ -1819,6 +1845,132 @@ def main() -> int:
         finally:
             stop(fixture)
 
+        # MAC-E2E-28: a controlled known-state stop (no-overlap fast jump)
+        # with verified history offers exactly two explicit choices —
+        # 使用已验证部分 (incomplete, copied only after confirmation) or
+        # 放弃并返回原选区 — and never auto-outputs. Subcase A abandons and
+        # returns the pre-scroll selection; subcase B accepts and publishes
+        # through the shared clipboard path only after the AX click.
+        fixture_log = ROOT / "target" / f"e2e-scroll-fixture-{configuration}.log"
+        fixture = start(
+            ROOT / "target" / configuration / "arcshot-scroll-fixture", fixture_log
+        )
+        try:
+            wait_log(fixture_log, "fixture_window", 10.0)
+            time.sleep(1.0)
+
+            def begin_scroll_28(drag_from: str, drag_to: str):
+                log_mark = len(read_log(log))
+                click(app, "开始截图")
+                wait_frozen_active(log, log_mark)
+                agent("drag", "--from-xy", drag_from, "--to-xy", drag_to, "--headed")
+                wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+                selection = parse_selection(log, log_mark)
+                mark = len(read_log(log))
+                click_scroll_entry(app, denied=False)
+                wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
+                wait_log(log, "scroll_collecting", 15.0, after=mark)
+                return mark, selection
+
+            def drive_to_gap_stop(mark: int) -> None:
+                # Two slow steps extend the verified history, then the
+                # fixture's atomic jump (key j, +1000 rows) moves past every
+                # verified row: the next frame has no overlap with history
+                # and must stop as a Gap, not guess. A large wheel would be
+                # split into stepwise events and could extend instead.
+                for _ in range(2):
+                    agent("mouse-wheel", "--x", "830", "--y", "700", "--dy", "-1", "--headed")
+                wait_log(log, "scroll_stitch extended", 10.0, after=mark)
+                press_until_log("j", fixture_log, "fixture_jump", timeout=5.0)
+                wait_log(log, "scroll_stitch_refused", 10.0, after=mark)
+                line = wait_log_line(log, "scroll_partial_choice available=true", 10.0, after=mark)
+                if "pixels=" not in line or "pixels=0x" in line:
+                    fail(f"partial choice does not report its verified size: {line!r}")
+                # No auto-output: the incomplete result waits for a choice.
+                if any("output_publish" in entry for entry in read_log(log)[mark:]):
+                    fail("an incomplete partial result was output without explicit choice")
+
+            def expect_partial_choice() -> None:
+                use = wait_node(
+                    app,
+                    lambda tree: (
+                        find_nodes(tree, native_id="arcshot.scroll.partial.use", require_ref=True)
+                        or [None]
+                    )[0],
+                    10.0,
+                )
+                abandon = wait_node(
+                    app,
+                    lambda tree: (
+                        find_nodes(
+                            tree, native_id="arcshot.scroll.partial.abandon", require_ref=True
+                        )
+                        or [None]
+                    )[0],
+                    10.0,
+                )
+                if not use.get("ref_id") or not abandon.get("ref_id"):
+                    fail("the partial choice does not expose both AX buttons")
+                hint = wait_node(
+                    app,
+                    lambda tree: next(
+                        (
+                            node
+                            for node in find_nodes(tree, native_id="arcshot.scroll.hint")
+                            if "不完整" in str(node.get("value"))
+                            or "不完整" in str(node.get("name"))
+                        ),
+                        None,
+                    ),
+                    10.0,
+                )
+                if not hint:
+                    fail("the partial choice does not warn that the result is incomplete")
+                return use, abandon
+
+            # Subcase A: abandon returns the pre-scroll selection, no output.
+            mark, _selection = begin_scroll_28("620,600", "850,780")
+            drive_to_gap_stop(mark)
+            _use, abandon = expect_partial_choice()
+            agent("click", abandon["ref_id"])
+            wait_log(log, "scroll_partial_choice action=abandon", 10.0, after=mark)
+            wait_log(log, "action=AbandonScrollPartial", 10.0, after=mark)
+            wait_log(log, "scroll_input_retired", 10.0, after=mark)
+            if any("output_publish" in entry for entry in read_log(log)[mark:]):
+                fail("abandoning the partial produced output")
+            root = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+                )[0],
+                10.0,
+            )
+            if not find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
+                fail("abandoning the partial did not return the pre-scroll selection")
+            note(
+                "mac_e2e_28_abandon=pass gap_stop=true choices=two incomplete_warn=true "
+                "abandon=selection_returned output=none"
+            )
+
+            # Subcase B: accept publishes only after the explicit AX click.
+            mark, _selection = begin_scroll_28("620,600", "850,780")
+            drive_to_gap_stop(mark)
+            use, _abandon = expect_partial_choice()
+            if any("output_publish" in entry for entry in read_log(log)[mark:]):
+                fail("the partial was output before explicit acceptance")
+            agent("click", use["ref_id"])
+            wait_log(log, "scroll_partial_choice action=accept", 10.0, after=mark)
+            wait_log(log, "output_publish target=Clipboard", 10.0, after=mark)
+            wait_log(
+                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark
+            )
+            note(
+                "mac_e2e_28_accept=pass gap_stop=true choices=two no_auto_output=true "
+                "accept=clipboard after_explicit_click"
+            )
+        finally:
+            stop(fixture)
+
         # MAC-E2E-15: the 完成音效 preference toggles through AX and is persisted.
         original_sound = next(
             line.split("completion_sound=", 1)[1].split(" ", 1)[0]
@@ -1984,7 +2136,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=27")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=28")
     return 0
 
 

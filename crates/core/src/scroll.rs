@@ -270,6 +270,9 @@ pub enum ScrollPhase {
     Prepared,
     /// Input protection is active and the trusted first frame was admitted.
     Collecting,
+    /// Collection stopped for a known-state reason while a verified result
+    /// remains; the user must explicitly accept it or abandon it.
+    AwaitingPartialChoice,
     /// Preparation or collection stopped; the region session and its selection are kept.
     Stopped,
 }
@@ -295,6 +298,9 @@ pub enum ScrollPrepOutcome {
     StitchUpdated,
     /// Preparation stopped with a known-state refusal; keep the region session.
     Refused(ScrollRefusal),
+    /// Collection stopped with a known-state refusal while a verified result
+    /// remains; the user must explicitly accept or abandon it.
+    PartialChoice(ScrollRefusal),
     /// Preparation was cancelled; keep the region session.
     Stopped,
     /// The action belongs to another phase or a finished attempt; nothing changes.
@@ -322,6 +328,8 @@ pub struct ScrollPreparation {
     /// Verified extensions and de-duplicated reverse passes, for diagnostics.
     extensions: u64,
     duplicates: u64,
+    /// A completion output is running for an accepted partial result.
+    partial_output: bool,
     /// The region document, stashed while a completion output runs; restored on
     /// abandon or failure so Esc always returns the pre-scroll selection.
     region_document: Option<Box<Document>>,
@@ -348,6 +356,7 @@ impl ScrollPreparation {
             pending_frame: None,
             extensions: 0,
             duplicates: 0,
+            partial_output: false,
             region_document: None,
         }
     }
@@ -411,6 +420,22 @@ impl ScrollPreparation {
     #[must_use]
     pub const fn duplicates(&self) -> u64 {
         self.duplicates
+    }
+
+    /// Whether a partial-result output is currently in flight.
+    #[must_use]
+    pub const fn partial_output(&self) -> bool {
+        self.partial_output
+    }
+
+    /// Marks that an accepted partial result is being published.
+    pub fn begin_partial_output(&mut self) {
+        self.partial_output = true;
+    }
+
+    /// Clears the partial-output mark after its publish failed.
+    pub fn end_partial_output(&mut self) {
+        self.partial_output = false;
     }
 
     /// Applies the input-protection installation result.
@@ -568,6 +593,14 @@ impl ScrollPreparation {
     }
 
     fn stop_with(&mut self, refusal: ScrollRefusal) -> ScrollPrepOutcome {
+        // A known-state stop during collection with verified history is not
+        // a plain refusal: the verified result stays behind an explicit
+        // accept-or-abandon choice and is never output automatically.
+        if self.phase == ScrollPhase::Collecting && self.stitch.is_some() {
+            self.phase = ScrollPhase::AwaitingPartialChoice;
+            self.refusal = Some(refusal.clone());
+            return ScrollPrepOutcome::PartialChoice(refusal);
+        }
         self.phase = ScrollPhase::Stopped;
         self.refusal = Some(refusal.clone());
         ScrollPrepOutcome::Refused(refusal)

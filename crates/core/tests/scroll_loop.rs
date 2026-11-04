@@ -473,17 +473,17 @@ fn core_session_56_hotkey_restart_abandons_collection_but_waits_for_output() {
 fn core_session_57_input_protection_loss_stops_collection_without_output() {
     let (mut session, ticket) = collecting();
     let selection = session.document().unwrap().selection();
+    // #34: a known stop with verified history offers the explicit choice
+    // instead of outputting or returning straight to the overlay.
     assert_eq!(
         session.dispatch(CaptureAction::ScrollInputLost { ticket }),
-        vec![
-            CaptureEffect::ScrollRefused(
-                ticket,
-                ScrollRefusal::Input(ScrollInputError::ProtectionLost)
-            ),
-            CaptureEffect::PresentFrozen(ticket)
-        ]
+        vec![CaptureEffect::ScrollPartialChoice(
+            ticket,
+            ScrollRefusal::Input(ScrollInputError::ProtectionLost)
+        )]
     );
-    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
+    assert!(session.scroll_partial_available());
     assert_eq!(session.phase(), CapturePhase::Frozen);
     assert_eq!(session.document().unwrap().selection(), selection);
     assert!(!session.output_busy());
@@ -500,12 +500,12 @@ fn core_session_58_target_loss_during_collection_stops_without_output() {
         let selection = session.document().unwrap().selection();
         assert_eq!(
             session.dispatch(CaptureAction::ScrollTargetLost { ticket, error }),
-            vec![
-                CaptureEffect::ScrollRefused(ticket, ScrollRefusal::Target(error)),
-                CaptureEffect::PresentFrozen(ticket)
-            ]
+            vec![CaptureEffect::ScrollPartialChoice(
+                ticket,
+                ScrollRefusal::Target(error)
+            )]
         );
-        assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+        assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
         assert_eq!(session.phase(), CapturePhase::Frozen);
         assert_eq!(session.document().unwrap().selection(), selection);
     }
@@ -665,19 +665,17 @@ fn core_session_64_stitch_refusal_stops_collection_without_output() {
             ticket,
             error: arcshot_core::ScrollStitchError::Gap,
         }),
-        vec![
-            CaptureEffect::ScrollRefused(
-                ticket,
-                ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::Gap)
-            ),
-            CaptureEffect::PresentFrozen(ticket)
-        ]
+        vec![CaptureEffect::ScrollPartialChoice(
+            ticket,
+            ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::Gap)
+        )]
     );
-    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
     assert_eq!(session.phase(), CapturePhase::Frozen);
     assert_eq!(session.document().unwrap().selection(), selection);
     assert!(!session.output_busy());
-    // Completion is no longer reachable after a verification refusal.
+    // Normal completion is no longer reachable after a verification refusal;
+    // only the explicit partial accept may publish.
     assert_eq!(
         session.dispatch(CaptureAction::CompleteScroll { ticket }),
         vec![]
@@ -701,12 +699,12 @@ fn core_session_65_collected_capture_failures_classify_like_the_initial_frame() 
                 ticket,
                 result: Err(failure),
             }),
-            vec![
-                CaptureEffect::ScrollRefused(ticket, ScrollRefusal::Frame(expected)),
-                CaptureEffect::PresentFrozen(ticket)
-            ]
+            vec![CaptureEffect::ScrollPartialChoice(
+                ticket,
+                ScrollRefusal::Frame(expected)
+            )]
         );
-        assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+        assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
         assert_eq!(session.document().unwrap().selection(), selection);
     }
 
@@ -769,6 +767,453 @@ fn core_session_66_frames_after_cancel_or_completion_are_ignored() {
         assert_eq!(session.dispatch(action), vec![]);
     }
     assert_eq!(session.phase(), CapturePhase::Frozen);
+}
+
+// CORE-SESSION: explicit partial-result choice after a known-state stop
+// (I-11 step 11 / I-12 known vs uncertain). A usable verified result offers
+// exactly accept-or-abandon; no usable result offers only abandon; uncertain
+// native state and display loss never offer a partial.
+
+/// Drives collection to `AwaitingPartialChoice` via one stitch refusal.
+fn awaiting_partial() -> (CaptureSession, CaptureTicket) {
+    let (mut session, ticket) = collecting();
+    // Extend history first so the partial is larger than the origin frame.
+    session.dispatch(CaptureAction::ScrollFrameCollected {
+        ticket,
+        result: Ok(scroll_frame(&session)),
+    });
+    session.dispatch(CaptureAction::ScrollStitchVerified {
+        ticket,
+        frame: stitched_frame(80),
+        extended: true,
+    });
+    let effects = session.dispatch(CaptureAction::ScrollStitchRefused {
+        ticket,
+        error: arcshot_core::ScrollStitchError::Gap,
+    });
+    assert_eq!(
+        effects,
+        vec![CaptureEffect::ScrollPartialChoice(
+            ticket,
+            ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::Gap)
+        )]
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
+    (session, ticket)
+}
+
+fn partial_job(session: &mut CaptureSession, ticket: CaptureTicket) -> CaptureEffect {
+    let effects = session.dispatch(CaptureAction::AcceptScrollPartial { ticket });
+    effects
+        .into_iter()
+        .find(|effect| matches!(effect, CaptureEffect::ComposeOutput(_)))
+        .expect("accepting a partial submits one compose job")
+}
+
+#[test]
+fn core_session_67_stitch_refusal_with_verified_history_offers_partial_not_output() {
+    let (mut session, ticket) = awaiting_partial();
+    // No auto-output: completion is unreachable in the choice state.
+    assert!(session.scroll_partial_available());
+    assert_eq!(
+        session
+            .scroll_stitch_frame()
+            .unwrap()
+            .geometry()
+            .pixel_size(),
+        [200, 80]
+    );
+    assert_eq!(session.phase(), CapturePhase::Frozen);
+    assert!(!session.output_busy());
+    assert_eq!(
+        session.dispatch(CaptureAction::CompleteScroll { ticket }),
+        vec![]
+    );
+    // The region selection is still the frozen document's selection.
+    assert_eq!(session.document().unwrap().selection().unwrap().x(), 10.0);
+    // Explicit accept reuses the shared fenced clipboard Finish for the
+    // verified (extended) document, not a second output pipeline.
+    let CaptureEffect::ComposeOutput(job) = partial_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 200, 80).unwrap());
+    assert_eq!(job.target(), arcshot_core::OutputTarget::Clipboard);
+    assert!(session.may_publish(&job));
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+}
+
+#[test]
+fn core_session_68_every_known_collecting_stop_offers_the_partial_choice() {
+    // Content change, ambiguous overlap, geometry, target loss, input
+    // protection loss and frame admission / budget failures while collecting.
+    for refusal in [
+        ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::ContentChanged),
+        ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::Ambiguous),
+        ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::Geometry),
+        ScrollRefusal::Target(ScrollTargetError::NoTarget),
+        ScrollRefusal::Target(ScrollTargetError::Geometry),
+        ScrollRefusal::Input(ScrollInputError::ProtectionLost),
+        ScrollRefusal::Frame(ScrollFrameError::Admission),
+        ScrollRefusal::Frame(ScrollFrameError::ResourceLimit),
+    ] {
+        let (mut session, ticket) = collecting();
+        let action = match refusal {
+            ScrollRefusal::Stitch(error) => CaptureAction::ScrollStitchRefused { ticket, error },
+            ScrollRefusal::Target(error) => CaptureAction::ScrollTargetLost { ticket, error },
+            ScrollRefusal::Input(ScrollInputError::ProtectionLost) => {
+                CaptureAction::ScrollInputLost { ticket }
+            }
+            ScrollRefusal::Frame(ScrollFrameError::Admission) => {
+                CaptureAction::ScrollFrameCollected {
+                    ticket,
+                    result: Err(CaptureFailure::InvalidFrame),
+                }
+            }
+            ScrollRefusal::Frame(ScrollFrameError::ResourceLimit) => {
+                CaptureAction::ScrollFrameCollected {
+                    ticket,
+                    result: Err(CaptureFailure::ResourceLimit),
+                }
+            }
+            _ => panic!("matrix case is not a collecting stop: {refusal:?}"),
+        };
+        assert_eq!(
+            session.dispatch(action),
+            vec![CaptureEffect::ScrollPartialChoice(ticket, refusal.clone())],
+            "case {refusal:?}"
+        );
+        assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
+        assert!(session.scroll_partial_available());
+        assert!(!session.output_busy());
+        assert_eq!(session.phase(), CapturePhase::Frozen);
+    }
+}
+
+#[test]
+fn core_session_69_resource_budget_stop_during_collecting_offers_the_partial() {
+    let (mut session, ticket) = collecting();
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollStitchRefused {
+            ticket,
+            error: arcshot_core::ScrollStitchError::ResourceLimit,
+        }),
+        vec![CaptureEffect::ScrollPartialChoice(
+            ticket,
+            ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::ResourceLimit)
+        )]
+    );
+    assert!(session.scroll_partial_available());
+    // Accepting still goes through the budget-fenced shared output path.
+    let CaptureEffect::ComposeOutput(job) = partial_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
+}
+
+#[test]
+fn core_session_70_stops_before_collection_offer_only_abandon() {
+    // Permissions missing.
+    let (mut session, ticket) = frozen_selected();
+    session.dispatch(CaptureAction::EnterScroll { ticket });
+    let effects = session.dispatch(CaptureAction::ScrollPermissionsChecked {
+        ticket,
+        available: arcshot_core::ScrollPermissions {
+            screen_recording: true,
+            input_monitoring: false,
+            accessibility: true,
+        },
+    });
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, CaptureEffect::ScrollRefused(_, _))),
+        "permission refusal must not offer a partial: {effects:?}"
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert!(!session.scroll_partial_available());
+    assert_eq!(
+        session.dispatch(CaptureAction::AcceptScrollPartial { ticket }),
+        vec![]
+    );
+    // Initial-frame failures (admission / geometry / budget / worker).
+    for failure in [
+        CaptureFailure::InvalidFrame,
+        CaptureFailure::ResourceLimit,
+        CaptureFailure::WorkerUnavailable,
+    ] {
+        let (mut session, ticket) = prepared();
+        session.dispatch(CaptureAction::ScrollInputInstalled {
+            ticket,
+            result: Ok(()),
+        });
+        let effects = session.dispatch(CaptureAction::ScrollFrameAdmitted {
+            ticket,
+            result: Err(failure),
+        });
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, CaptureEffect::ScrollRefused(_, _))),
+            "initial-frame refusal must not offer a partial: {effects:?}"
+        );
+        assert!(!session.scroll_partial_available());
+        assert_eq!(
+            session.dispatch(CaptureAction::AcceptScrollPartial { ticket }),
+            vec![]
+        );
+    }
+}
+
+#[test]
+fn core_session_71_abandon_returns_the_pre_scroll_selection_and_clears_the_partial() {
+    let (mut session, ticket) = awaiting_partial();
+    let selection = session.document().unwrap().selection().unwrap();
+    let version = session.document().unwrap().version();
+    assert_eq!(
+        session.dispatch(CaptureAction::AbandonScrollPartial { ticket }),
+        vec![CaptureEffect::PresentFrozen(ticket)]
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert!(!session.scroll_partial_available());
+    assert_eq!(session.phase(), CapturePhase::Frozen);
+    assert_eq!(session.document().unwrap().selection(), Some(selection));
+    assert_eq!(session.document().unwrap().version(), version);
+    // Late partial / completion / stitch results are ignored after abandon.
+    let frame = scroll_frame(&session);
+    for action in [
+        CaptureAction::AcceptScrollPartial { ticket },
+        CaptureAction::CompleteScroll { ticket },
+        CaptureAction::ScrollStitchVerified {
+            ticket,
+            frame: frame.clone(),
+            extended: true,
+        },
+        CaptureAction::ScrollFrameCollected {
+            ticket,
+            result: Ok(frame),
+        },
+    ] {
+        assert_eq!(session.dispatch(action), vec![]);
+    }
+    // The user may enter Scroll again from the returned selection.
+    session.dispatch(CaptureAction::EnterScroll { ticket });
+    assert_eq!(session.scroll_phase(), ScrollPhase::CheckingPermissions);
+}
+
+#[test]
+fn core_session_72_failed_partial_output_keeps_the_result_for_retry_or_abandon() {
+    for failure in [
+        arcshot_core::OutputFailure::Clipboard,
+        arcshot_core::OutputFailure::Encode,
+        arcshot_core::OutputFailure::Worker,
+        arcshot_core::OutputFailure::ResourceLimit,
+    ] {
+        let (mut session, ticket) = awaiting_partial();
+        let CaptureEffect::ComposeOutput(job) = partial_job(&mut session, ticket) else {
+            panic!("expected one compose job");
+        };
+        let effects = session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Err(failure),
+        });
+        // No success: the session is not resident, no sound, choice returns.
+        assert!(
+            effects.contains(&CaptureEffect::ReportOutputFailure(failure)),
+            "{effects:?}"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, CaptureEffect::ScrollPartialChoice(_, _))),
+            "failed partial output must re-offer the choice: {effects:?}"
+        );
+        assert_eq!(session.phase(), CapturePhase::Frozen);
+        assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
+        assert!(session.scroll_partial_available());
+        assert!(!session.output_busy());
+        // Retry accept succeeds through the same job path.
+        let CaptureEffect::ComposeOutput(job) = partial_job(&mut session, ticket) else {
+            panic!("retry submits a fresh compose job");
+        };
+        assert_eq!(
+            session.dispatch(CaptureAction::OutputCompleted {
+                job,
+                result: Ok(())
+            }),
+            vec![
+                CaptureEffect::DismissOverlay,
+                CaptureEffect::PlayCompletionSound
+            ]
+        );
+        assert_eq!(session.phase(), CapturePhase::Resident);
+    }
+    // Abandon after a failed accept also returns the original selection.
+    let (mut session, ticket) = awaiting_partial();
+    let CaptureEffect::ComposeOutput(job) = partial_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job,
+        result: Err(arcshot_core::OutputFailure::Clipboard),
+    });
+    assert_eq!(
+        session.dispatch(CaptureAction::AbandonScrollPartial { ticket }),
+        vec![CaptureEffect::PresentFrozen(ticket)]
+    );
+    assert_eq!(session.document().unwrap().selection().unwrap().x(), 10.0);
+}
+
+#[test]
+fn core_session_73_explicit_cancel_during_collecting_never_offers_a_partial() {
+    let (mut session, ticket) = collecting();
+    assert_eq!(
+        session.dispatch(CaptureAction::CancelScroll { ticket }),
+        vec![CaptureEffect::PresentFrozen(ticket)]
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert!(!session.scroll_partial_available());
+    assert_eq!(
+        session.dispatch(CaptureAction::AcceptScrollPartial { ticket }),
+        vec![]
+    );
+    // Esc while awaiting the choice is the same abandon.
+    let (mut session, ticket) = awaiting_partial();
+    assert_eq!(
+        session.dispatch(CaptureAction::CancelScroll { ticket }),
+        vec![CaptureEffect::PresentFrozen(ticket)]
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+}
+
+#[test]
+fn core_session_74_uncertain_native_state_and_display_loss_never_offer_a_partial() {
+    // Uncertain state during collection is terminal, even with history.
+    for failure in [
+        CaptureFailure::NativeUncertain,
+        CaptureFailure::WorkerPanicked,
+    ] {
+        let (mut session, ticket) = collecting();
+        assert_eq!(
+            session.dispatch(CaptureAction::ScrollFrameCollected {
+                ticket,
+                result: Err(failure),
+            }),
+            vec![
+                CaptureEffect::DismissOverlay,
+                CaptureEffect::ScrollRelaunchRequired
+            ]
+        );
+        assert_eq!(session.phase(), CapturePhase::RelaunchRequired);
+        assert!(!session.scroll_partial_available());
+        assert_eq!(
+            session.dispatch(CaptureAction::Start),
+            vec![CaptureEffect::ReportFailure(
+                CaptureFailure::NativeUncertain
+            )]
+        );
+    }
+    // Display loss cancels the whole session.
+    let (mut session, ticket) = collecting();
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollFrameCollected {
+            ticket,
+            result: Err(CaptureFailure::DisplayInvalid),
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::ReportFailure(CaptureFailure::DisplayInvalid)
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert!(!session.scroll_partial_available());
+    // Uncertain state arriving while awaiting the choice discards it.
+    let (mut session, ticket) = awaiting_partial();
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollNativeUncertain { ticket }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::ScrollRelaunchRequired
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::RelaunchRequired);
+    assert!(!session.scroll_partial_available());
+    // Display loss while awaiting also discards it.
+    let (mut session, _ticket) = awaiting_partial();
+    assert_eq!(
+        session.dispatch(CaptureAction::DisplayInvalidated),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::ReportFailure(CaptureFailure::DisplayInvalid)
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert!(!session.scroll_partial_available());
+}
+
+#[test]
+fn core_session_75_hotkey_restart_and_reentry_cannot_steal_or_pollute_the_choice() {
+    // Hotkey restart during the choice passes the native exit fence and
+    // clears the partial; late accept with the old ticket is ignored.
+    let (mut session, ticket) = awaiting_partial();
+    let effects = session.dispatch(CaptureAction::Start);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, CaptureEffect::CheckPermission(_))),
+        "{effects:?}"
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert!(!session.scroll_partial_available());
+    assert_eq!(
+        session.dispatch(CaptureAction::AcceptScrollPartial { ticket }),
+        vec![]
+    );
+    // Re-entering Scroll while awaiting must not overwrite the partial
+    // without an explicit abandon.
+    let (mut session, ticket) = awaiting_partial();
+    assert_eq!(
+        session.dispatch(CaptureAction::EnterScroll { ticket }),
+        vec![]
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::AwaitingPartialChoice);
+    assert!(session.scroll_partial_available());
+}
+
+#[test]
+fn core_session_76_late_results_after_partial_success_never_output_again() {
+    let (mut session, ticket) = awaiting_partial();
+    let CaptureEffect::ComposeOutput(job) = partial_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job: job.clone(),
+        result: Ok(()),
+    });
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    // The same ticket's late actions publish nothing in the new session.
+    for action in [
+        CaptureAction::AcceptScrollPartial { ticket },
+        CaptureAction::AbandonScrollPartial { ticket },
+        CaptureAction::CompleteScroll { ticket },
+        CaptureAction::OutputCompleted {
+            job,
+            result: Ok(()),
+        },
+    ] {
+        assert_eq!(session.dispatch(action), vec![]);
+    }
+    assert_eq!(session.phase(), CapturePhase::Resident);
 }
 
 // CORE-COORD-10: the display+crop → frame-geometry conversion is single and budget-fenced.

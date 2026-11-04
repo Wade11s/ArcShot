@@ -27,6 +27,11 @@ pub use scroll_frame_tasks::{
 };
 mod scroll_input_flow;
 pub use scroll_input_flow::{ScrollTapCommand, scroll_tap_action};
+mod scroll_partial_flow;
+pub use scroll_partial_flow::{
+    PARTIAL_ABANDON_LABEL, PARTIAL_ACCEPT_LABEL, PARTIAL_INCOMPLETE_WARNING, ScrollPartialChoice,
+    is_known_state_refusal, partial_action, partial_choices, partial_offered,
+};
 mod output_publish;
 pub use output_publish::{PendingSave, encode_document, publish_output};
 mod key_policy;

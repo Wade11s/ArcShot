@@ -126,9 +126,19 @@ impl gpui::Render for Fixture {
             })
             .on_key_down({
                 let entity = cx.entity();
-                move |event, _, _cx| {
+                move |event, window, cx| {
                     eprintln!("fixture_key_received key={:?}", event.keystroke.key);
-                    let _ = &entity;
+                    // #34 controlled negative case: an atomic jump past every
+                    // verified row, so the next captured frame has no overlap
+                    // with verified history (a Gap stop). Non-owned keys pass
+                    // the input protection to the target, like typing.
+                    if event.keystroke.key == "j" {
+                        entity.update(cx, |fixture, cx| {
+                            fixture.offset = (fixture.offset + 1000).min(MAX_OFFSET);
+                            eprintln!("fixture_jump offset_points={}", fixture.offset);
+                            fixture.rebuild(window, cx);
+                        });
+                    }
                 }
             })
     }
