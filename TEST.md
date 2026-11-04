@@ -209,7 +209,7 @@ MAC-TEXT，保持 **Not tested**：系统字体适配与 IME 候选窗位置需�
 
 | 文件 | 稳定 ID 与覆盖 | 不覆盖 |
 | --- | --- | --- |
-| `crates/core/tests/text.rs` | CORE-EDIT-35～39：创建一步、空文本丢弃、重编一步、编辑变空删除且可撤销、字号 6–64/0.5 取整、命中/移动/层叠/工具切换提交；CORE-SESSION-28～29：TextBegin/TextEdited/TextCommit/TextOption 共用编辑栅栏、Finish 先提交、输出在途忽略、TextCancel 丢弃、过期 ticket 不改新会话 | 真实指针、IME 组合文字 |
+| `crates/core/tests/text.rs` | CORE-EDIT-35～39：创建一步、空文本丢弃、重编一步、编辑变空删除且可撤销、字号 6–64/0.5 取整、命中/移动/层叠/工具切换提交；CORE-SESSION-44～45：TextBegin/TextEdited/TextCommit/TextOption 共用编辑栅栏、Finish 先提交、输出在途忽略、TextCancel 丢弃、过期 ticket 不改新会话 | 真实指针、IME 组合文字 |
 | `crates/image/tests/text.rs` | IMAGE-COMPOSE-26～34：可复现 5x7 字形的固定 golden、字号/颜色整对象生效、选区裁剪、文字位于模糊层之上、多行与未知字形确定、可插拔字体输入、预览与 PNG 字节一致、逻辑度量与物理位图一致 | 原生系统字体、中文/emoji 真实字形、大图压力 |
 | `crates/app/tests/key_policy.rs` | APP-KEY-17：编辑期间 Enter/Delete/Backspace/撤销/重做归编辑器与 IME，Esc 先结束编辑保留内容，拖动/输出期优先，双击文字对象重编 | 真实焦点与 IME 候选框 |
 | `scripts/e2e-agent-desktop.py` | MAC-E2E-25：第六个工具可寻址且 checked 互换；悬停出现色板与字号步进；默认红 16；AX 步进写 `capture_edit action=TextOption … size=16.5`、色板写 `stroke=#007AFF`；创建后文字输入可寻址，点击别处提交为一次创建 | 选区绘制、真实文字创建/拖动、直接输入字号、原生字体/IME |

@@ -299,7 +299,7 @@ fn select(session: &mut CaptureSession, ticket: CaptureTicket) {
 }
 
 #[test]
-fn core_session_28_text_actions_share_the_edit_fence() {
+fn core_session_44_text_actions_share_the_edit_fence() {
     let (mut session, ticket) = frozen();
     select(&mut session, ticket);
     let version = session.document().unwrap().version();
@@ -403,7 +403,7 @@ fn core_session_28_text_actions_share_the_edit_fence() {
 }
 
 #[test]
-fn core_session_29_text_cancel_discards_and_stale_tickets_never_edit() {
+fn core_session_45_text_cancel_discards_and_stale_tickets_never_edit() {
     let (mut session, ticket) = frozen();
     select(&mut session, ticket);
     let version = session.document().unwrap().version();
