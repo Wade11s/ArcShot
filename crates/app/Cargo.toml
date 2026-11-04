@@ -10,6 +10,10 @@ publish.workspace = true
 name = "arcshot"
 path = "src/main.rs"
 
+[[bin]]
+name = "arcshot-scroll-fixture"
+path = "src/bin/scroll-fixture.rs"
+
 [dependencies]
 arcshot-core.workspace = true
 arcshot-image.workspace = true
@@ -19,6 +23,7 @@ gpui.workspace = true
 gpui-platform.workspace = true
 image = { version = "0.25", default-features = false }
 log = "0.4"
+raw-window-handle = "0.6"
 
 [lints]
 workspace = true

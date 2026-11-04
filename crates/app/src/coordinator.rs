@@ -57,6 +57,9 @@ const SCROLL_COLLECTING_HINT: &str = "上下滚动采集内容；双击或按回
 const SCROLL_RETRY_HINT: &str = "回车重试复制，Esc 放弃并返回选区";
 /// Deadline for bringing the locked target to the foreground after preparation.
 const SCROLL_ACTIVATE_DEADLINE: Duration = Duration::from_secs(3);
+/// Bounded release-only drain: a synthetic press whose key-up never arrives
+/// must not keep the native tap installed forever.
+const SCROLL_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 /// Cadence of the public target-integrity re-check during collection; not a
 /// performance assertion, just a slow poll of public window state.
 const SCROLL_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
@@ -94,6 +97,10 @@ struct Coordinator {
     pending: Option<(CaptureTicket, Instant)>,
     /// True while the frozen overlay still needs one active-application check.
     overlay_activation_pending: bool,
+    /// The built-in display geometry captured with the region frame. Scroll
+    /// completion swaps in a smaller frame document, so display validation must
+    /// stay anchored to this original geometry (I-05/I-12 display loss).
+    region_geometry: Option<ScreenGeometry>,
     preview_task: Option<Task<()>>,
     started: Option<Instant>,
     settings_departed: bool,
@@ -112,14 +119,23 @@ struct Coordinator {
     pending_scroll_input: Option<PendingScrollInput>,
     /// Bounded worker for the Scroll trusted-initial-frame request.
     scroll_frame_tasks: ScrollFrameTasks,
+    /// Exact public window number of the Scroll control window, read from its
+    /// GPUI NSView at creation; it identifies the only own UI events may reach.
+    scroll_control_id: Rc<RefCell<Option<u32>>>,
     /// The installed Quartz session tap and the preparation owning it.
     scroll_tap: Option<(CaptureTicket, native::ScrollInputTap)>,
+    /// When the tap first entered release-only drain, for bounded cleanup.
+    scroll_drain_started: Option<Instant>,
     /// When the public target-integrity check last ran during collection.
     scroll_target_checked: Option<Instant>,
     /// Region overlay to restore when a Scroll permission notice closes.
     scroll_restore: Option<CaptureTicket>,
-    /// The fixed exclusion set for the current Scroll preparation.
+    /// The fixed exclusion set for the current Scroll preparation (#31).
     scroll_exclusion: Vec<u32>,
+    /// The still-visible subset of the fixed set, fixed immediately before
+    /// collection. A dismissed overlay may leave the WindowServer between
+    /// preparation and collection; no window may ever be added to this set.
+    scroll_capture_exclusion: Vec<u32>,
     scroll_visiting_settings: bool,
     scroll_settings_departed: bool,
 }
@@ -177,6 +193,7 @@ pub(crate) fn launch(cx: &mut App) {
         notice: None,
         pending: None,
         overlay_activation_pending: false,
+        region_geometry: None,
         preview_task: None,
         started: None,
         settings_departed: false,
@@ -189,10 +206,13 @@ pub(crate) fn launch(cx: &mut App) {
         pending_scroll_exclusion: None,
         pending_scroll_input: None,
         scroll_frame_tasks: ScrollFrameTasks::default(),
+        scroll_control_id: Rc::new(RefCell::new(None)),
         scroll_tap: None,
+        scroll_drain_started: None,
         scroll_target_checked: None,
         scroll_restore: None,
         scroll_exclusion: Vec::new(),
+        scroll_capture_exclusion: Vec::new(),
         scroll_visiting_settings: false,
         scroll_settings_departed: false,
     });
@@ -604,16 +624,17 @@ impl Coordinator {
             self.overlay_activation_pending = false;
             log::info!("app_active surface=frozen");
         }
-        // No SCK call is made for this continuous screen validity check.
-        if let Some(frame) = self.session.frame() {
-            let expected = frame.geometry();
-            if !native::builtin_display()
+        // No SCK call is made for this continuous screen validity check. It is
+        // anchored to the original region display geometry, so a Scroll
+        // completion document (a smaller captured frame) never looks like a
+        // display change and cancels the session mid-output.
+        if let Some(expected) = self.region_geometry
+            && !native::builtin_display()
                 .ok()
                 .and_then(|d| geometry(d).ok())
                 .is_some_and(|d| d == expected)
-            {
-                self.action(CaptureAction::DisplayInvalidated, cx);
-            }
+        {
+            self.action(CaptureAction::DisplayInvalidated, cx);
         }
         // A cancelled or invalidated session must not leave a Scroll control
         // window or session tap behind. A permission notice or a deferred
@@ -621,13 +642,16 @@ impl Coordinator {
         // drains the input it owns, then retires with its counters logged.
         if self.session.scroll_phase() == ScrollPhase::Inactive
             && self.scroll_restore.is_none()
-            && self.scroll_permissions.notice().is_none()
+            && self.scroll_notice.is_none()
         {
             self.close_scroll_control(cx);
             self.pending_scroll_input = None;
             self.pending_scroll_exclusion = None;
             self.scroll_target_checked = None;
             self.retire_scroll_tap();
+            // The status item was hidden for collection so no menu could open
+            // behind the protection; it returns the moment Scroll is inactive.
+            cx.global::<MenuBarGlobal>().0.restore_after_capture();
         }
     }
 
@@ -873,7 +897,7 @@ impl Coordinator {
             },
             move |window, cx| {
                 let close_queue = Rc::clone(&queue);
-                let window_id = window.window_handle().window_id();
+                let window_id = gpui::Window::window_handle(window).window_id();
                 window.on_window_should_close(cx, move |_, _| {
                     close_queue
                         .borrow_mut()
@@ -1464,6 +1488,7 @@ impl Coordinator {
             return;
         };
         let screen = frame.geometry();
+        self.region_geometry = Some(screen);
         let preview = cx.background_executor().spawn(async move {
             let preview = arcshot_image::capture_preview(&frame).map_err(|e| e.to_string())?;
             let buffer = image::RgbaImage::from_raw(preview.width, preview.height, preview.bgra)
@@ -1490,6 +1515,11 @@ impl Coordinator {
                         state.close_overlay(cx);
                         match state.open_frozen(ticket, screen, image, cx) {
                             Ok(()) => {
+                                // A re-presented frozen overlay (after a Scroll
+                                // cancel/refusal) starts with no view state;
+                                // mirror the authoritative document so the
+                                // pre-scroll selection and its buttons return.
+                                state.refresh_capture_view(cx);
                                 log::info!(
                                     "capture_wake_window_submit_us={} pixels={:?}",
                                     state
@@ -1516,6 +1546,7 @@ impl Coordinator {
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
         self.overlay_activation_pending = false;
+        self.region_geometry = None;
         self.preview = PreviewSync::default();
         if let Some(handle) = self.overlay.take() {
             let _ = handle.update(cx, |view, window, cx| {
@@ -1559,6 +1590,11 @@ impl Coordinator {
         ) {
             self.sync_scroll_notice(cx);
         } else {
+            // A fully available initial check never opens a notice; clear the
+            // flow's Ready state too so it cannot outlive this preparation.
+            let _ = self
+                .scroll_permissions
+                .dispatch(ScrollPermissionAction::Cancel);
             self.close_scroll_notice(cx);
         }
     }
@@ -1712,7 +1748,7 @@ impl Coordinator {
             },
             move |window, cx| {
                 let close_queue = Rc::clone(&queue);
-                let window_id = window.window_handle().window_id();
+                let window_id = gpui::Window::window_handle(window).window_id();
                 window.on_window_should_close(cx, move |_, _| {
                     close_queue.borrow_mut().push(UiCommand::ScrollPermission(
                         window_id,
@@ -1748,7 +1784,9 @@ impl Coordinator {
         if self.scroll_control.is_some() {
             return;
         }
+        self.scroll_control_id.borrow_mut().take();
         let queue = Rc::clone(&self.queue);
+        let control_id = Rc::clone(&self.scroll_control_id);
         let bounds = WindowBounds::centered(size(px(320.0), px(110.0)), cx);
         let result = cx.open_window(
             WindowOptions {
@@ -1761,8 +1799,22 @@ impl Coordinator {
                 ..Default::default()
             },
             move |window, cx| {
+                // Read the exact public window number from the live NSView. The
+                // control is the only own window the event tap may pass input
+                // to, even while a dismissed overlay is still leaving the
+                // WindowServer asynchronously.
+                let number = raw_window_handle::HasWindowHandle::window_handle(window)
+                    .ok()
+                    .and_then(|handle| match handle.as_raw() {
+                        raw_window_handle::RawWindowHandle::AppKit(handle) => {
+                            native::ns_window_number(handle.ns_view.as_ptr())
+                        }
+                        _ => None,
+                    });
+                *control_id.borrow_mut() = number;
+                log::info!("scroll_control_window number={number:?}");
                 let close_queue = Rc::clone(&queue);
-                let window_id = window.window_handle().window_id();
+                let window_id = gpui::Window::window_handle(window).window_id();
                 window.on_window_should_close(cx, move |_, _| {
                     close_queue
                         .borrow_mut()
@@ -1808,13 +1860,14 @@ impl Coordinator {
     /// input refusal: no output, the region session is kept.
     fn drive_scroll_input(&mut self, pending: PendingScrollInput, cx: &mut Context<Self>) {
         let ticket = pending.ticket;
+        let deadline_reached = pending.started.elapsed() >= SCROLL_ACTIVATE_DEADLINE;
         if self.session.scroll_phase() != ScrollPhase::Prepared {
             return; // Preparation moved on (cancel, refusal); nothing to install.
         }
         let Some(target) = self.session.scroll_target().cloned() else {
             return;
         };
-        if pending.started.elapsed() >= SCROLL_ACTIVATE_DEADLINE {
+        if deadline_reached {
             log::info!("scroll_input_failure reason=NotFrontmost deadline=true");
             self.action(
                 CaptureAction::ScrollInputInstalled {
@@ -1826,7 +1879,7 @@ impl Coordinator {
             return;
         }
         match native::activate_scroll_target(target.owner_pid) {
-            Ok(()) => self.install_scroll_tap(ticket, cx),
+            Ok(()) => self.install_scroll_tap(pending, cx),
             // Cooperative activation can lag one run-loop turn; keep retrying
             // until the absolute deadline.
             Err(ScrollTargetError::NotFrontmost) => {
@@ -1841,7 +1894,8 @@ impl Coordinator {
     }
 
     /// Installs the session tap once the target owns the foreground.
-    fn install_scroll_tap(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+    fn install_scroll_tap(&mut self, pending: PendingScrollInput, cx: &mut Context<Self>) {
+        let ticket = pending.ticket;
         let refuse_input =
             |coordinator: &mut Self, error: ScrollInputError, cx: &mut Context<Self>| {
                 log::info!("scroll_input_failure reason={error:?}");
@@ -1858,8 +1912,10 @@ impl Coordinator {
             return;
         }
         // No UI window may appear or disappear between the fixed exclusion set
-        // and collection: the live set must still be exactly that set, with the
-        // control window as its single member.
+        // and collection: no new id may appear, and the dismissed overlay must
+        // be gone so only the control window remains visible. A closing window
+        // can take a few run-loop turns to leave the WindowServer, so wait under
+        // the same absolute deadline instead of starting with a mixed set.
         let ids = match native::owned_visible_window_ids() {
             Ok(ids) => ids,
             Err(error) => {
@@ -1868,7 +1924,7 @@ impl Coordinator {
                 return;
             }
         };
-        if ids != self.scroll_exclusion {
+        if ids.iter().any(|id| !self.scroll_exclusion.contains(id)) {
             log::error!(
                 "scroll_input_window_set_changed fixed={} live={}",
                 self.scroll_exclusion.len(),
@@ -1877,6 +1933,27 @@ impl Coordinator {
             refuse_input(self, ScrollInputError::TapUnavailable, cx);
             return;
         }
+        let Some(control_id) = *self.scroll_control_id.borrow() else {
+            log::error!("scroll_control_window_missing");
+            refuse_input(self, ScrollInputError::TapUnavailable, cx);
+            return;
+        };
+        if ids.as_slice() != [control_id] {
+            log::info!(
+                "scroll_input_waiting_for_overlay_exit live={} control={control_id}",
+                ids.len()
+            );
+            self.pending_scroll_input = Some(pending);
+            return;
+        }
+        // The single still-visible own window is the exclusion array used for
+        // every collected frame, fixed here immediately before collection.
+        self.scroll_capture_exclusion = ids.clone();
+        log::info!(
+            "scroll_exclusion_fixed prepared={} collecting={} control={control_id}",
+            self.scroll_exclusion.len(),
+            ids.len()
+        );
         let control = match native::owned_visible_window_frames(&ids).as_deref() {
             Ok([(_, frame)]) => *frame,
             Ok(frames) => {
@@ -1906,15 +1983,13 @@ impl Coordinator {
                     cx,
                 );
             }
-            Err(error) => {
-                let error = match error {
-                    native::ScrollTapError::GestureInProgress => {
-                        ScrollInputError::GestureInProgress
-                    }
-                    _ => ScrollInputError::TapUnavailable,
-                };
-                refuse_input(self, error, cx);
+            Err(native::ScrollTapError::GestureInProgress) => {
+                // The physical press that activated the Scroll entry may still
+                // be held for a few run-loop turns; retry under the same
+                // absolute deadline instead of starting mid-gesture.
+                self.pending_scroll_input = Some(pending);
             }
+            Err(_) => refuse_input(self, ScrollInputError::TapUnavailable, cx),
         }
     }
 
@@ -1948,7 +2023,7 @@ impl Coordinator {
             );
             return;
         };
-        let exclusion = self.scroll_exclusion.clone();
+        let exclusion = self.scroll_capture_exclusion.clone();
         let submitted = self
             .scroll_frame_tasks
             .submit(ticket, Instant::now(), move || {
@@ -2042,14 +2117,18 @@ impl Coordinator {
             return;
         };
         tap.begin_drain();
-        if tap.drained() {
+        let started = *self.scroll_drain_started.get_or_insert_with(Instant::now);
+        let force = started.elapsed() >= SCROLL_DRAIN_DEADLINE;
+        if tap.drained() || force {
             let stats = tap.stats();
             log::info!(
-                "scroll_input_retired ticket={ticket:?} scrolls={} clicks_blocked={} keys_owned={}",
+                "scroll_input_retired ticket={ticket:?} scrolls={} clicks_blocked={} keys_owned={} drain_forced={}",
                 stats.scrolls_passed,
                 stats.clicks_blocked,
-                stats.keys_owned
+                stats.keys_owned,
+                force
             );
+            self.scroll_drain_started = None;
             // `tap` drops here: the run-loop source is removed and the port
             // invalidated before the gate's memory is released.
         } else {
@@ -2287,7 +2366,7 @@ impl Coordinator {
             },
             move |window, cx| {
                 let close_queue = Rc::clone(&queue);
-                let window_id = window.window_handle().window_id();
+                let window_id = gpui::Window::window_handle(window).window_id();
                 window.on_window_should_close(cx, move |_, _| {
                     close_queue
                         .borrow_mut()

@@ -5,8 +5,9 @@
 //! continue lives in `arcshot_core::scroll`; this module only observes and
 //! reports. It never starts a capture, never reads pixels and never logs a
 //! window title.
-use std::{ffi::c_char, ffi::c_void};
+use std::ffi::c_void;
 
+use apple_cf::cg::CGRect;
 use arcshot_core::{
     ScrollPermission, ScrollPermissions, ScrollTarget, ScrollTargetError, ScrollTargetFrame,
     ScrollWindowError, Selection,
@@ -35,11 +36,6 @@ unsafe extern "C" {
     fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
     fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
     fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> bool;
-    fn CFStringCreateWithCString(
-        allocator: *const c_void,
-        text: *const c_char,
-        encoding: u32,
-    ) -> *const c_void;
     fn CFRelease(value: *const c_void);
 }
 
@@ -48,17 +44,18 @@ unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
-/// CoreFoundation's UTF-8 encoding constant.
-const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGRectMakeWithDictionaryRepresentation(dictionary: *const c_void, rect: *mut CGRect)
+    -> bool;
+}
+
 /// `kCGWindowListOptionOnScreenOnly` (1 << 0), an enum value not an exported symbol.
 const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
 /// `kCGWindowListExcludeDesktopElements` (1 << 4), an enum value.
 const K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
 /// `CFNumberLongLongType`, used for window layer and window number values.
 const K_CF_NUMBER_LONG_LONG_TYPE: isize = 11;
-/// `CFNumberDoubleType`, used for window bounds values.
-const K_CF_NUMBER_DOUBLE_TYPE: isize = 13;
-
 /// Reads the real three-permission Scroll preflight without requesting anything.
 #[must_use]
 pub fn scroll_permissions() -> ScrollPermissions {
@@ -147,6 +144,14 @@ pub fn frontmost_pid() -> Option<u32> {
 /// ArcShot is legitimately frontmost at entry; the foreground gate runs after
 /// preparation, when ArcShot activates the locked target and confirms it.
 ///
+/// Identification cross-checks the two public sources (I-12): the candidate
+/// must be an on-screen layer-0 SCK window that fully contains the selection,
+/// and the visually topmost such window — by the front-to-back CoreGraphics
+/// window order — must be the window the pointer's public hit-test resolves
+/// to. A selection no window fully contains spans windows (`NoTarget`); a
+/// CoreGraphics/SCK disagreement is unidentifiable (`AmbiguousTarget`); a
+/// pointer over a different window is a `PointerMismatch`.
+///
 /// # Errors
 /// Returns a classified failure for an unidentifiable target, an off-screen
 /// window, a pointer mismatch, or an uncertain native state.
@@ -188,12 +193,27 @@ pub fn probe_scroll_target(
             candidates.push(window);
         }
     }
-    match candidates.len() {
-        0 => Err(ScrollTargetError::NoTarget),
-        1 => Ok(()),
-        _ => Err(ScrollTargetError::AmbiguousTarget),
-    }?;
-    let window = candidates.remove(0);
+    if candidates.is_empty() {
+        return Err(ScrollTargetError::NoTarget);
+    }
+    // The CoreGraphics window list is ordered front-to-back; the visible
+    // target is the topmost window that fully contains the selection.
+    let order = cg_window_list_ids();
+    let topmost = candidates
+        .iter()
+        .filter_map(|window| {
+            order
+                .iter()
+                .position(|id| *id == window.window_id())
+                .map(|position| (position, window))
+        })
+        .min_by_key(|(position, _)| *position)
+        .map(|(_, window)| window);
+    let Some(window) = topmost else {
+        // SCK reports containing windows CoreGraphics does not see on screen;
+        // the public sources disagree, so the target is not identifiable.
+        return Err(ScrollTargetError::AmbiguousTarget);
+    };
     let owner = window
         .owning_application()
         .ok_or(ScrollTargetError::NoTarget)?;
@@ -319,13 +339,7 @@ fn cg_window_frame(window_id: u32) -> Option<(f64, f64, f64, f64, u32)> {
         if id != window_id {
             continue;
         }
-        let bounds = unsafe { CFDictionaryGetValue(window, kCGWindowBounds) };
-        let (Some(x), Some(y), Some(width), Some(height)) = (
-            unsafe { cf_bound(bounds, "X") },
-            unsafe { cf_bound(bounds, "Y") },
-            unsafe { cf_bound(bounds, "Width") },
-            unsafe { cf_bound(bounds, "Height") },
-        ) else {
+        let Some((x, y, width, height)) = (unsafe { cf_window_bounds(window) }) else {
             break;
         };
         let owner = unsafe { CFDictionaryGetValue(window, kCGWindowOwnerPID) };
@@ -399,6 +413,43 @@ pub fn scroll_exclusion_set() -> Result<Vec<u32>, ScrollWindowError> {
     Ok(ids)
 }
 
+/// Returns the on-screen layer-0 window ids in front-to-back order.
+///
+/// The CoreGraphics window list is documented front-to-back, so the first id
+/// covering a point is the window the user actually sees there.
+fn cg_window_list_ids() -> Vec<u32> {
+    // SAFETY: The option constants and the null relative window are the documented
+    // public form; the returned array is released below.
+    let array = unsafe {
+        CGWindowListCopyWindowInfo(
+            K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS,
+            0,
+        )
+    };
+    if array.is_null() {
+        return Vec::new();
+    }
+    let count = unsafe { CFArrayGetCount(array) };
+    let mut ids = Vec::new();
+    for index in 0..count {
+        let window = unsafe { CFArrayGetValueAtIndex(array, index) };
+        if window.is_null() {
+            continue;
+        }
+        let layer = unsafe { CFDictionaryGetValue(window, kCGWindowLayer) };
+        if unsafe { cf_integer(layer) } != Some(0) {
+            continue;
+        }
+        let number = unsafe { CFDictionaryGetValue(window, kCGWindowNumber) };
+        if let Some(id) = unsafe { cf_integer(number) }.and_then(|id| u32::try_from(id).ok()) {
+            ids.push(id);
+        }
+    }
+    // SAFETY: The array is a +0 CoreFoundation object returned by a Copy function.
+    unsafe { CFRelease(array) };
+    ids
+}
+
 /// Returns the identifier of the first public layer-0 on-screen window at a point.
 ///
 /// The CoreGraphics window list is ordered front-to-back, so the first match is
@@ -426,13 +477,7 @@ fn cg_window_at(point: [f64; 2]) -> Option<u32> {
         if unsafe { cf_integer(layer) } != Some(0) {
             continue;
         }
-        let bounds = unsafe { CFDictionaryGetValue(window, kCGWindowBounds) };
-        let (Some(x), Some(y), Some(width), Some(height)) = (
-            unsafe { cf_bound(bounds, "X") },
-            unsafe { cf_bound(bounds, "Y") },
-            unsafe { cf_bound(bounds, "Width") },
-            unsafe { cf_bound(bounds, "Height") },
-        ) else {
+        let Some((x, y, width, height)) = (unsafe { cf_window_bounds(window) }) else {
             continue;
         };
         if point[0] >= x && point[0] <= x + width && point[1] >= y && point[1] <= y + height {
@@ -465,37 +510,32 @@ unsafe fn cf_integer(value: *const c_void) -> Option<i64> {
     }
 }
 
-/// Reads one double-valued key from a CoreGraphics bounds dictionary.
+/// Reads one window entry's `kCGWindowBounds` as global display coordinates.
+///
+/// Uses `CGRectMakeWithDictionaryRepresentation`, the documented public
+/// conversion for the bounds dictionaries CoreGraphics returns; no string keys
+/// are reconstructed.
 ///
 /// # Safety
-/// `dictionary` must be null or a valid `CFDictionary`.
-unsafe fn cf_bound(dictionary: *const c_void, key: &str) -> Option<f64> {
-    if dictionary.is_null() {
+/// `window` must be null or a valid window-info `CFDictionary`.
+unsafe fn cf_window_bounds(window: *const c_void) -> Option<(f64, f64, f64, f64)> {
+    if window.is_null() {
         return None;
     }
-    // SAFETY: A null allocator selects the default allocator and the key is a
-    // valid UTF-8 string with the documented UTF-8 encoding.
-    let key = unsafe {
-        CFStringCreateWithCString(
-            std::ptr::null_mut(),
-            key.as_ptr().cast::<c_char>(),
-            K_CF_STRING_ENCODING_UTF8,
-        )
-    };
-    if key.is_null() {
+    // SAFETY: The value of the documented bounds key is a CFDictionary of the
+    // form the conversion API consumes, and `rect` is a correctly sized local.
+    let bounds = unsafe { CFDictionaryGetValue(window, kCGWindowBounds) };
+    if bounds.is_null() {
         return None;
     }
-    let value = unsafe { CFDictionaryGetValue(dictionary, key) };
-    // SAFETY: The key is a +1 object created above and is no longer needed.
-    unsafe { CFRelease(key) };
-    if value.is_null() {
+    let mut rect = CGRect::new(0.0, 0.0, 0.0, 0.0);
+    if !unsafe { CGRectMakeWithDictionaryRepresentation(bounds, &raw mut rect) } {
         return None;
     }
-    let mut out: f64 = 0.0;
-    // SAFETY: The value is a valid CFNumber and `out` is a correctly sized local.
-    if unsafe { CFNumberGetValue(value, K_CF_NUMBER_DOUBLE_TYPE, (&raw mut out).cast()) } {
-        Some(out)
-    } else {
-        None
-    }
+    Some((
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    ))
 }

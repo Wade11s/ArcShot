@@ -83,7 +83,6 @@ unsafe extern "C" {
     fn CGEventTapIsEnabled(tap: Ref) -> bool;
     fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
     fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
-    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
     fn CGEventGetLocation(event: Ref) -> CGPoint;
 }
 
@@ -102,8 +101,9 @@ unsafe extern "C" {
 const SESSION_TAP: u32 = 1;
 const HEAD_INSERT: u32 = 0;
 const ACTIVE_FILTER: u32 = 0;
-/// `kCGEventSourceStateCombinedSessionState` for the gesture preflight.
-const COMBINED_SESSION_STATE: i32 = 0;
+/// `kCGEventSourceStateHIDSystemState`: the physical hardware state, used for
+/// the gesture preflight so a still-held button cannot start mid-gesture.
+const HID_SYSTEM_STATE: i32 = 1;
 /// The ANSI Return and keypad Enter keycodes ArcShot owns during collection.
 const KEY_RETURN: u16 = 36;
 const KEY_KEYPAD_ENTER: u16 = 76;
@@ -239,6 +239,10 @@ pub struct TapGate {
     held_mouse: u64,
     held_keys: u128,
     command: Option<TapGateCommand>,
+    /// Keycode whose press queued the command; its release is treated as
+    /// already consumed at drain time because synthetic deliveries do not
+    /// always produce a matching key-up at the HID session layer.
+    command_key: Option<u16>,
     protection_lost: bool,
     stats: TapStats,
 }
@@ -254,6 +258,7 @@ impl TapGate {
             held_mouse: 0,
             held_keys: 0,
             command: None,
+            command_key: None,
             protection_lost: false,
             stats: TapStats::default(),
         }
@@ -282,6 +287,12 @@ impl TapGate {
     /// Ends collection; only releases of owned input stay swallowed.
     pub fn begin_drain(&mut self) {
         self.mode = TapMode::Draining;
+        // The press that produced the command has been consumed by ArcShot; a
+        // synthetic delivery may never send its key-up, so release that
+        // ownership now instead of holding the native tap installed forever.
+        if let Some(keycode) = self.command_key.take() {
+            self.held_keys &= !(1u128 << keycode);
+        }
     }
 
     /// Whether every owned press has seen its release.
@@ -446,6 +457,7 @@ impl TapGate {
                 self.stats.keys_owned += 1;
                 if self.mode == TapMode::Collecting && self.command.is_none() {
                     self.command = Some(TapGateCommand::Finish);
+                    self.command_key = Some(event.keycode);
                 }
                 TapDecision::Swallow
             }
@@ -455,6 +467,7 @@ impl TapGate {
                 self.stats.keys_owned += 1;
                 if self.command.is_none() {
                     self.command = Some(TapGateCommand::Cancel);
+                    self.command_key = Some(event.keycode);
                 }
                 TapDecision::Swallow
             }
@@ -484,20 +497,20 @@ impl ScrollInputTap {
     /// example after Input Monitoring was revoked.
     pub fn install() -> Result<Self, ScrollTapError> {
         MainThreadMarker::new().ok_or(ScrollTapError::NotMainThread)?;
-        // SAFETY: These synchronous state queries take a combined-session state
-        // constant and plain button/key indices; no pointers are involved.
-        unsafe {
-            if (0..MOUSE_BUTTONS)
-                .any(|button| CGEventSourceButtonState(COMBINED_SESSION_STATE, button))
-            {
-                return Err(ScrollTapError::GestureInProgress);
-            }
-            if [KEY_RETURN, KEY_KEYPAD_ENTER, KEY_ESCAPE]
-                .iter()
-                .any(|&key| CGEventSourceKeyState(COMBINED_SESSION_STATE, key))
-            {
-                return Err(ScrollTapError::GestureInProgress);
-            }
+        // SAFETY: These synchronous state queries take a source-state constant
+        // and plain button/key indices; no pointers are involved. Only a held
+        // physical button refuses installation: its release would otherwise
+        // arrive after the tap started and leak to the target. Held keys are
+        // deliberately not preflighted — `CGEventSourceKeyState` reflects a
+        // sticky global source state that synthetic key-up delivery does not
+        // reliably clear, and the gate's press/release ownership already keeps
+        // an unowned key-up (or autorepeat) harmless.
+        let held_buttons: Vec<u32> = (0..MOUSE_BUTTONS)
+            .filter(|button| unsafe { CGEventSourceButtonState(HID_SYSTEM_STATE, *button) })
+            .collect();
+        if !held_buttons.is_empty() {
+            log::info!("scroll_input_gesture_preflight buttons={held_buttons:?}");
+            return Err(ScrollTapError::GestureInProgress);
         }
         let gate = Rc::new(RefCell::new(TapGate::armed()));
         let mask = [
@@ -918,8 +931,8 @@ mod tests {
     #[test]
     fn drain_keeps_release_only_interception_until_owned_input_releases() {
         let mut gate = collecting_gate();
-        // The user holds Enter (owned) and then collection ends.
-        let _ = gate.on_event(key(TapEventKind::KeyDown, 36));
+        // The user holds a mouse button (owned) and then collection ends.
+        let _ = gate.on_event(mouse(TapEventKind::LeftDown, 0, [150.0, 120.0], 1));
         gate.begin_drain();
         assert!(!gate.drained());
         // New input during the drain belongs to the user again.
@@ -928,16 +941,36 @@ mod tests {
             TapDecision::Pass
         );
         assert_eq!(
-            gate.on_event(mouse(TapEventKind::LeftDown, 0, [150.0, 120.0], 1)),
+            gate.on_event(mouse(TapEventKind::RightDown, 1, [150.0, 120.0], 1)),
             TapDecision::Pass
         );
         assert_eq!(gate.on_event(scroll([150.0, 120.0])), TapDecision::Pass);
-        // The owned Enter keyUp is still swallowed; then the tap is drained.
+        // The owned left-button release is still swallowed; then the drain ends.
         assert_eq!(
-            gate.on_event(key(TapEventKind::KeyUp, 36)),
+            gate.on_event(mouse(TapEventKind::LeftUp, 0, [150.0, 120.0], 1)),
             TapDecision::Swallow
         );
+        assert_eq!(
+            gate.on_event(mouse(TapEventKind::RightUp, 1, [150.0, 120.0], 1)),
+            TapDecision::Pass
+        );
         assert!(gate.drained());
+    }
+
+    /// A command's own key press is consumed at drain time: synthetic key-up
+    /// deliveries are not guaranteed, so the tap must not stay installed for a
+    /// key whose intent ArcShot already handled.
+    #[test]
+    fn consumed_command_key_does_not_block_the_drain() {
+        let mut gate = collecting_gate();
+        assert_eq!(
+            gate.on_event(key(TapEventKind::KeyDown, 36)),
+            TapDecision::Swallow
+        );
+        assert_eq!(gate.take_command(), Some(TapGateCommand::Finish));
+        gate.begin_drain();
+        assert!(gate.drained());
+        // No key-up arrives; the native tap can retire immediately.
     }
 
     /// MAC-TARGET-FAIL (gate seam): a system-disabled tap is explicitly lost

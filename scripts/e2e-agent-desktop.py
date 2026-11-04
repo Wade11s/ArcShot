@@ -198,6 +198,70 @@ def start(executable: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
     return process
 
 
+def stop(process: subprocess.Popen) -> None:
+    """Terminates a test process unless it already exited."""
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+# The fixture target's deterministic geometry (crates/app/src/bin/scroll-fixture.rs).
+FIXTURE_ORIGIN_LOGICAL = (600.0, 120.0)
+FIXTURE_INITIAL_OFFSET_ROWS = 2000
+
+
+def fixture_pixel(x: int, y: int, scale: int) -> tuple[int, int, int, int]:
+    """The fixture's exact content bytes, replicated for the pixel oracle."""
+    if x < 64 * scale:
+        return (y & 255, (y >> 8) & 255, 173, 255)
+    block = x // (8 * scale)
+    h = ((y * 0x9E3779B9) & 0xFFFFFFFF) ^ ((block * 0x85EBCA6B) & 0xFFFFFFFF)
+    h &= 0xFFFFFFFF
+    h ^= h >> 16
+    b = h.to_bytes(4, "little")
+    return (b[0], b[1], b[2], 255)
+
+
+def expected_fixture_probe(selection: tuple[float, float, float, float]) -> str:
+    """The capture_probe_grid the admitted scroll frame must report.
+
+    Mirrors crates/app/src/coordinator.rs capture_probe (5x5 fractions, BGRA
+    storage printed as RRGGBBAA) over the fixture content at the initial
+    offset, with the borderless fixture window filling its frame exactly.
+    """
+    scale = 2
+    win_x, win_y = FIXTURE_ORIGIN_LOGICAL
+    crop_x = int(selection[0] * scale)
+    crop_y = int(selection[1] * scale)
+    width = int(selection[2] * scale)
+    height = int(selection[3] * scale)
+    rows = []
+    for fy in [0.05, 0.25, 0.50, 0.75, 0.95]:
+        cells = []
+        for fx in [0.05, 0.25, 0.50, 0.75, 0.95]:
+            local_x = crop_x - int(win_x * scale) + int(width * fx)
+            local_y = crop_y - int(win_y * scale) + int(height * fy)
+            row = FIXTURE_INITIAL_OFFSET_ROWS * scale + local_y
+            p = fixture_pixel(local_x, row, scale)
+            cells.append(f"{p[2]:02x}{p[1]:02x}{p[0]:02x}{p[3]:02x}")
+        rows.append(" ".join(cells))
+    return "capture_probe_grid rows=" + " | ".join(rows)
+
+
+def parse_selection(log: pathlib.Path, after: int) -> tuple[float, float, float, float]:
+    """Reads the newest SelectRegion geometry as (x, y, width, height)."""
+    for line in reversed(read_log(log)[after:]):
+        if "capture_edit action=SelectRegion" not in line:
+            continue
+        payload = line.split("selection=Some([", 1)[1].split("])", 1)[0]
+        values = [float(value) for value in payload.split(",")]
+        return tuple(values)
+    fail(f"no SelectRegion geometry found after line {after} in {log}")
+
+
 def quit_app(app: str, process: subprocess.Popen, *, expect_status_item_removed: bool) -> None:
     """Quits through the real menu item and checks the process is really gone."""
     click(app, "退出 ArcShot")
@@ -446,7 +510,13 @@ def main() -> int:
     if running:
         fail(f"another ArcShot instance is already running: {running}")
 
-    build = run([str(ROOT / "scripts" / "build-app.sh")] + (["--release"] if options.release else []))
+    # Release uses thin LTO and can exceed the default one-minute command
+    # timeout on a cold build; keep every other command tightly bounded.
+    build = run(
+        [str(ROOT / "scripts" / "build-app.sh")]
+        + (["--release"] if options.release else []),
+        timeout=600.0,
+    )
     if build.returncode != 0:
         fail(f"build failed: {build.stderr.strip()[-600:]}")
     actual = run(["plutil", "-extract", "CFBundleIdentifier", "raw", str(bundle / "Contents" / "Info.plist")]).stdout.strip()
@@ -556,7 +626,18 @@ def main() -> int:
         if count_log(log, "capture_request_us=") != before:
             fail("an unregistered key combination started a capture")
         log_mark = len(read_log(log))
-        press(hotkey_combo(config), headed=False)
+        # The hotkey is a physical global delivery whose result is
+        # delivered_unverified; retry only while the product has observed no
+        # capture at all, so a retry can never start a second session.
+        for _ in range(4):
+            press(hotkey_combo(config), headed=False)
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                if count_log(log, "capture_request_us=") >= before + 1:
+                    break
+                time.sleep(POLL)
+            if count_log(log, "capture_request_us=") >= before + 1:
+                break
         wait_count(log, "capture_request_us=", before + 1, 10.0)
         if count_log(log, "capture_request_us=") != before + 1:
             fail("the registered hotkey did not start exactly one capture")
@@ -1096,9 +1177,13 @@ def main() -> int:
         if not text_input.get("ref_id"):
             fail("the text editor is not addressable after creation")
         # Type one ASCII character so the commit has a non-empty object. The
-        # IME composition path itself is a MAC-TEXT manual item; a physical key
-        # is the headed precondition, and the commit diagnostic is the evidence.
-        agent("press", "a", "--headed")
+        # IME composition path itself is a MAC-TEXT manual item; physical keys
+        # are the headed precondition and the commit diagnostic is the
+        # evidence. Headed delivery is delivered_unverified and can miss the
+        # editor on the first turn, so send a few idempotent presses.
+        for _ in range(3):
+            agent("press", "a", "--headed")
+            time.sleep(0.2)
 
         hover(text_tool["ref_id"])
         size_field = wait_node(
@@ -1358,6 +1443,139 @@ def main() -> int:
             f"missing={','.join(missing) or 'none'}"
         )
 
+        # MAC-E2E-26: the protected single-frame Scroll completion loop over the
+        # own GPUI fixture target (I-11 §3/6/10, I-12). The fixture is a real
+        # separate process whose pixels are an exact function of its content
+        # offset. Evidence: AX state, product text diagnostics, the fixture's
+        # own event receipts, and the pixel-truth probe grid. Physical wheel /
+        # click / key deliveries are the precondition for the input contract;
+        # the assertions are the product and fixture diagnostics.
+        fixture_log = ROOT / "target" / f"e2e-scroll-fixture-{configuration}.log"
+        fixture = start(
+            ROOT / "target" / configuration / "arcshot-scroll-fixture", fixture_log
+        )
+        try:
+            wait_log(fixture_log, "fixture_window", 10.0)
+            time.sleep(1.0)
+            log_mark = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, log_mark)
+            agent("drag", "--from-xy", "620,413", "--to-xy", "1200,593", "--headed")
+            wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+            selection = parse_selection(log, log_mark)
+            root = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+                )[0],
+                10.0,
+            )
+            scroll = find_nodes(root, native_id="arcshot.overlay.scroll", require_ref=True)[0]
+            mark = len(read_log(log))
+            agent("click", scroll["ref_id"])
+            wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
+            preflight = wait_log_line(log, "scroll_permission ", 10.0, after=mark)
+            if "missing=none" not in preflight:
+                fail(f"fixture run needs all three permissions: {preflight}")
+            wait_log(log, "scroll_target window_id=", 15.0, after=mark)
+            wait_log(log, "scroll_prepared ", 15.0, after=mark)
+            wait_log(log, "scroll_input installed=true", 15.0, after=mark)
+            wait_log(log, "scroll_frame_request_us=", 15.0, after=mark)
+            wait_log(log, "scroll_collecting", 15.0, after=mark)
+            wait_log(log, "scroll_phase from=Prepared to=Collecting", 10.0, after=mark)
+            # Concise status + operation hint; never a percentage, ETA or pause.
+            status_node = wait_node(
+                app,
+                lambda tree: next(
+                    (
+                        node
+                        for node in find_nodes(tree, native_id="arcshot.scroll.status")
+                        if "可以滚动" in str(node.get("value"))
+                        or "可以滚动" in str(node.get("name"))
+                    ),
+                    None,
+                ),
+                10.0,
+            )
+            if not find_nodes(snapshot_tree(app), native_id="arcshot.scroll.hint"):
+                fail("the collecting control UI does not expose the operation hint")
+            # Pixel truth: the admitted frame must equal the fixture oracle.
+            probe = wait_log_line(log, "capture_probe_grid", 10.0, after=mark).strip()
+            probe = probe[probe.index("capture_probe_grid") :]
+            expected = expected_fixture_probe(selection)
+            if probe != expected:
+                fail(f"scroll frame probe mismatch:\n got: {probe}\nwant: {expected}")
+            # Click blocking: a raw click inside the selection never lands.
+            fixture_mark = len(read_log(fixture_log))
+            agent("mouse-click", "--xy", "1000,470", "--headed")
+            time.sleep(1.0)
+            if any(
+                "fixture_click_received" in line
+                for line in read_log(fixture_log)[fixture_mark:]
+            ):
+                fail("a blocked click reached the scroll target")
+            # Non-owned keys still reach the target application.
+            press("a", headed=True)
+            wait_log(fixture_log, "fixture_key_received", 5.0)
+            # Raw scroll inside the selection passes through to the target.
+            agent("mouse-wheel", "--x", "1000", "--y", "470", "--dy", "-6", "--headed")
+            wait_log(fixture_log, "fixture_scroll", 5.0)
+            # Enter completes the single frame; the user simply stopped collecting.
+            press("return", headed=True)
+            wait_log(log, "output_publish target=Clipboard", 15.0, after=mark)
+            wait_log(
+                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark
+            )
+            retired = wait_log_line(log, "scroll_input_retired", 10.0, after=mark)
+            scrolls = int(retired.split("scrolls=", 1)[1].split(" ", 1)[0])
+            clicks = int(retired.split("clicks_blocked=", 1)[1].split(" ", 1)[0])
+            if scrolls < 1 or clicks < 1:
+                fail(f"tap counters do not prove protection: {retired}")
+            if windows(app):
+                fail(f"completed scroll left own windows: {windows(app)}")
+            note(
+                "mac_e2e_26=pass prepared=true collecting=true pixel_oracle=exact "
+                f"click_blocked=true scroll_passed=true enter=clipboard scrolls={scrolls} "
+                f"clicks_blocked={clicks}"
+            )
+
+            # Esc abandons the scroll result: the pre-scroll selection returns.
+            log_mark = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, log_mark)
+            agent("drag", "--from-xy", "620,413", "--to-xy", "1200,593", "--headed")
+            wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+            root = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+                )[0],
+                10.0,
+            )
+            scroll = find_nodes(root, native_id="arcshot.overlay.scroll", require_ref=True)[0]
+            mark = len(read_log(log))
+            agent("click", scroll["ref_id"])
+            wait_log(log, "scroll_collecting", 20.0, after=mark)
+            press("escape", headed=True)
+            wait_log(
+                log, "from=Collecting to=Inactive action=CancelScroll", 10.0, after=mark
+            )
+            wait_log(log, "scroll_input_retired", 10.0, after=mark)
+            # The same frozen document returns: the overlay with its valid
+            # selection is addressable again and exposes the save entry.
+            root = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+                )[0],
+                10.0,
+            )
+            if not find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
+                fail("Esc did not return the pre-scroll selection")
+            note("mac_e2e_26_esc=pass abandon=true selection_returned=true")
+        finally:
+            stop(fixture)
+
         # MAC-E2E-15: the 完成音效 preference toggles through AX and is persisted.
         original_sound = next(
             line.split("completion_sound=", 1)[1].split(" ", 1)[0]
@@ -1523,7 +1741,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=25")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=26")
     return 0
 
 

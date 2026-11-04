@@ -81,6 +81,10 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 完整标注/文字产品面（真实指针绘制、对象控制点拖动、原生系统字体/IME 候选框）仍未实现，
 状态仍为 **Not tested**。
 
+#32 已实现受保护的单帧滚动完成闭环：准备→输入保护→可信首帧→采集→Enter/双击
+完成或 Esc 放弃；多帧拼接、位移校验、反向去重、实时预览与三秒完成预览仍由 #33 拥有，
+当前保持 **Not tested**。
+
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
 | CORE-SESSION | core 语义动作：会话转换、选区、Finish、分层 Esc、拖动、快捷键重启/互斥 | I-05/I-09/I-10/I-11 状态一致；取消/重启清理；无操作无历史 |
@@ -294,6 +298,28 @@ hit-test 的实机时序与滚动采样/预览保持 **Not tested**（见 §4.4�
 AX 标识已落地；权限通知与滚动控制窗的 AX 标识由 APP-EFFECT 与 UI 代码守护，
 本机三项权限均已授权，因此 MAC-PERMISSION 的缺失通知分支保持 **Not tested**。
 
+### #32 的稳定自动化入口
+
+单帧完成闭环只走已确认接缝：core 的会话语义、app 的注入式调度与副作用、macos
+的安全原生适配与 Quartz 决策门，以及真实 AX/文本诊断的 E2E。多帧拼接、唯一位移
+验证、反向去重、实时预览与三秒完成预览由 #33 拥有，不在本票断言范围。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/scroll_loop.rs` | CORE-SESSION-46～60：输入安装→首帧请求、输入失败分级、可信首帧开启采集、帧失败分类（已知/不确定终态/内屏失效）、几何不符拒绝、无滚动单帧完成、音效偏好、复制失败保留可重试、Esc 返回原选区、输出期互斥、热键重启、输入/目标失效、迟到动作与重复帧；CORE-COORD-10：唯一的 display+crop→帧几何换算 | 真实 SCK/窗口/指针；#33 的拼接语义 |
+| `crates/app/tests/scroll_frame_tasks.rs` | APP-ASYNC-13～16：单在途、有界绝对期限终态、worker panic 终态、取消后迟到结果仍交给版本栅栏；APP-FRAME-03～05：命名 sRGB 帧接纳、畸形宽高/stride/字节数、非不透明 alpha 拒绝 | 真实 SCK 请求状态确认 |
+| `crates/app/tests/scroll_input_policy.rs` | APP-EFFECT-42～44：Finish 只在采集且输出空闲时路由、Cancel 在任一活动相位（含输出期）路由、动作只带当前 ticket | 真实物理按键投递（由 MAC-E2E-26 覆盖） |
+| `crates/macos/src/scroll_input.rs`（单元测试） | MAC-SCROLL-INPUT（门缝）：选区内原始滚动放行/区外与首帧前拦住、点击与双击首击吞掉、Enter/Esc 按下释放归属、控制窗输入放行、拖动后 release-only drain、系统禁用 tap 视为保护丢失、失败完成后重开采集、只排第一个意图、未跟踪按钮视为保护丢失 | 真实 Quartz tap 安装/权限失效 |
+| `crates/app/src/bin/scroll-fixture.rs`（自有 GPUI 精确像素夹具） | I-13 目标类 1：确定性像素真值、滚动/点击/按键文本回执；由 E2E 以独立进程启动，产品本身不启动它 | TextEdit/Safari 目标（§4.4 用户项） |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-26：准备→输入安装→可信首帧→采集的相位与像素真值探针；AX 控制状态与操作提示；单击拦截、原始滚动放行、Enter 完成复制并清理；Esc 放弃并返回原选区 | 三权限缺失通知（§4.4）、第三方目标、IME、视觉观感 |
+
+单帧完成复用 `Document::commit_edits()` 与共享 `ComposeOutput`/PNGf 路径；输出前
+版本栅栏、≤24,000,000 物理像素、≤16,384 单边、≤128 MiB PNG、最多 1 个 SCK 在途
+与 1 个合成/编码任务由 core/image/app 既有接缝守护。原始帧队列上限 2 当前票只有
+1 帧，不造队列；背压与拼接语义留给 #33。
+
+实测记录见 `docs/validation/32-scroll-single-frame.md`。
+
 ### #29 的稳定自动化入口
 
 选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
@@ -421,6 +447,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
 | MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `drag --from-xy 400,300 --to-xy 700,500 --headed` 作为前置创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；拖拽后出现 `capture_edit action=SelectRegion` 与 `selection=Some([…])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared`；`--headed` 拖拽只是选区前置，不作为指针手势的验收证据 |
 | MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
+| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感、多帧拼接（#33） |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -481,6 +508,16 @@ agent-desktop press escape --headed
   但本机三项权限均已授权，缺失通知分支不能由 E2E 驱动，保持 **Not tested**。
   滚动入口的选区前置由 `--headed` 拖拽创建（`capture_edit action=SelectRegion`
   证明），拖拽只是前置，不作为指针手势的验收证据。
+- 已落地（#32）：采集控制窗 `arcshot.scroll.status` 在 `ScrollPhase::Collecting` 时
+  为“可以滚动”，并以 `arcshot.scroll.hint` 暴露简洁操作提示（无百分比/ETA/暂停）；
+  `arcshot.scroll.control.cancel` 始终可 AX 激活。相位与副作用另有文本诊断：
+  `scroll_control_window number=…`、`scroll_exclusion_fixed prepared=… collecting=…`、
+  `scroll_input installed=true owned_windows=…`、`scroll_frame_request_us=…`、
+  `scroll_collecting ticket=…`、`output_publish target=Clipboard bytes=…`、
+  `scroll_input_retired ticket=… scrolls=… clicks_blocked=… keys_owned=… drain_forced=…`。
+  失败分类写 `scroll_input_failure reason=…`、`scroll_target_intact=false reason=…`、
+  `scroll_refused reason=Input/Frame …`。自有 GPUI 精确像素夹具由脚本独立启动，
+  只写文本回执；产品本身不启动它、不保存用户截图。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
@@ -528,7 +565,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层尚未实现，落地时须补 AX 标注 |
-| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分：入口/三权限/目标识别与拒绝子流程已落地；目标识别的公开 hit-test 与前台交叉核对在本机返回 `AmbiguousTarget`（多个窗口包含选区），锁定成功、输入握手与滚动采样属 #32/#33，保持 **Not tested** |
+| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分：自有 GPUI 夹具上 MAC-E2E-26 验证了准备→输入保护→可信首帧→采集→Enter 完成/Esc 放弃、单击拦截、原始滚动放行、tap 计数器与清理；双击完成与全局热键重启只有注入式门缝测试（APP-EFFECT-42～44、CORE-SESSION-56），真实物理双击/热键重启仍 **Not tested** |
 | MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖视觉结果，需 `screenshot` 或人工（§4.4） |
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
