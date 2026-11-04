@@ -13,7 +13,7 @@ Session 的有效选区进入滚动准备、三权限（屏幕录制 / 输入监
 
 - 基线：`spec/v1` = `ed74641`（含 #22/#23/#24/#25/#26/#27/#29/#30）；#31 功能提交
   `1b89bd6`。
-- 实测实现/脚本 SHA：`1b89bd6633ee744e9567598c8eea3f55eef595ea`（#31 功能 + 测试 +
+- 实测实现/脚本 SHA：`2ba36bc4953d74950eddc1c0c16b4a22ad1efb9f`（#31 功能 `1b89bd6`、设置返回重检修复 `2ba36bc` + 测试 +
   `TEST.md`/`scripts/e2e-agent-desktop.py`）；本证据文档是后续纯文档提交，不改代码或脚本。
 - 时间：2026-11-04T10:40:33Z（`scripts/check-all.sh` 完成）；Debug E2E 与 Release E2E
   分别在 2026-11-04 完成。
