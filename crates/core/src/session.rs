@@ -4,8 +4,8 @@ use crate::{
     RectangleOption, Selection, TextOption, Tool,
     scroll::{
         ScrollFrameError, ScrollInputError, ScrollPermissions, ScrollPhase, ScrollPrepOutcome,
-        ScrollPreparation, ScrollRefusal, ScrollTarget, ScrollTargetError, ScrollWindowError,
-        scroll_frame_geometry,
+        ScrollPreparation, ScrollRefusal, ScrollStitchError, ScrollTarget, ScrollTargetError,
+        ScrollWindowError, scroll_frame_geometry,
     },
 };
 use std::{error::Error, fmt};
@@ -252,6 +252,29 @@ pub enum CaptureAction {
         /// An admitted named-sRGB frame, or a classified capture failure.
         result: Result<CapturedFrame, CaptureFailure>,
     },
+    /// Reports one raw frame captured after collection opened (I-11 §3).
+    ScrollFrameCollected {
+        /// Preparation that owns collection.
+        ticket: CaptureTicket,
+        /// An admitted named-sRGB frame, or a classified capture failure.
+        result: Result<CapturedFrame, CaptureFailure>,
+    },
+    /// Reports one strictly verified stitched document (I-11 §4).
+    ScrollStitchVerified {
+        /// Preparation whose history was extended or de-duplicated.
+        ticket: CaptureTicket,
+        /// The latest verified stitched document.
+        frame: CapturedFrame,
+        /// Whether this decision extended history (`false` is a reverse pass).
+        extended: bool,
+    },
+    /// Reports that one frame could not be verified against history.
+    ScrollStitchRefused {
+        /// Preparation that owns collection.
+        ticket: CaptureTicket,
+        /// The classified verification refusal.
+        error: ScrollStitchError,
+    },
     /// The session event tap was disabled; input protection is explicitly lost.
     ScrollInputLost {
         /// Preparation whose protection was lost.
@@ -324,6 +347,10 @@ pub enum CaptureEffect {
     CaptureScrollFrame(CaptureTicket),
     /// Collection opened; the control UI may release raw scroll in the selection.
     ScrollCollecting(CaptureTicket),
+    /// One raw collection frame was admitted; verify it before extending.
+    VerifyScrollFrame(CaptureTicket),
+    /// A verified extension may refresh the fixed preview in place.
+    ScrollPreviewUpdated(CaptureTicket),
     /// Preparation stopped with a known-state reason; keep the region session.
     ScrollRefused(CaptureTicket, ScrollRefusal),
     /// Native state is uncertain; close Scroll UI and require a relaunch.
@@ -608,6 +635,18 @@ impl CaptureSession {
     #[must_use]
     pub fn scroll_refusal(&self) -> Option<&ScrollRefusal> {
         self.scroll.as_ref().and_then(ScrollPreparation::refusal)
+    }
+
+    /// The trusted origin frame, once collection has opened.
+    #[must_use]
+    pub fn scroll_frame(&self) -> Option<&CapturedFrame> {
+        self.scroll.as_ref().and_then(ScrollPreparation::frame)
+    }
+
+    /// Takes the raw frame awaiting image verification, if any.
+    #[must_use]
+    pub fn take_scroll_pending_frame(&mut self) -> Option<CapturedFrame> {
+        self.scroll.as_mut()?.take_pending_frame()
     }
 
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.
@@ -967,6 +1006,33 @@ impl CaptureSession {
             CaptureAction::ScrollFrameAdmitted { ticket, result } => {
                 self.admit_scroll_frame(ticket, result)
             }
+            CaptureAction::ScrollFrameCollected { ticket, result } => {
+                self.collect_scroll_frame(ticket, result)
+            }
+            CaptureAction::ScrollStitchVerified {
+                ticket,
+                frame,
+                extended,
+            } => {
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.verify_stitch(frame, extended);
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::ScrollStitchRefused { ticket, error } => {
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.refuse_stitch(error);
+                self.finish_scroll_outcome(ticket, outcome)
+            }
             CaptureAction::ScrollInputLost { ticket } => {
                 // An output already in flight outranks protection: the frame is
                 // trusted, so the publish fence governs and this is too late.
@@ -1072,6 +1138,10 @@ impl CaptureSession {
             ScrollPrepOutcome::Prepared => vec![CaptureEffect::ScrollPrepared(ticket)],
             ScrollPrepOutcome::CaptureFrame => vec![CaptureEffect::CaptureScrollFrame(ticket)],
             ScrollPrepOutcome::Collecting => vec![CaptureEffect::ScrollCollecting(ticket)],
+            ScrollPrepOutcome::VerifyFrame => vec![CaptureEffect::VerifyScrollFrame(ticket)],
+            ScrollPrepOutcome::StitchUpdated => {
+                vec![CaptureEffect::ScrollPreviewUpdated(ticket)]
+            }
             ScrollPrepOutcome::Ignored => vec![],
             ScrollPrepOutcome::Refused(refusal) => {
                 // A refusal never abandons output the user already owns: the
@@ -1159,6 +1229,52 @@ impl CaptureSession {
         self.finish_scroll_outcome(ticket, outcome)
     }
 
+    /// Classifies and admits one raw frame captured while collecting.
+    ///
+    /// Known-state capture failures stop collection without output; uncertain
+    /// native state and display loss reuse the same terminal paths as the
+    /// initial frame. An admitted frame is held for image verification and
+    /// never extends history by itself.
+    fn collect_scroll_frame(
+        &mut self,
+        ticket: CaptureTicket,
+        result: Result<CapturedFrame, CaptureFailure>,
+    ) -> Vec<CaptureEffect> {
+        let matches_collecting = self.scroll.as_ref().is_some_and(|preparation| {
+            preparation.ticket() == ticket && preparation.phase() == ScrollPhase::Collecting
+        });
+        if !matches_collecting {
+            return vec![]; // A late frame after cancel or completion never reopens collection.
+        }
+        let failure = match result {
+            Ok(frame) => {
+                let outcome = self
+                    .scroll
+                    .as_mut()
+                    .map_or(ScrollPrepOutcome::Ignored, |preparation| {
+                        preparation.collect_frame(frame)
+                    });
+                return self.finish_scroll_outcome(ticket, outcome);
+            }
+            Err(CaptureFailure::InvalidFrame) => ScrollFrameError::Admission,
+            Err(CaptureFailure::ResourceLimit) => ScrollFrameError::ResourceLimit,
+            Err(CaptureFailure::WorkerUnavailable) => ScrollFrameError::Worker,
+            Err(CaptureFailure::DisplayInvalid) => {
+                return self.dispatch(CaptureAction::DisplayInvalidated);
+            }
+            Err(CaptureFailure::NativeUncertain) | Err(CaptureFailure::WorkerPanicked) => {
+                return self.dispatch(CaptureAction::ScrollNativeUncertain { ticket });
+            }
+        };
+        let outcome = self
+            .scroll
+            .as_mut()
+            .map_or(ScrollPrepOutcome::Ignored, |preparation| {
+                preparation.stop_collecting(ScrollRefusal::Frame(failure))
+            });
+        self.finish_scroll_outcome(ticket, outcome)
+    }
+
     /// The frame geometry the fixed selection must produce, if it is still valid.
     fn scroll_frame_expectation(&self) -> Option<crate::ScreenGeometry> {
         let State::Frozen { document, .. } = &self.state else {
@@ -1170,14 +1286,15 @@ impl CaptureSession {
         scroll_frame_geometry(region, crop).ok()
     }
 
-    /// Completes from the trusted single frame (I-11 step 6).
+    /// Completes from the latest verified stitched document (I-11 step 6).
     ///
-    /// The completion document is the admitted frame with a whole-frame
+    /// The completion document is the verified stitch with a whole-frame
     /// selection, run through the same fenced clipboard Finish as a region
     /// capture. The region document is stashed so Esc and failure return the
     /// pre-scroll selection; success ends the session without restoring it.
     /// Completing only means the user stopped collecting: it never claims
-    /// top/bottom coverage.
+    /// top/bottom coverage. With no scrolling the verified document is exactly
+    /// the trusted initial frame, so an untouched collection still completes.
     fn complete_scroll(&mut self, ticket: CaptureTicket) -> Vec<CaptureEffect> {
         if self.output.is_some() {
             return vec![]; // Repeated completion is disabled while output runs.
@@ -1185,7 +1302,7 @@ impl CaptureSession {
         let may_complete = self.scroll.as_ref().is_some_and(|preparation| {
             preparation.ticket() == ticket
                 && preparation.phase() == ScrollPhase::Collecting
-                && preparation.frame().is_some()
+                && preparation.stitch_frame().is_some()
         }) && matches!(self.state, State::Frozen { ticket: current, .. } if current == ticket);
         if !may_complete {
             return vec![];
@@ -1193,7 +1310,7 @@ impl CaptureSession {
         let frame = self
             .scroll
             .as_ref()
-            .and_then(ScrollPreparation::frame)
+            .and_then(ScrollPreparation::stitch_frame)
             .cloned();
         let Some(frame) = frame else {
             return vec![];

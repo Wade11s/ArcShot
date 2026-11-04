@@ -320,6 +320,29 @@ AX 标识已落地；权限通知与滚动控制窗的 AX 标识由 APP-EFFECT �
 
 实测记录见 `docs/validation/32-scroll-single-frame.md`。
 
+### #33 的稳定自动化入口
+
+双向拼接只走已确认接缝：image 的严格唯一位移/全重叠一致性验证与反向去重，core
+的会话语义（原始帧待验证、已验证拼接文档替换完成文档），app 的有界单在途请求、
+2 帧原始队列背压与固定预览原位刷新，以及自有 GPUI 精确像素夹具的真实 E2E。
+不猜补、自由形变、模糊接缝或隐去缺口；不可验证即显式停止且不自动输出。三秒完成
+预览、长图标注与部分结果恢复选择（#34）不在本票断言范围。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/image/tests/stitch.rs`（模块内单元测试） | IMAGE-STITCH-61～71：向下/向上唯一追加、反向经过已采区去重不再扩展、无位移重复视图去重、均匀内容歧义拒绝、重叠变化拒绝、无重叠缺口拒绝、几何不符拒绝、越过边长上限在分配前拒绝、预览确定性缩小且≤物理像素上限 | 真实 SCK 帧序列、真实长会话性能 |
+| `crates/core/tests/scroll_loop.rs` | CORE-SESSION-61～66：采集帧先交验证、验证扩展替换完成文档、反向通过不改变完成文档、拼接拒绝停止且不输出、采集期帧失败分级同首帧（已知停止/不确定终态/内屏失效取消）、取消后迟到帧被忽略 | 真实原生故障注入 |
+| `crates/app/tests/scroll_frame_tasks.rs` | APP-ASYNC-17～20：2 帧队列满时背压且不静默丢帧、提交策略要求闸门空闲且队列短、取消清空队列、闸门+队列最多 3 帧在途 | 真实 SCK 并发时序 |
+| `crates/app/src/bin/scroll-fixture.rs` | I-13 目标类 1：确定性像素真值、慢速双向滚动与文本回执；本票以独立进程启动并由 E2E 驱动 | TextEdit/Safari 目标（§4.4） |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-27：右/左/选区内右下三个固定预览位置；右case慢速下滚扩展→反向回滚去重→Enter 完成复制；左 case 同链路；内侧 case 指针在预览上仍可原始滚动且其下捕获逐格真值正确、预览进入排除集、输出不含浮层 | 三秒完成预览、TextEdit/Safari、真实 TCC 切换、长会话资源峰值 |
+
+拼接预览窗口在准备阶段一次性打开并加入固定排除集，采集中不新建/重建窗口；它
+原生忽略鼠标事件，因此内侧预览上的原始滚动仍到达目标，同时 AX 仍可寻址。
+自有窗口集合在采集前由「控制窗 + 固定预览窗」组成，`scroll_exclusion_fixed`
+会同时打印两者；禁止采集中出现新窗口。
+
+实测记录见 `docs/validation/33-scroll-stitch.md`。
+
 ### #29 的稳定自动化入口
 
 选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
@@ -447,7 +470,8 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
 | MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `drag --from-xy 400,300 --to-xy 700,500 --headed` 作为前置创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；拖拽后出现 `capture_edit action=SelectRegion` 与 `selection=Some([…])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared`；`--headed` 拖拽只是选区前置，不作为指针手势的验收证据 |
 | MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
-| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感、多帧拼接（#33） |
+| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
+| MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 且 `from=Frozen to=Resident action=OutputCompleted` | 三秒完成预览、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -518,6 +542,17 @@ agent-desktop press escape --headed
   失败分类写 `scroll_input_failure reason=…`、`scroll_target_intact=false reason=…`、
   `scroll_refused reason=Input/Frame …`。自有 GPUI 精确像素夹具由脚本独立启动，
   只写文本回执；产品本身不启动它、不保存用户截图。
+- 已落地（#33）：固定实时预览窗在准备阶段一次性打开，原生忽略鼠标事件，AX 标识
+  `arcshot.scroll.preview`（role image）；采集中只原位替换图像。自有窗口集合从
+  #32 的单个控制窗变为「控制窗 + 固定预览窗」，因此 `scroll_exclusion_fixed` 现打印
+  `prepared=3 collecting=2 control=… preview=…`（数值随可见窗口数而定），任一窗口
+  缺席或新增都拒绝启动采集；预览 id 同时进入每条 `capture_scroll_region` 的排除数组。
+  拼接诊断写 `scroll_stitch extended offset=… added_rows=… top=… bottom=…
+  extensions=… duplicates=…`、`scroll_stitch duplicate offset=…`、
+  `scroll_stitch_refused reason=…`；预览刷新写 `scroll_preview_updated place=…
+  pixels=… document=… extensions=… duplicates=…`；预览放置写
+  `scroll_preview placed=right|left|inner frame=[…]`。原始帧队列与背压由
+  APP-ASYNC-17～20 守护。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
@@ -539,7 +574,8 @@ agent-desktop press escape --headed
   文字工具（`arcshot.overlay.tool.text`）、文字色板/字号步进
   （`arcshot.overlay.option.text.*`）、字号值（`arcshot.overlay.text.size`）与文字输入
   （`arcshot.overlay.text.input`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
-  （含线/箭头的两个端点）与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
+  （含线/箭头的两个端点）；#33 已把滚动预览标注为 `arcshot.scroll.preview`
+  （role image）。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
   不是 AX 节点；#25/#27 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
   的删除按钮，而选中对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，
   否则 MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。

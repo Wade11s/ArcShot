@@ -2,12 +2,17 @@
 
 mod compose;
 mod preview;
+mod stitch;
 mod text;
 pub use compose::{
     ComposeError, ComposedImage, compose_crop, compose_document, compose_document_with_font,
     encode_png, preview_bgra,
 };
 pub use preview::{CapturePreview, PreviewError, capture_preview};
+pub use stitch::{
+    MAX_PREVIEW_PIXELS, StitchBuilder, StitchDecision, StitchPlacement, StitchPreview,
+    StitchRefusal,
+};
 pub use text::{BitmapFont, TextFont, TextGlyphs, TextMetrics, measure_text, tint};
 
 use arcshot_core::StatusItemIcon;

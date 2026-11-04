@@ -186,6 +186,39 @@ def click(app: str, name: str) -> None:
         fail(f"click {name!r} did not report success: {data}")
 
 
+def click_scroll_entry(app: str, *, denied: bool) -> None:
+    """Click `arcshot.overlay.scroll`, re-snapshotting after a stale ref.
+
+    The overlay can re-render between the snapshot that produced the ref and
+    the click. A stale ref is a delivery retry, never a pass; a live click
+    without a valid selection must still be `POLICY_DENIED`.
+    """
+    for _ in range(4):
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        nodes = find_nodes(root, native_id="arcshot.overlay.scroll", require_ref=True)
+        if not nodes:
+            fail("the Scroll entry is not addressable")
+        try:
+            agent("click", nodes[0]["ref_id"])
+        except Failure as error:
+            if "STALE_REF" in str(error):
+                continue
+            if denied and "POLICY_DENIED" in str(error):
+                return
+            raise
+        else:
+            if denied:
+                fail("the Scroll entry was actionable without a valid selection")
+            return
+    fail("the Scroll entry ref stayed stale across retries")
+
+
 def start(executable: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
     """Starts the bundle under test with its diagnostics in one fresh log."""
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -225,12 +258,14 @@ def fixture_pixel(x: int, y: int, scale: int) -> tuple[int, int, int, int]:
     return (b[0], b[1], b[2], 255)
 
 
-def expected_fixture_probe(selection: tuple[float, float, float, float]) -> str:
-    """The capture_probe_grid the admitted scroll frame must report.
+def expected_fixture_probe_at(
+    selection: tuple[float, float, float, float], offset_points: int
+) -> str:
+    """The capture_probe_grid at one fixture content offset.
 
     Mirrors crates/app/src/coordinator.rs capture_probe (5x5 fractions, BGRA
-    storage printed as RRGGBBAA) over the fixture content at the initial
-    offset, with the borderless fixture window filling its frame exactly.
+    storage printed as RRGGBBAA) over the fixture content at `offset_points`
+    logical rows, with the borderless fixture window filling its frame exactly.
     """
     scale = 2
     win_x, win_y = FIXTURE_ORIGIN_LOGICAL
@@ -244,11 +279,30 @@ def expected_fixture_probe(selection: tuple[float, float, float, float]) -> str:
         for fx in [0.05, 0.25, 0.50, 0.75, 0.95]:
             local_x = crop_x - int(win_x * scale) + int(width * fx)
             local_y = crop_y - int(win_y * scale) + int(height * fy)
-            row = FIXTURE_INITIAL_OFFSET_ROWS * scale + local_y
+            row = offset_points * scale + local_y
             p = fixture_pixel(local_x, row, scale)
             cells.append(f"{p[2]:02x}{p[1]:02x}{p[0]:02x}{p[3]:02x}")
         rows.append(" ".join(cells))
     return "capture_probe_grid rows=" + " | ".join(rows)
+
+
+def expected_fixture_probe(selection: tuple[float, float, float, float]) -> str:
+    """The initial-offset capture probe for one selection."""
+    return expected_fixture_probe_at(selection, FIXTURE_INITIAL_OFFSET_ROWS)
+
+
+def fixture_offset_points(fixture_log: pathlib.Path) -> int:
+    """The newest content offset the fixture reported, in logical rows."""
+    offsets = [
+        int(line.split("offset_points=", 1)[1])
+        for line in read_log(fixture_log)
+        if "fixture_scroll" in line
+    ]
+    return offsets[-1] if offsets else FIXTURE_INITIAL_OFFSET_ROWS
+
+
+def count_log_after(path: pathlib.Path, needle: str, after: int) -> int:
+    return sum(1 for line in read_log(path)[after:] if needle in line)
 
 
 def parse_selection(log: pathlib.Path, after: int) -> tuple[float, float, float, float]:
@@ -429,6 +483,24 @@ def press(combo: str, *, headed: bool) -> None:
     steps = data.get("steps", [])
     if not steps or steps[0].get("outcome") != "succeeded":
         fail(f"press {combo} did not report success: {data}")
+
+
+def press_until_log(
+    combo: str, log: pathlib.Path, needle: str, *, timeout: float = 4.0, attempts: int = 4
+) -> str:
+    """Press a headed key and require the product's own diagnostic line.
+
+    Physical key delivery can lose a focus race; each retry re-sends the key
+    and re-reads the product log, never relaxing the behavioral assertion.
+    """
+    last: Exception | None = None
+    for _ in range(attempts):
+        press(combo, headed=True)
+        try:
+            return wait_log(log, needle, timeout)
+        except Failure as error:
+            last = error
+    fail(f"headed {combo!r} never produced {needle!r}: {last}")
 
 
 def hotkey_combo(display: str) -> str:
@@ -1315,13 +1387,7 @@ def main() -> int:
         if scroll[0].get("role") != "button":
             fail("the Scroll entry is not exposed as a button")
         # Without a selection the entry is present but performs no action.
-        try:
-            agent("click", scroll[0]["ref_id"])
-        except Failure as error:
-            if "POLICY_DENIED" not in str(error):
-                raise
-        else:
-            fail("the Scroll entry was actionable without a valid selection")
+        click_scroll_entry(app, denied=True)
         if count_log(log, "a11y_action=arcshot.overlay.scroll") != 0:
             fail("the Scroll entry produced an action without a valid selection")
         # Create a selection as a precondition for the entry gate.
@@ -1341,7 +1407,7 @@ def main() -> int:
             10.0,
         )
         mark = len(read_log(log))
-        agent("click", scroll["ref_id"])
+        click_scroll_entry(app, denied=False)
         wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
         preflight = wait_log_line(log, "scroll_permission ", 10.0, after=mark)
         missing = [
@@ -1409,27 +1475,43 @@ def main() -> int:
                 wait_log(log, "scroll_prepared", 5.0, after=mark)
                 prepared = True
             except Failure:
-                wait_log(log, "scroll_refused reason=Target", 5.0, after=mark)
+                # The entry gate itself is the assertion here. #33 may also
+                # stop collection immediately on low-texture or ambiguous
+                # target content; that is a known-state refusal, not a gate
+                # failure, and it still preserves the region session.
+                wait_log(log, "scroll_refused reason=", 5.0, after=mark)
             if prepared:
-                control = wait_node(
-                    app,
-                    lambda tree: (
-                        find_nodes(
-                            tree,
-                            native_id="arcshot.scroll.control.cancel",
-                            require_ref=True,
+                try:
+                    control = wait_node(
+                        app,
+                        lambda tree: (
+                            find_nodes(
+                                tree,
+                                native_id="arcshot.scroll.control.cancel",
+                                require_ref=True,
+                            )
+                            or [None]
+                        )[0],
+                        2.0,
+                    )
+                except Failure:
+                    control = None
+                if control is not None:
+                    try:
+                        agent("click", control["ref_id"])
+                    except Failure as error:
+                        # #33 can stop collection (and close the control
+                        # window) between the snapshot and the click; that is
+                        # a known-state refusal, not a gate failure.
+                        if "STALE_REF" not in str(error):
+                            raise
+                    else:
+                        wait_log(
+                            log,
+                            "a11y_action=arcshot.scroll.control.cancel action=Click",
+                            10.0,
+                            after=mark,
                         )
-                        or [None]
-                    )[0],
-                    10.0,
-                )
-                agent("click", control["ref_id"])
-                wait_log(
-                    log,
-                    "a11y_action=arcshot.scroll.control.cancel action=Click",
-                    10.0,
-                    after=mark,
-                )
         # The region session and its selection are preserved.
         wait_node(
             app,
@@ -1470,9 +1552,8 @@ def main() -> int:
                 )[0],
                 10.0,
             )
-            scroll = find_nodes(root, native_id="arcshot.overlay.scroll", require_ref=True)[0]
             mark = len(read_log(log))
-            agent("click", scroll["ref_id"])
+            click_scroll_entry(app, denied=False)
             wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
             preflight = wait_log_line(log, "scroll_permission ", 10.0, after=mark)
             if "missing=none" not in preflight:
@@ -1514,15 +1595,15 @@ def main() -> int:
                 for line in read_log(fixture_log)[fixture_mark:]
             ):
                 fail("a blocked click reached the scroll target")
-            # Non-owned keys still reach the target application.
-            press("a", headed=True)
-            wait_log(fixture_log, "fixture_key_received", 5.0)
+            # Non-owned keys still reach the target application. Physical key
+            # delivery can lose a focus race; retry without relaxing the
+            # fixture's own receipt as the assertion.
+            press_until_log("a", fixture_log, "fixture_key_received")
             # Raw scroll inside the selection passes through to the target.
             agent("mouse-wheel", "--x", "1000", "--y", "470", "--dy", "-6", "--headed")
             wait_log(fixture_log, "fixture_scroll", 5.0)
             # Enter completes the single frame; the user simply stopped collecting.
-            press("return", headed=True)
-            wait_log(log, "output_publish target=Clipboard", 15.0, after=mark)
+            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
             wait_log(
                 log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark
             )
@@ -1556,9 +1637,8 @@ def main() -> int:
             mark = len(read_log(log))
             agent("click", scroll["ref_id"])
             wait_log(log, "scroll_collecting", 20.0, after=mark)
-            press("escape", headed=True)
-            wait_log(
-                log, "from=Collecting to=Inactive action=CancelScroll", 10.0, after=mark
+            press_until_log(
+                "escape", log, "from=Collecting to=Inactive action=CancelScroll", timeout=4.0
             )
             wait_log(log, "scroll_input_retired", 10.0, after=mark)
             # The same frozen document returns: the overlay with its valid
@@ -1573,6 +1653,169 @@ def main() -> int:
             if not find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
                 fail("Esc did not return the pre-scroll selection")
             note("mac_e2e_26_esc=pass abandon=true selection_returned=true")
+        finally:
+            stop(fixture)
+
+        # MAC-E2E-27: bidirectional stitch, reverse de-duplication and the three
+        # fixed live-preview positions over the own GPUI fixture (I-11 §4/5,
+        # I-13). The preview window is fixed during preparation, ignores mouse
+        # events, and is excluded from every capture. Evidence: product text
+        # diagnostics, the fixture's own scroll receipts, and the exact pixel
+        # oracle at the fixture's newest offset.
+        fixture_log = ROOT / "target" / f"e2e-scroll-fixture-{configuration}.log"
+        fixture = start(
+            ROOT / "target" / configuration / "arcshot-scroll-fixture", fixture_log
+        )
+        try:
+            wait_log(fixture_log, "fixture_window", 10.0)
+            time.sleep(1.0)
+
+            def begin_scroll(drag_from: str, drag_to: str):
+                log_mark = len(read_log(log))
+                click(app, "开始截图")
+                wait_frozen_active(log, log_mark)
+                agent("drag", "--from-xy", drag_from, "--to-xy", drag_to, "--headed")
+                wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+                selection = parse_selection(log, log_mark)
+                mark = len(read_log(log))
+                click_scroll_entry(app, denied=False)
+                wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
+                placed = wait_log_line(log, "scroll_preview placed=", 15.0, after=mark)
+                wait_log(log, "scroll_collecting", 15.0, after=mark)
+                exclusion = wait_log_line(log, "scroll_exclusion_fixed", 15.0, after=mark)
+                return mark, selection, placed, exclusion
+
+            def wheel(x: int, y: int, dy: int) -> None:
+                agent("mouse-wheel", "--x", str(x), "--y", str(y), "--dy", str(dy), "--headed")
+
+            def expect_probe(selection, mark: int, label: str) -> None:
+                # The bounded loop captures continuously; wait until the newest
+                # probe reflects the fixture's newest offset. Take the last
+                # probe, never the first one after the mark (which predates
+                # the scroll).
+                deadline = time.time() + 5.0
+                while True:
+                    offset = fixture_offset_points(fixture_log)
+                    expected = expected_fixture_probe_at(selection, offset)
+                    probes = [
+                        line for line in read_log(log)[mark:] if "capture_probe_grid" in line
+                    ]
+                    probe = probes[-1].strip() if probes else ""
+                    probe = probe[probe.index("capture_probe_grid") :] if probe else ""
+                    if probe == expected:
+                        return
+                    if time.time() >= deadline:
+                        fail(
+                            f"{label}: scrolled probe mismatch:\n got: {probe}\nwant: {expected}"
+                        )
+                    time.sleep(0.2)
+
+            # Right of the selection: a selection near the fixture's left edge
+            # and low enough to keep the pointer clear of the centred control
+            # window under every raw-coordinate convention.
+            mark, selection, placed, exclusion = begin_scroll("620,600", "850,780")
+            if "placed=right" not in placed:
+                fail(f"right case: unexpected preview placement {placed!r}")
+            if "preview=" not in exclusion:
+                fail(f"right case: fixed preview is not in the exclusion set: {exclusion!r}")
+            stitch_mark = len(read_log(log))
+            # The selection lies below the centred control window, so the raw
+            # scroll at its centre reaches the target untouched.
+            for _ in range(4):
+                wheel(830, 700, -1)
+            # Each wheel moves the fixture 16 logical rows = 32 physical rows;
+            # wait for the verified document to reach that bottom before
+            # measuring the reverse pass, otherwise later wheels race the
+            # extension count.
+            expected_bottom = 360 + 4 * 32
+            deadline = time.time() + 8.0
+            while True:
+                extended_lines = [
+                    line
+                    for line in read_log(log)[stitch_mark:]
+                    if "scroll_stitch extended" in line
+                ]
+                bottom = (
+                    int(extended_lines[-1].split("bottom=", 1)[1].split(" ", 1)[0])
+                    if extended_lines
+                    else 0
+                )
+                if bottom >= expected_bottom or time.time() >= deadline:
+                    break
+                time.sleep(0.2)
+            if bottom < expected_bottom:
+                fail(f"right down: verified bottom {bottom} < {expected_bottom}")
+            expect_probe(selection, stitch_mark, "right down")
+            extended_before = count_log_after(log, "scroll_stitch extended", stitch_mark)
+            for _ in range(4):
+                wheel(830, 700, 1)
+            wait_log(log, "scroll_stitch duplicate", 10.0, after=stitch_mark)
+            # Let the last queued frames settle before counting, so a frame
+            # captured mid-gesture cannot race the assertion.
+            deadline = time.time() + 5.0
+            while fixture_offset_points(fixture_log) != FIXTURE_INITIAL_OFFSET_ROWS:
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.2)
+            time.sleep(0.5)
+            duplicates = count_log_after(log, "scroll_stitch duplicate", stitch_mark)
+            extended_after = count_log_after(log, "scroll_stitch extended", stitch_mark)
+            if duplicates < 1 or extended_after != extended_before:
+                fail(
+                    "right case: reverse pass was not de-duplicated "
+                    f"(duplicates={duplicates}, extended {extended_before}→{extended_after})"
+                )
+            expect_probe(selection, stitch_mark, "right reverse")
+            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
+            wait_log(
+                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=stitch_mark
+            )
+            note(
+                "mac_e2e_27_right=pass placed=right extended=true reverse_dedup=true "
+                f"duplicates={duplicates} output=clipboard"
+            )
+
+            # Left of the selection: a selection near the fixture's right edge.
+            mark, selection, placed, exclusion = begin_scroll("900,413", "1200,593")
+            if "placed=left" not in placed:
+                fail(f"left case: unexpected preview placement {placed!r}")
+            if "preview=" not in exclusion:
+                fail(f"left case: fixed preview is not in the exclusion set: {exclusion!r}")
+            stitch_mark = len(read_log(log))
+            for _ in range(3):
+                wheel(1050, 500, -1)
+            wait_log(log, "scroll_stitch extended", 10.0, after=stitch_mark)
+            for _ in range(3):
+                wheel(1050, 500, 1)
+            wait_log(log, "scroll_stitch duplicate", 10.0, after=stitch_mark)
+            expect_probe(selection, stitch_mark, "left reverse")
+            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
+            note("mac_e2e_27_left=pass placed=left extended=true reverse_dedup=true output=clipboard")
+
+            # Inner bottom-right: a selection spanning the fixture width, so
+            # neither side placement fits. The pointer sits on the preview and
+            # raw scroll must still reach the target; the capture beneath the
+            # preview must stay pixel-exact and the preview must stay excluded.
+            mark, selection, placed, exclusion = begin_scroll("600,413", "1360,593")
+            if "placed=inner" not in placed:
+                fail(f"inner case: unexpected preview placement {placed!r}")
+            if "preview=" not in exclusion:
+                fail(f"inner case: fixed preview is not in the exclusion set: {exclusion!r}")
+            fixture_mark = len(read_log(fixture_log))
+            stitch_mark = len(read_log(log))
+            for _ in range(3):
+                wheel(1000, 450, -1)
+            wait_log(log, "scroll_stitch extended", 10.0, after=stitch_mark)
+            wait_log(fixture_log, "fixture_scroll", 5.0, after=fixture_mark)
+            expect_probe(selection, stitch_mark, "inner over-preview")
+            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
+            wait_log(
+                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=stitch_mark
+            )
+            note(
+                "mac_e2e_27_inner=pass placed=inner over_preview_scroll=true "
+                "pixel_oracle=exact preview_excluded=true output=clipboard"
+            )
         finally:
             stop(fixture)
 
@@ -1741,7 +1984,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=26")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=27")
     return 0
 
 

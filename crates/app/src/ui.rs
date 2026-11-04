@@ -1980,6 +1980,45 @@ impl Render for ScrollControlView {
     }
 }
 
+/// The fixed live verified preview (I-11 §5).
+///
+/// One window is opened during preparation and never rebuilt during
+/// collection; only the image it presents changes. It ignores mouse events at
+/// the native layer, so the pointer over an inner placement still scrolls the
+/// target underneath.
+pub(crate) struct ScrollPreviewView {
+    pub(crate) image: Option<Arc<RenderImage>>,
+}
+
+impl ScrollPreviewView {
+    /// Replaces the presented verified thumbnail, releasing the previous one.
+    pub(crate) fn set_image(&mut self, image: Option<Arc<RenderImage>>, window: &mut Window) {
+        if let Some(previous) = self.image.take() {
+            let _ = window.drop_image(previous);
+        }
+        self.image = image;
+    }
+}
+
+impl Render for ScrollPreviewView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("scroll-preview")
+            .role(Role::Image)
+            .aria_label("已验证滚动预览")
+            .accessibility_id("arcshot.scroll.preview")
+            .size_full()
+            .overflow_hidden()
+            .bg(rgba(0x10141aee))
+            .children(self.image.clone().map(|image| {
+                img(image)
+                    .id("scroll-preview-image")
+                    .object_fit(gpui::ObjectFit::Contain)
+                    .size_full()
+            }))
+    }
+}
+
 /// The plain key character a keystroke names, or `None` for special keys
 /// (enter, function keys, bare modifiers) that cannot form a hotkey.
 fn plain_key_char(key: &str) -> Option<char> {

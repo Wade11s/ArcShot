@@ -571,6 +571,206 @@ fn core_session_60_duplicate_frame_admission_is_ignored_not_queued() {
     assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
 }
 
+// CORE-SESSION: multi-frame verification, reverse de-duplication and the
+// verified-stitch completion document (I-11 §4).
+
+/// A verified stitched document of an arbitrary physical height.
+fn stitched_frame(height: u32) -> CapturedFrame {
+    let [width, _] = screen().pixel_size();
+    let geometry = ScreenGeometry::try_new(
+        1,
+        0.0,
+        0.0,
+        f64::from(width) / 2.0,
+        f64::from(height) / 2.0,
+        2.0,
+    )
+    .unwrap();
+    CapturedFrame::try_from_srgb_bgra(
+        geometry,
+        width,
+        height,
+        width as usize * 4,
+        vec![255; width as usize * height as usize * 4],
+    )
+    .unwrap()
+}
+
+#[test]
+fn core_session_61_collected_frame_is_held_for_verification() {
+    let (mut session, ticket) = collecting();
+    let frame = scroll_frame(&session);
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollFrameCollected {
+            ticket,
+            result: Ok(frame)
+        }),
+        vec![CaptureEffect::VerifyScrollFrame(ticket)]
+    );
+    // Verification is required before history or completion may change.
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
+}
+
+#[test]
+fn core_session_62_verified_extension_replaces_the_completion_document() {
+    let (mut session, ticket) = collecting();
+    session.dispatch(CaptureAction::ScrollFrameCollected {
+        ticket,
+        result: Ok(scroll_frame(&session)),
+    });
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollStitchVerified {
+            ticket,
+            frame: stitched_frame(80),
+            extended: true,
+        }),
+        vec![CaptureEffect::ScrollPreviewUpdated(ticket)]
+    );
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 200, 80).unwrap());
+}
+
+#[test]
+fn core_session_63_reverse_pass_does_not_change_the_completion_document() {
+    let (mut session, ticket) = collecting();
+    session.dispatch(CaptureAction::ScrollFrameCollected {
+        ticket,
+        result: Ok(scroll_frame(&session)),
+    });
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollStitchVerified {
+            ticket,
+            frame: scroll_frame(&session),
+            extended: false,
+        }),
+        vec![CaptureEffect::ScrollPreviewUpdated(ticket)]
+    );
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
+}
+
+#[test]
+fn core_session_64_stitch_refusal_stops_collection_without_output() {
+    let (mut session, ticket) = collecting();
+    let selection = session.document().unwrap().selection();
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollStitchRefused {
+            ticket,
+            error: arcshot_core::ScrollStitchError::Gap,
+        }),
+        vec![
+            CaptureEffect::ScrollRefused(
+                ticket,
+                ScrollRefusal::Stitch(arcshot_core::ScrollStitchError::Gap)
+            ),
+            CaptureEffect::PresentFrozen(ticket)
+        ]
+    );
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    assert_eq!(session.phase(), CapturePhase::Frozen);
+    assert_eq!(session.document().unwrap().selection(), selection);
+    assert!(!session.output_busy());
+    // Completion is no longer reachable after a verification refusal.
+    assert_eq!(
+        session.dispatch(CaptureAction::CompleteScroll { ticket }),
+        vec![]
+    );
+}
+
+#[test]
+fn core_session_65_collected_capture_failures_classify_like_the_initial_frame() {
+    for (failure, expected) in [
+        (CaptureFailure::InvalidFrame, ScrollFrameError::Admission),
+        (
+            CaptureFailure::ResourceLimit,
+            ScrollFrameError::ResourceLimit,
+        ),
+        (CaptureFailure::WorkerUnavailable, ScrollFrameError::Worker),
+    ] {
+        let (mut session, ticket) = collecting();
+        let selection = session.document().unwrap().selection();
+        assert_eq!(
+            session.dispatch(CaptureAction::ScrollFrameCollected {
+                ticket,
+                result: Err(failure),
+            }),
+            vec![
+                CaptureEffect::ScrollRefused(ticket, ScrollRefusal::Frame(expected)),
+                CaptureEffect::PresentFrozen(ticket)
+            ]
+        );
+        assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+        assert_eq!(session.document().unwrap().selection(), selection);
+    }
+
+    // Uncertain native state stays terminal during collection too.
+    for failure in [
+        CaptureFailure::NativeUncertain,
+        CaptureFailure::WorkerPanicked,
+    ] {
+        let (mut session, ticket) = collecting();
+        assert_eq!(
+            session.dispatch(CaptureAction::ScrollFrameCollected {
+                ticket,
+                result: Err(failure),
+            }),
+            vec![
+                CaptureEffect::DismissOverlay,
+                CaptureEffect::ScrollRelaunchRequired
+            ]
+        );
+        assert_eq!(session.phase(), CapturePhase::RelaunchRequired);
+    }
+
+    // Display loss cancels the whole session, not just collection.
+    let (mut session, ticket) = collecting();
+    assert_eq!(
+        session.dispatch(CaptureAction::ScrollFrameCollected {
+            ticket,
+            result: Err(CaptureFailure::DisplayInvalid),
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::ReportFailure(CaptureFailure::DisplayInvalid)
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+}
+
+#[test]
+fn core_session_66_frames_after_cancel_or_completion_are_ignored() {
+    let (mut session, ticket) = collecting();
+    session.dispatch(CaptureAction::CancelScroll { ticket });
+    assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
+    let frame = scroll_frame(&session);
+    for action in [
+        CaptureAction::ScrollFrameCollected {
+            ticket,
+            result: Ok(frame.clone()),
+        },
+        CaptureAction::ScrollStitchVerified {
+            ticket,
+            frame: frame.clone(),
+            extended: true,
+        },
+        CaptureAction::ScrollStitchRefused {
+            ticket,
+            error: arcshot_core::ScrollStitchError::Ambiguous,
+        },
+    ] {
+        assert_eq!(session.dispatch(action), vec![]);
+    }
+    assert_eq!(session.phase(), CapturePhase::Frozen);
+}
+
 // CORE-COORD-10: the display+crop → frame-geometry conversion is single and budget-fenced.
 #[test]
 fn core_coord_10_scroll_geometry_is_the_single_selection_conversion() {

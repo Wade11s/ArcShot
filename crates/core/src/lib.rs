@@ -23,8 +23,8 @@ pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry}
 pub use hotkey::Hotkey;
 pub use scroll::{
     ScrollFrameError, ScrollInputError, ScrollPermission, ScrollPermissions, ScrollPhase,
-    ScrollPrepOutcome, ScrollPreparation, ScrollRefusal, ScrollTarget, ScrollTargetError,
-    ScrollTargetFrame, ScrollWindowError, scroll_frame_geometry,
+    ScrollPrepOutcome, ScrollPreparation, ScrollRefusal, ScrollStitchError, ScrollTarget,
+    ScrollTargetError, ScrollTargetFrame, ScrollWindowError, scroll_frame_geometry,
 };
 pub use session::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,

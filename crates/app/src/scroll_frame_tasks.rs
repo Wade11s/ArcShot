@@ -8,6 +8,7 @@ use arcshot_core::{
     CaptureFailure, CaptureTicket, CapturedFrame, PixelRect, ScreenGeometry, scroll_frame_geometry,
 };
 use std::{
+    collections::VecDeque,
     error::Error,
     fmt,
     panic::{self, AssertUnwindSafe},
@@ -15,6 +16,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+/// Maximum raw frames awaiting verification (I-13). The gate never silently
+/// drops a frame: a full queue applies backpressure and stops new submissions.
+pub const MAX_RAW_FRAMES: usize = 2;
 
 /// Safety deadline from submission, covering discovery and the SCK request.
 const FRAME_DEADLINE: Duration = Duration::from_secs(5);
@@ -112,6 +117,79 @@ impl ScrollFrameTasks {
     pub fn busy(&self) -> bool {
         self.in_flight.is_some()
     }
+}
+
+/// The bounded raw-frame queue for one collection.
+#[derive(Debug, Default)]
+pub struct ScrollFrameQueue {
+    frames: VecDeque<CapturedFrame>,
+}
+
+impl ScrollFrameQueue {
+    /// An empty queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Number of raw frames awaiting verification.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+    /// Whether no raw frame awaits verification.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+    /// Whether the queue has reached the I-13 raw-frame cap.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.frames.len() >= MAX_RAW_FRAMES
+    }
+    /// Queues one frame, or reports backpressure instead of dropping it.
+    ///
+    /// # Errors
+    /// Returns [`ScrollFrameQueueError::Backpressure`] when two frames already
+    /// await verification; the caller must stop submitting native requests.
+    pub fn push(&mut self, frame: CapturedFrame) -> Result<(), ScrollFrameQueueError> {
+        if self.is_full() {
+            return Err(ScrollFrameQueueError::Backpressure);
+        }
+        self.frames.push_back(frame);
+        Ok(())
+    }
+    /// Takes the oldest queued frame.
+    #[must_use]
+    pub fn pop(&mut self) -> Option<CapturedFrame> {
+        self.frames.pop_front()
+    }
+    /// Drops every queued frame; used only when collection ends.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+    }
+}
+
+/// Submission failed before starting any additional native operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollFrameQueueError {
+    /// Two raw frames already await verification; apply backpressure.
+    Backpressure,
+}
+
+impl fmt::Display for ScrollFrameQueueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Backpressure => "scroll raw frame queue is full",
+        })
+    }
+}
+impl Error for ScrollFrameQueueError {}
+
+/// Whether one more native request may be submitted under the single-in-flight
+/// gate and the two-frame raw queue (I-13).
+#[must_use]
+pub fn may_submit_scroll_frame(in_flight: bool, queued: usize) -> bool {
+    !in_flight && queued < MAX_RAW_FRAMES
 }
 
 /// Submission failed before starting any additional native operation.
