@@ -70,4 +70,25 @@ case "$output" in
         exit 1
         ;;
 esac
+case "$output" in
+    *'preference_items_smoke=pass'*'state_from_system=true'*) ;;
+    *)
+        printf 'startup check failed: expected both preference menu items in the real menu, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
+case "$output" in
+    *'login_item_status_smoke=pass'*'read_only=true'*) ;;
+    *)
+        printf 'startup check failed: expected a read-only SMAppService status, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
+case "$output" in
+    *'preference_smoke=pass'*'restored=true'*) ;;
+    *)
+        printf 'startup check failed: expected a restored completion-sound preference roundtrip, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
 printf '%s\n' "$output"

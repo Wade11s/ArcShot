@@ -524,6 +524,8 @@ impl Render for CaptureView {
 pub(crate) struct NoticeView {
     pub(crate) notice: Option<PermissionNotice>,
     pub(crate) error: Option<String>,
+    /// Title used by error notices; permission notices keep their own titles.
+    pub(crate) error_heading: &'static str,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
 }
@@ -571,7 +573,7 @@ impl Render for NoticeView {
                 "可以从菜单栏选择“开始截图”。截图只保存在内存中，Esc 取消并返回驻留。",
             ),
             None => (
-                "无法继续截图",
+                self.error_heading,
                 self.error.as_deref().unwrap_or("请取消后重试。"),
             ),
         };

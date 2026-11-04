@@ -77,7 +77,32 @@ fn run_app(mode: RunMode) -> Result<()> {
                         "status-item-only smoke must not expose a capture window"
                     );
                     println!("capture_window_exclusion_smoke=pass visible_owned_windows=0 no_native_capture=true");
-                    println!("capture_menu_smoke=pass queued_commands=3 no_native_capture=true");
+                    println!("capture_menu_smoke=pass queued_commands=5 no_native_capture=true");
+                    // The two preference items show the stored sound value and the
+                    // real SMAppService login-item status; the smoke only reads.
+                    let login_item = menu_bar.validate_preference_items()?;
+                    println!(
+                        "preference_items_smoke=pass sound_selector=toggleCompletionSound: login_selector=toggleLaunchAtLogin: state_from_system=true"
+                    );
+                    println!(
+                        "login_item_status_smoke=pass state={login_item:?} read_only=true"
+                    );
+                    // The stored completion-sound value round-trips in the real
+                    // per-user preferences domain and is restored afterwards.
+                    let original = arcshot_macos::completion_sound_enabled();
+                    arcshot_macos::store_completion_sound(!original);
+                    ensure!(
+                        arcshot_macos::completion_sound_enabled() == !original,
+                        "completion-sound preference did not round-trip"
+                    );
+                    arcshot_macos::store_completion_sound(original);
+                    ensure!(
+                        arcshot_macos::completion_sound_enabled() == original,
+                        "completion-sound preference was not restored"
+                    );
+                    println!(
+                        "preference_smoke=pass key=CompletionSoundEnabled roundtrip=true restored=true"
+                    );
                     // Native hotkey registration, suspension and cleanup; no
                     // key event is synthesized, so no session can start.
                     let mut hotkeys = arcshot_macos::GlobalHotkeys::install()?;

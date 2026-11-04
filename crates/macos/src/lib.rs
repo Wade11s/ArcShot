@@ -3,7 +3,9 @@
 mod capture;
 mod clipboard;
 mod hotkey;
+mod login_item;
 mod permission;
+mod preferences;
 mod save;
 
 pub use capture::{
@@ -17,10 +19,12 @@ pub use clipboard::{
 pub use hotkey::{
     GlobalHotkeys, HotkeyError, hotkey_settings_load, hotkey_settings_store, virtual_keycode,
 };
+pub use login_item::{LoginItemError, login_item_status, set_login_item_enabled};
 pub use permission::{
     PermissionError, mark_permission_guide_seen, open_screen_recording_settings,
     permission_guide_seen, request_screen_recording, screen_recording_available,
 };
+pub use preferences::{completion_sound_enabled, store_completion_sound};
 pub use save::{
     PngSavePanel, SaveFileError, SavePanelError, SavePanelOutcome, cancel_save_panel,
     take_save_panel_outcome, write_png_to_file,
@@ -28,15 +32,16 @@ pub use save::{
 
 use std::{cell::RefCell, error::Error, fmt};
 
-use arcshot_core::{MenuBarText, StatusItemIcon};
+use arcshot_core::{LoginItemState, MenuBarText, StatusItemIcon};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem,
-    NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
+    NSApplication, NSApplicationActivationPolicy, NSControlStateValue, NSControlStateValueOff,
+    NSControlStateValueOn, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar,
+    NSStatusItem,
 };
 use objc2_foundation::{NSData, NSObject, NSSize, NSString};
 
@@ -56,6 +61,22 @@ pub enum MenuCommand {
     HotkeySettings,
     /// Show the Screen Recording permission flow.
     ScreenRecordingPermissions,
+    /// Toggle the persisted 完成音效 preference.
+    ToggleCompletionSound,
+    /// Ask the system to enable or disable 登录时启动.
+    ToggleLaunchAtLogin,
+}
+
+/// Tags identify the two preference items inside `validateMenuItem:`.
+const COMPLETION_SOUND_ITEM_TAG: isize = 1;
+const LAUNCH_AT_LOGIN_ITEM_TAG: isize = 2;
+
+fn item_state(enabled: bool) -> NSControlStateValue {
+    if enabled {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    }
 }
 
 define_class!(
@@ -82,6 +103,42 @@ define_class!(
         fn permissions(&self, _sender: &NSObject) {
             self.ivars().borrow_mut().push(MenuCommand::ScreenRecordingPermissions);
         }
+
+        // SAFETY: AppKit action methods accept a single sender argument.
+        #[unsafe(method(toggleCompletionSound:))]
+        fn toggle_completion_sound(&self, _sender: &NSObject) {
+            self.ivars().borrow_mut().push(MenuCommand::ToggleCompletionSound);
+        }
+
+        // SAFETY: AppKit action methods accept a single sender argument.
+        #[unsafe(method(toggleLaunchAtLogin:))]
+        fn toggle_launch_at_login(&self, _sender: &NSObject) {
+            self.ivars().borrow_mut().push(MenuCommand::ToggleLaunchAtLogin);
+        }
+
+        // AppKit sends this to the item target while the status menu opens, so
+        // the two preference items always show the stored value and the real
+        // login-item status instead of the last requested one.
+        //
+        // SAFETY: `NSMenuItem` is AppKit's validator argument type; this only
+        // reads local preferences and ServiceManagement status.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            match item.tag() {
+                COMPLETION_SOUND_ITEM_TAG => {
+                    item.setState(item_state(completion_sound_enabled()));
+                }
+                LAUNCH_AT_LOGIN_ITEM_TAG => {
+                    let state = login_item_status();
+                    log::info!("login_item_status state={state:?} source=menu");
+                    item.setState(item_state(state == LoginItemState::Enabled));
+                }
+                _ => {}
+            }
+            // 开始截图 / 截图快捷键 / 屏幕录制权限 stay usable; validation must
+            // never disable a command just because it is not a preference item.
+            true
+        }
     }
 );
 
@@ -101,6 +158,8 @@ pub struct MenuBar {
     marker: MainThreadMarker,
     status_bar: Retained<NSStatusBar>,
     status_item: Retained<NSStatusItem>,
+    completion_sound_item: Retained<NSMenuItem>,
+    launch_at_login_item: Retained<NSMenuItem>,
     quit_item: Retained<NSMenuItem>,
     command_target: Retained<CommandTarget>,
 }
@@ -146,14 +205,25 @@ impl MenuBar {
         let menu =
             NSMenu::initWithTitle(NSMenu::alloc(marker), &NSString::from_str(text.tooltip()));
         let command_target = CommandTarget::new(marker);
-        for (title, action) in [
-            ("开始截图", sel!(startCapture:)),
-            ("截图快捷键…", sel!(hotkeySettings:)),
-            ("屏幕录制权限…", sel!(screenRecordingPermissions:)),
+        let mut completed_items = Vec::new();
+        for (title, action, tag) in [
+            ("开始截图", sel!(startCapture:), 0),
+            ("截图快捷键…", sel!(hotkeySettings:), 0),
+            ("屏幕录制权限…", sel!(screenRecordingPermissions:), 0),
+            (
+                "完成音效",
+                sel!(toggleCompletionSound:),
+                COMPLETION_SOUND_ITEM_TAG,
+            ),
+            (
+                "登录时启动",
+                sel!(toggleLaunchAtLogin:),
+                LAUNCH_AT_LOGIN_ITEM_TAG,
+            ),
         ] {
-            // SAFETY: All three selectors are implemented by CommandTarget
-            // with the AppKit action signature. MenuBar retains the target
-            // until menu removal.
+            // SAFETY: All five selectors are implemented by CommandTarget with
+            // the AppKit action signature. MenuBar retains the target until
+            // menu removal.
             let item = unsafe {
                 let item = NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(marker),
@@ -162,10 +232,18 @@ impl MenuBar {
                     &NSString::from_str(""),
                 );
                 item.setTarget(Some(&command_target));
+                item.setTag(tag);
                 item
             };
             menu.addItem(&item);
+            completed_items.push(item);
         }
+        let [_, _, _, completion_sound_item, launch_at_login_item] = completed_items.as_slice()
+        else {
+            return Err(MenuBarError::MissingPreferenceItems);
+        };
+        completion_sound_item.setState(item_state(completion_sound_enabled()));
+        launch_at_login_item.setState(item_state(login_item_status() == LoginItemState::Enabled));
         // SAFETY: `terminate:` is an AppKit-declared selector with the required
         // target/action signature. The item uses the responder chain as its target.
         let quit_item = unsafe {
@@ -184,6 +262,8 @@ impl MenuBar {
             marker,
             status_bar,
             status_item,
+            completion_sound_item: completion_sound_item.clone(),
+            launch_at_login_item: launch_at_login_item.clone(),
             quit_item,
             command_target,
         };
@@ -207,6 +287,20 @@ impl MenuBar {
     /// Drains commands queued by AppKit actions, without invoking app callbacks.
     pub fn drain_commands(&self) -> Vec<MenuCommand> {
         std::mem::take(&mut *self.command_target.ivars().borrow_mut())
+    }
+
+    /// Reflects a completed 完成音效 toggle in the native item state.
+    pub fn set_completion_sound_state(&self, enabled: bool) {
+        self.completion_sound_item.setState(item_state(enabled));
+    }
+
+    /// Reflects an actual login-item read in the native item state.
+    ///
+    /// Only [`LoginItemState::Enabled`] shows the item as on; a registered item
+    /// still waiting for approval is not a working login item.
+    pub fn set_launch_at_login_state(&self, state: LoginItemState) {
+        self.launch_at_login_item
+            .setState(item_state(state == LoginItemState::Enabled));
     }
 
     /// Checks the observable native startup invariants without opening a window.
@@ -239,10 +333,12 @@ impl MenuBar {
         Ok(())
     }
 
-    /// Exercises all three actual menu commands without starting a capture.
+    /// Exercises all five status-menu commands without starting a capture.
     ///
-    /// The startup smoke process has no coordinator consuming commands. This checks
-    /// AppKit target/action delivery and command ordering, not permissions or SCK.
+    /// The startup smoke process has no coordinator consuming commands, so the
+    /// preference actions only queue their command and never touch the system.
+    /// This checks AppKit target/action delivery and command ordering, not
+    /// ServiceManagement registration, permissions or SCK.
     ///
     /// # Errors
     /// Returns an error if a menu action is missing, cannot be sent, or queues wrongly.
@@ -260,6 +356,8 @@ impl MenuBar {
             (0, sel!(startCapture:)),
             (1, sel!(hotkeySettings:)),
             (2, sel!(screenRecordingPermissions:)),
+            (3, sel!(toggleCompletionSound:)),
+            (4, sel!(toggleLaunchAtLogin:)),
         ] {
             let item = menu
                 .itemAtIndex(index)
@@ -274,16 +372,58 @@ impl MenuBar {
                 return Err(MenuBarError::CaptureCommands);
             }
         }
+        // The two preference actions are queued but not executed in smoke mode.
         if self.drain_commands()
             != [
                 MenuCommand::StartCapture,
                 MenuCommand::HotkeySettings,
                 MenuCommand::ScreenRecordingPermissions,
+                MenuCommand::ToggleCompletionSound,
+                MenuCommand::ToggleLaunchAtLogin,
             ]
         {
             return Err(MenuBarError::CaptureCommands);
         }
         Ok(())
+    }
+
+    /// Checks the preference items' selectors and their state against the real
+    /// stored preference and the actual ServiceManagement login-item status.
+    ///
+    /// Returns the real login-item state for the caller's evidence line. This is
+    /// a read only: the startup smoke never registers or unregisters a login item.
+    ///
+    /// # Errors
+    /// Returns an error when a preference item is missing, has the wrong action,
+    /// or displays a state that disagrees with the actual value.
+    pub fn validate_preference_items(&self) -> Result<LoginItemState, MenuBarError> {
+        self.validate()?;
+        let menu = self
+            .status_item
+            .menu(self.marker)
+            .ok_or(MenuBarError::MissingMenu)?;
+        for (index, expected, item) in [
+            (3, sel!(toggleCompletionSound:), &self.completion_sound_item),
+            (4, sel!(toggleLaunchAtLogin:), &self.launch_at_login_item),
+        ] {
+            if menu.itemAtIndex(index).as_deref() != Some(item)
+                || item.action() != Some(expected)
+                || item.target().is_none()
+            {
+                return Err(MenuBarError::PreferenceItems);
+            }
+        }
+        let sound = completion_sound_enabled();
+        self.set_completion_sound_state(sound);
+        let login_item = login_item_status();
+        self.set_launch_at_login_state(login_item);
+        if self.completion_sound_item.state() != item_state(sound)
+            || self.launch_at_login_item.state()
+                != item_state(login_item == LoginItemState::Enabled)
+        {
+            return Err(MenuBarError::PreferenceItems);
+        }
+        Ok(login_item)
     }
 
     /// Queues the same `terminate:` action configured on the quit menu item.
@@ -354,6 +494,10 @@ pub enum MenuBarError {
     MissingQuitAction,
     /// Native capture commands did not reach their retained target in order.
     CaptureCommands,
+    /// The two preference items are missing, mistargeted or show an untrue state.
+    PreferenceItems,
+    /// The status item menu did not yield the expected five command items.
+    MissingPreferenceItems,
 }
 
 impl fmt::Display for MenuBarError {
@@ -368,6 +512,8 @@ impl fmt::Display for MenuBarError {
             Self::MissingMenu => "the status item has no menu",
             Self::MissingQuitAction => "the quit item has no terminate action",
             Self::CaptureCommands => "capture menu actions could not be delivered",
+            Self::PreferenceItems => "preference menu items are missing or display an untrue state",
+            Self::MissingPreferenceItems => "the status menu is missing preference items",
         };
         formatter.write_str(message)
     }

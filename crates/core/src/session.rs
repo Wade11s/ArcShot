@@ -312,6 +312,8 @@ pub struct CaptureSession {
     epoch: u64,
     state: State,
     output: Option<OutputStage>,
+    /// Persisted menu preference; off makes a successful output silent.
+    completion_sound: bool,
 }
 impl Default for CaptureSession {
     fn default() -> Self {
@@ -319,6 +321,8 @@ impl Default for CaptureSession {
             epoch: 0,
             state: State::Resident,
             output: None,
+            // I-04: the completion sound is on unless the user turns it off.
+            completion_sound: true,
         }
     }
 }
@@ -341,6 +345,19 @@ impl CaptureSession {
     #[must_use]
     pub const fn output_busy(&self) -> bool {
         self.output.is_some()
+    }
+
+    /// Whether successful output plays the short completion sound.
+    #[must_use]
+    pub const fn completion_sound(&self) -> bool {
+        self.completion_sound
+    }
+
+    /// Applies the menu preference; it survives session restarts by design.
+    ///
+    /// Silence only affects a successful output. Failures are always reported.
+    pub const fn set_completion_sound(&mut self, enabled: bool) {
+        self.completion_sound = enabled;
     }
 
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.
@@ -526,10 +543,12 @@ impl CaptureSession {
                 match result {
                     Ok(()) => {
                         self.state = State::Resident;
-                        vec![
-                            CaptureEffect::DismissOverlay,
-                            CaptureEffect::PlayCompletionSound,
-                        ]
+                        let mut effects = vec![CaptureEffect::DismissOverlay];
+                        // The preference only silences success; failure still reports.
+                        if self.completion_sound {
+                            effects.push(CaptureEffect::PlayCompletionSound);
+                        }
+                        effects
                     }
                     Err(error) => vec![CaptureEffect::ReportOutputFailure(error)],
                 }

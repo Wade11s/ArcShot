@@ -7,6 +7,10 @@ pub use permission_flow::{
 };
 mod hotkey_flow;
 pub use hotkey_flow::{HotkeyAction, HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome};
+mod preferences_flow;
+pub use preferences_flow::{
+    LoginItemOutcome, PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice,
+};
 mod output_tasks;
 pub use output_tasks::{OutputSubmitError, OutputTasks};
 mod output_publish;

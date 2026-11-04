@@ -274,3 +274,88 @@ fn core_session_13_output_busy_ignores_a_new_start_even_from_the_hotkey() {
     assert_eq!(session.dispatch(CaptureAction::Start), vec![]);
     assert_eq!(session.phase(), CapturePhase::Frozen);
 }
+
+#[test]
+fn core_session_24_completion_sound_preference_gates_only_the_success_sound() {
+    let (mut session, ticket) = frozen();
+    assert!(session.completion_sound(), "the documented default is on");
+    session.set_completion_sound(false);
+    select(&mut session, ticket);
+    let job = finish(&mut session, ticket);
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![CaptureEffect::DismissOverlay],
+        "sound off leaves a successful output silent, not unsuccessful"
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+}
+
+#[test]
+fn core_session_25_sound_off_still_reports_failures_and_survives_a_new_session() {
+    let (mut session, ticket) = frozen();
+    session.set_completion_sound(false);
+    select(&mut session, ticket);
+    let job = finish(&mut session, ticket);
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Err(OutputFailure::Clipboard)
+        }),
+        vec![CaptureEffect::ReportOutputFailure(OutputFailure::Clipboard)],
+        "a silent success preference never silences a failure"
+    );
+    session.dispatch(CaptureAction::CancelAttempt(ticket));
+
+    // A later session still honours the app-level preference.
+    let CaptureEffect::CheckPermission(second) = session.dispatch(CaptureAction::Start)[0] else {
+        panic!("expected permission check");
+    };
+    session.dispatch(CaptureAction::PermissionChecked {
+        ticket: second,
+        available: true,
+    });
+    session.dispatch(CaptureAction::Completed {
+        ticket: second,
+        result: Ok(frame()),
+    });
+    select(&mut session, second);
+    let job = finish(&mut session, second);
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![CaptureEffect::DismissOverlay],
+        "the preference is not reset by a new session"
+    );
+
+    // Turning it back on restores the short sound for the next success.
+    session.set_completion_sound(true);
+    assert!(session.completion_sound());
+    let CaptureEffect::CheckPermission(third) = session.dispatch(CaptureAction::Start)[0] else {
+        panic!("expected permission check");
+    };
+    session.dispatch(CaptureAction::PermissionChecked {
+        ticket: third,
+        available: true,
+    });
+    session.dispatch(CaptureAction::Completed {
+        ticket: third,
+        result: Ok(frame()),
+    });
+    select(&mut session, third);
+    let job = finish(&mut session, third);
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+}

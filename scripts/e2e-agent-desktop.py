@@ -27,6 +27,8 @@ MENU = [
     ("开始截图", "startCapture:"),
     ("截图快捷键…", "hotkeySettings:"),
     ("屏幕录制权限…", "screenRecordingPermissions:"),
+    ("完成音效", "toggleCompletionSound:"),
+    ("登录时启动", "toggleLaunchAtLogin:"),
     ("退出 ArcShot", "terminate:"),
 ]
 
@@ -97,6 +99,17 @@ def wait_log(path: pathlib.Path, needle: str, timeout: float, *, after: int = 0)
     fail(f"timeout waiting for {needle!r} in {path}")
 
 
+def wait_line(path: pathlib.Path, predicate, timeout: float) -> str:
+    """Waits until one diagnostic line satisfies the predicate."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for line in read_log(path):
+            if predicate(line):
+                return line
+        time.sleep(POLL)
+    fail(f"timeout waiting for a matching line in {path}")
+
+
 def count_log(path: pathlib.Path, needle: str) -> int:
     return sum(1 for line in read_log(path) if needle in line)
 
@@ -115,6 +128,40 @@ def click(app: str, name: str) -> None:
     steps = data.get("steps", [])
     if not steps or steps[0].get("outcome") != "succeeded":
         fail(f"click {name!r} did not report success: {data}")
+
+
+def start(executable: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
+    """Starts the bundle under test with its diagnostics in one fresh log."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("")
+    stderr = log.open("w")
+    process = subprocess.Popen(
+        [str(executable)], stdout=subprocess.DEVNULL, stderr=stderr, cwd=ROOT
+    )
+    stderr.close()
+    return process
+
+
+def quit_app(app: str, process: subprocess.Popen, *, expect_status_item_removed: bool) -> None:
+    """Quits through the real menu item and checks the process is really gone."""
+    click(app, "退出 ArcShot")
+    try:
+        status_code = process.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        fail("process did not exit after the quit command")
+    if status_code != 0:
+        fail(f"process exited {status_code} after the quit command")
+    if agent("list-apps", "--app", "ArcShot").get("apps"):
+        fail("an ArcShot instance is still running after quit")
+    if not expect_status_item_removed:
+        return
+    try:
+        agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem")
+    except Failure as error:
+        if "APP_NOT_FOUND" not in str(error):
+            raise
+    else:
+        fail("status item is still addressable after quit")
 
 
 def windows(app: str) -> list[dict]:
@@ -294,11 +341,12 @@ def main() -> int:
     if (actual, actual_name) != (identifier, app):
         fail(f"bundle identity mismatch: {actual} / {actual_name}, expected {identifier} / {app}")
 
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text("")
-    stderr = log.open("w")
-    process = subprocess.Popen([str(executable)], stdout=subprocess.DEVNULL, stderr=stderr, cwd=ROOT)
-    stderr.close()
+    log = ROOT / "target" / f"e2e-agent-desktop-{configuration}.log"
+    process = start(executable, log)
+    restart_logs = [
+        ROOT / "target" / f"e2e-agent-desktop-{configuration}-restart-{index}.log"
+        for index in (1, 2)
+    ]
     try:
         wait_log(log, "hotkey_launch config=", 10.0)
 
@@ -320,6 +368,32 @@ def main() -> int:
         if actual_menu != MENU:
             fail(f"menu commands differ: {actual_menu}")
         note(f"mac_e2e_01=pass menu_items={len(MENU)} refs={surface.get('ref_count')}")
+
+        # MAC-E2E-15: the login item shows the system's actual state (read only).
+        # The snapshot above opens the status menu, which validates the two
+        # preference items; no registration is requested by this case.
+        launch_read = wait_line(
+            log,
+            lambda line: "login_item_status state=" in line and "source=launch" in line,
+            10.0,
+        )
+        menu_read = wait_line(
+            log,
+            lambda line: "login_item_status state=" in line and "source=menu" in line,
+            10.0,
+        )
+        menu_state = menu_read.split("state=", 1)[1].split(" ", 1)[0]
+        launch_state = launch_read.split("state=", 1)[1].split(" ", 1)[0]
+        if menu_state not in ("Enabled", "Disabled", "RequiresApproval"):
+            fail(f"unexpected login-item state: {menu_state}")
+        if menu_state != launch_state:
+            fail(f"menu and launch login-item reads disagree: {menu_state} / {launch_state}")
+        if count_log(log, "login_item_set ") != 0:
+            fail("reading the menu must never register or unregister the login item")
+        note(
+            f"mac_e2e_15=pass login_item_actual={menu_state} "
+            "source=menu source=launch read_only=true"
+        )
 
         # MAC-E2E-02: a resident instance exposes no own window.
         if windows(app):
@@ -520,24 +594,51 @@ def main() -> int:
             fail(f"AX-cancelled session left own windows: {windows(app)}")
         note("mac_e2e_12=pass overlay_cancel=ax phase=Resident")
 
+        # MAC-E2E-13: the 完成音效 preference toggles through AX and is persisted.
+        original_sound = next(
+            line.split("completion_sound=", 1)[1].split(" ", 1)[0]
+            for line in read_log(log)
+            if "preferences_launch completion_sound=" in line
+        )
+        if original_sound not in ("true", "false"):
+            fail(f"unexpected persisted completion-sound value: {original_sound!r}")
+        flipped_sound = "false" if original_sound == "true" else "true"
+        click(app, "完成音效")
+        wait_log(log, f"completion_sound enabled={flipped_sound} persisted=true", 10.0)
+        click(app, "完成音效")
+        wait_log(log, f"completion_sound enabled={original_sound} persisted=true", 10.0)
+        note(
+            f"mac_e2e_13=pass sound={original_sound}->{flipped_sound}->{original_sound} "
+            "selector=toggleCompletionSound:"
+        )
+        # Leave the opposite value in the preferences domain before the restart.
+        click(app, "完成音效")
+        wait_log(log, f"completion_sound enabled={flipped_sound} persisted=true", 10.0)
+
         # MAC-E2E-08: Quit removes process, status item and windows.
-        click(app, "退出 ArcShot")
-        try:
-            status_code = process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            fail("process did not exit after the quit command")
-        if status_code != 0:
-            fail(f"process exited {status_code} after the quit command")
-        if agent("list-apps", "--app", "ArcShot").get("apps"):
-            fail("an ArcShot instance is still running after quit")
-        try:
-            agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem")
-        except Failure as error:
-            if "APP_NOT_FOUND" not in str(error):
-                raise
-        else:
-            fail("status item is still addressable after quit")
+        quit_app(app, process, expect_status_item_removed=True)
         note("mac_e2e_08=pass exit=0 status_item=removed")
+
+        # MAC-E2E-14: the stored preference survives a real restart and is then
+        # restored to the value the user had before this run.
+        process = start(executable, restart_logs[0])
+        wait_log(
+            restart_logs[0], f"preferences_launch completion_sound={flipped_sound}", 10.0
+        )
+        click(app, "完成音效")
+        wait_log(
+            restart_logs[0], f"completion_sound enabled={original_sound} persisted=true", 10.0
+        )
+        quit_app(app, process, expect_status_item_removed=False)
+        process = start(executable, restart_logs[1])
+        wait_log(
+            restart_logs[1], f"preferences_launch completion_sound={original_sound}", 10.0
+        )
+        quit_app(app, process, expect_status_item_removed=False)
+        note(
+            f"mac_e2e_14=pass restart_restored={flipped_sound} "
+            f"restart_restored={original_sound} preference=local"
+        )
     finally:
         if process.poll() is None:
             process.terminate()
@@ -546,7 +647,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=12")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=15")
     return 0
 
 
