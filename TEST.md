@@ -59,7 +59,7 @@ scripts/e2e-agent-desktop.py --release  # Release
 | EVIDENCE-01 | `scripts/test-validation-tools.sh` 与 `scripts/check-validation.sh` | 元数据记录字段完整；合法报告通过；缺失/空字段、占位、非法配置、工具或 Git 失败均失败 | 证据内容本身是否正确 |
 | DEPENDENCY-01 | `scripts/test-dependency-inspection.py` 与 `scripts/inspect-dependencies.py` | normal/build/dev 直接依赖、来源与重复版本均通过确定性 fixtures；异常来源/畸形/缺失 metadata 失败；实际输出有界 | 许可证、漏洞与所有传递非 Rust 风险 |
 | TEXT-01 | `scripts/check-text-backend.sh` | GPUI `font-kit` 返回真实 Helvetica `i < W` advance，禁止 NoopTextSystem | 中文 IME、emoji、实际标注排版 |
-| MAC-START-01 | `scripts/check-startup.sh` | 正式 bundle 进入 run loop；Accessory 无 Dock 策略；真实可见 NSStatusItem、图像与菜单；`terminate:` 后 exit 0；5 秒看门狗 | 完整 MAC-START、Finder 人工视觉/点击 |
+| MAC-START-01 | `scripts/check-startup.sh` | 正式 bundle 进入 run loop；Accessory 无 Dock 策略；真实可见 NSStatusItem、图像与菜单；PNGf 剪贴板与显式保存临时文件逐字节回读；`terminate:` 后 exit 0；5 秒看门狗 | 完整 MAC-START、Finder 人工视觉/点击、保存面板显示 |
 | PRIVACY-01 | `scripts/check-no-network.sh` | 正常驻留至少 0.5 秒且 `lsof -i` 无网络/监听 socket；工具缺失/检查异常非零返回，不得假通过 | 后续功能与所有时刻的网络证明 |
 | BUILD-RELEASE-01 | `scripts/check-startup.sh --release` | Release bundle 同样完成驻留/退出 | 签名、公证、性能与资源门槛 |
 
@@ -69,8 +69,9 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 ## 3. Rust 自动化接缝（随功能落地）
 
 下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；#22 已实现拖拽选区、Finish/双击/完成入口、
-2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏。标注编辑、选区移动/调整/重选、
-显式保存、滚动截图与偏好设置仍未实现，状态仍为 **Not tested**。
+2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏；#23 已实现显式
+Save PNG、保存对话框互斥、取消/失败恢复与同一快照的字节复用。标注编辑、选区
+移动/调整/重选、滚动截图与偏好设置仍未实现，状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -135,6 +136,23 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 
 实机步骤与预算口径见 `docs/output.md`；实测记录见
 `docs/validation/22-region-output.md`。这不是 MAC-REGION 其余必测项的替代。
+
+### #23 的稳定自动化入口
+
+显式保存复用 #22 的统一文档与合成/编码入口。自动化覆盖 core 的保存互斥、取消、
+失败、过期结果与目标独立，app 的“只执行一个副作用、同一版本同一字节”以及原生
+文件写入回读。真实 `NSSavePanel` 的显示层级、取消与覆盖写属于 MAC-RECOVERY，
+仍为实机参与项。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/save.rs` | CORE-SESSION-14～17：面板期间互斥、取消回编辑、面板失败、无选区/过期 ticket；APP-EFFECT-18～21：选定后合成、成功结束、分类失败保留、过期结果/目标不匹配拒绝、Finish 与 Save 共用快照但互不触发 | 原生面板显示与路径选择 |
+| `crates/core/tests/session.rs` | CORE-SESSION-06 改由真实保存对话框驱动：面板打开时忽略菜单/热键 Start，取消后恢复 | 系统热键事件投递 |
+| `crates/app/tests/output_publish.rs` | APP-EFFECT-22～26：路径只被其所属 job 使用、版本变化不写旧路径、剪贴板 job 不写文件、同一快照字节一致、超预算在副作用前拒绝 | 真实磁盘与 AppKit 写入 |
+| `crates/macos/tests/save_native.rs` | MAC-RECOVERY-23-01：worker 线程创建保存面板、写文件、取消/取结果都在 AppKit 副作用前拒绝 | 主线程真实面板显示 |
+| `scripts/check-startup.sh`（`--smoke-test`） | MAC-RECOVERY-23-02：真实进程写临时 PNG 后逐字节读回、拒绝不存在的目标与非 PNG 字节、配置真实 `NSSavePanel`；Debug/Release 各断言 `save_file_smoke=pass` | 面板显示/取消/覆盖写、跨进程文件打开 |
+
+实机步骤见 `docs/output.md`；实测记录见 `docs/validation/23-save-png.md`。
 
 实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
 `docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
@@ -223,7 +241,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-09 | 启动前后 `agent-desktop list-apps --app "ArcShot"` | 只出现被测 `bundle_id` 与显示名（Debug/Release 各一） | 系统按 bundle ID 解析到哪一份拷贝 |
 | MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
 | MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
-| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区/标注（尚未实现） |
+| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区/标注与保存（保存按钮只在有效选区时成为 `button arcshot.overlay.save`，选区尚无 AX 节点） |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -263,9 +281,13 @@ agent-desktop press escape --headed
   证明“可寻址”，NSWindow 销毁级证据仍缺外部探针。
 - 已落地（#53/#54/#55）：权限提示、快捷键设置与冻结覆盖层的元素都有
   `id` + `role` + `aria_label` + `accessibility_id` + `on_a11y_action`，
-  `snapshot --app` 可见、可驱动。**尚未**标注的是未来的产品面：区域选区、标注工具、
-  文字编辑与滚动预览。它们落地时必须沿用 §4.2 的约定，否则 MAC-REGION /
-  MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 仍无法进入 E2E。
+  `snapshot --app` 可见、可驱动。#23 的“保存”控件在有效选区且输出空闲时注册为
+  `button arcshot.overlay.save`，但打开保存面板需要有效选区，而选区本身尚无 AX
+  节点（需先完成拖拽）。因此 MAC-RECOVERY 的保存面板显示/取消/覆盖写仍为
+  **Not tested**，不能用 `--headed` 拖拽补足。
+- **尚未**标注的是未来的产品面：区域选区、标注工具、文字编辑与滚动预览。它们
+  落地时必须沿用 §4.2 的约定，否则 MAC-REGION / MAC-ANNOTATION / MAC-TEXT /
+  MAC-SCROLL-* 仍无法进入 E2E。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 
@@ -293,7 +315,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
 | MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分：本机 `agent-desktop 1.1.0` 无剪贴板子命令，字节比对仍需脚本 |
-| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 否：对话框尚未实现；落地后按 §4.2 加 AX 后可驱动 |
+| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分：保存取消/失败/重试/放弃与文件写入由 core/app/原生自动化覆盖，`save_file_smoke` 验证真实写入；面板显示/取消/覆盖写需有效选区，选区尚无 AX 节点（§4.5），保持 Not tested |
 | MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分：退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
 
 权限切换若先触发焦点停止，只能记录实际时序，不能冒称“运行中直接撤权”已验证。

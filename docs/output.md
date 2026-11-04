@@ -1,12 +1,12 @@
 # #22 Region Capture：框选、Finish 与 PNG 输出
 
 本切片在冻结内屏上建立唯一选区，并以 Enter、选择态空白双击或右上“完成”复制
-PNG。它落地统一文档、2x 坐标转换、共享合成/编码入口、固定快照、版本栅栏与
-尺寸/内存预算。标注工具、选区移动/调整/重选、显式保存与滚动截图仍属后续票据，
-行为保持 Not tested。
+PNG，或以右上“保存”显式写入 PNG 文件。它落地统一文档、2x 坐标转换、共享
+合成/编码入口、固定快照、版本栅栏与尺寸/内存预算。标注工具、选区移动/调整/
+重选与滚动截图仍属后续票据，行为保持 Not tested。
 
 自动化与常驻原生冒烟的稳定入口见 `TEST.md`；实机证据见
-`docs/validation/22-region-output.md`。
+`docs/validation/22-region-output.md` 与 `docs/validation/23-save-png.md`。
 
 ## 文档与坐标
 
@@ -25,8 +25,11 @@ PNG。它落地统一文档、2x 坐标转换、共享合成/编码入口、固�
   已有选区。指针限制在冻结屏内，单次选区不跨屏。
 - 无有效选区时 Enter、双击与“完成”均不输出。选择态下双击只在其点落在选区内
   时完成；双击对象/控制点/工具栏（后续功能）不经过该路径。
-- “完成”入口位于右上；Esc 取消会话，不复制、不保存。输出处理期间视图禁用
-  拖动与重复完成，core 同时忽略 Finish/Start，迟到结果必须通过版本栅栏。
+- “完成”与“保存”入口位于右上；Esc 取消会话，不复制、不保存。输出处理期间
+  视图禁用拖动、重复完成与保存，core 同时忽略 Finish/Save/Start，迟到结果必须
+  通过版本栅栏。
+- “保存”只在存在有效选区且输出互斥空闲时可用；保存对话框打开期间与输出处理
+  期间，编辑、重复完成、重复保存与截图快捷键都被忽略。
 
 ## 输出管线
 
@@ -44,6 +47,36 @@ PNG。它落地统一文档、2x 坐标转换、共享合成/编码入口、固�
    通知。失败显示分类错误并保留文档，可重新 Finish。
 7. 取消会让在途任务的结果栅栏失效，因此不会在取消后再复制。
 
+## 显式保存（Save PNG）
+
+1. 右上“保存”与“完成”走同一个 core 入口 `begin_output`：先执行输出前提交钩子
+   `Document::commit_edits`（本切片无文字工具，钩子已就位，文字/IME 提交扩展此处
+   而不是另建输出路线），再固定 ticket、文档 `version` 与物理 `crop` 快照。
+2. `OutputJob` 携带 `OutputTarget`：`Clipboard`（完成）或 `SaveFile`（保存）。
+   core 的输出状态机只有一个槽位：`Panel(job)`（保存对话框打开，尚无编码字节）
+   或 `Encoding(job)`（固定快照合成/编码中）。`Finish`、`Save`、`SelectRegion`
+   在槽位占用时都不产生效果，`Start`（菜单与全局快捷键共用的入口）同样被忽略。
+3. 保存路径先请求原生 `NSSavePanel`（`CaptureEffect::RequestSavePanel`）；面板由
+   `crates/macos` 的安全适配器以 `beginWithCompletionHandler` 非阻塞显示，完成
+   回调只写入一个主线程结果槽，由 app 的下一次 tick 取走，因此没有嵌套模态
+   run loop 会重入 GPUI。面板层级设为 102，高于 GPUI 冻结覆盖层的
+   `NSPopUpWindowLevel`（101）。会话结束或取消时 `cancel_save_panel` 关闭仍打开
+   的面板，其迟到结果由 job 栅栏丢弃。
+4. 面板结果：取消 → 释放互斥、无错误、文档与版本不变；失败 → 释放互斥并报告
+   `OutputFailure::SavePanel`，保留文档；选定路径 → 同一快照进入合成/编码，路径
+   仅保存在 app（core 不持有路径）。
+5. 编码完成、`may_publish(job)` 通过后，`arcshot_app::publish_output` 只执行一个
+   副作用：`Clipboard` 写系统剪贴板，`SaveFile` 写用户选择的文件。没有匹配路径
+   的保存 job 报告 `OutputFailure::SaveFile`，不会写文件也不会回退到剪贴板。
+6. 保存成功才结束会话并播放完成音效（音效偏好在后续票据落地前沿用 #22 的无条件
+   播放）；保存成功不复制剪贴板，完成也不写文件。保存/复制失败显示分类错误并
+   保留选区、对象与版本，可再次保存重试；Esc 放弃不产生输出。
+
+文件写入由 `crates/macos::write_png_to_file` 完成：先校验 PNG 签名与 128 MiB
+预算再创建 `NSData`（预分配前检查），`writeToURL:atomically:` 返回 true 后读回
+文件长度必须与编码字节一致；不一致时删除刚写入的文件并报告失败，不把发起请求
+当成功。
+
 ## 预算与失败分级
 
 | 项目 | 规则 |
@@ -51,10 +84,12 @@ PNG。它落地统一文档、2x 坐标转换、共享合成/编码入口、固�
 | 文档 | ≤24,000,000 物理像素，任一边 ≤16,384；冻结帧接纳时已检查 |
 | 裁剪/合成 | 分配前 checked 尺寸、像素与 `try_reserve_exact`；失败不生成损坏输出 |
 | PNG | 编码结果 ≤128 MiB；超限保留文档，不写剪贴板/磁盘 |
+| 文件写入 | 签名与 128 MiB 预算在 `NSData` 分配前检查；原子写入后校验字节数，不一致则删除 |
 | 任务 | 同一文档最多 1 个合成/编码任务；`OutputTasks` 单槽 |
-| 栅栏 | 接纳结果和副作用前各检查 ticket/version/crop |
+| 栅栏 | 接纳结果和副作用前各检查 ticket/version/crop/target |
 
-`OutputFailure` 区分 ResourceLimit、Encode、Clipboard 与 Worker。编码 worker
+`OutputFailure` 区分 ResourceLimit、Encode、Clipboard、SavePanel、SaveFile 与
+Worker。编码 worker
 panic 只让本次输出失败并保留文档；它不表示原生捕获状态不确定，因此不要求
 重启应用。原生捕获的 RelaunchRequired 规则不变。
 
@@ -62,8 +97,11 @@ panic 只让本次输出失败并保留文档；它不表示原生捕获状态�
 
 `--smoke-test` 在真实应用进程中用 `arcshot_image` 编码 2×2 PNG，写入私有命名
 pasteboard，校验 PNGf 字节回读一致，并用 `NSBitmapImageRep` 在内存中解码尺寸；
-`check-startup.sh` 断言该结果行。私有 pasteboard 不触碰用户剪贴板，也不保存
-取证图像。剪贴板与音效适配器在非主线程返回明确错误/不播放，由原生测试覆盖。
+`check-startup.sh` 断言该结果行。同一 `--smoke-test` 还用编码出的 PNG 写临时
+文件并逐字节读回、拒绝不存在的目标路径与非 PNG 字节、配置真实 `NSSavePanel`
+（不显示），输出 `save_file_smoke=pass`。私有 pasteboard 不触碰用户剪贴板，也
+不保存取证图像。剪贴板、音效与保存适配器在非主线程返回明确错误/不播放，由原生
+测试覆盖；面板的显示、取消与覆盖写属于需人工确认的 MAC-RECOVERY 用例。
 
 ## 需用户参与的稳定子用例
 
