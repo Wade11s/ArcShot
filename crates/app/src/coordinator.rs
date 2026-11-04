@@ -656,6 +656,9 @@ impl Coordinator {
     fn end_pending_save(&mut self) {
         if self.pending_panel.take().is_some() {
             native::cancel_save_panel();
+            // An outcome that raced with the cancellation is already fenced off
+            // by the dropped job; discard it instead of applying it to no panel.
+            let _ = native::take_save_panel_outcome();
         }
         self.pending_save.clear();
     }

@@ -171,8 +171,13 @@ pub fn take_save_panel_outcome() -> Option<SavePanelOutcome> {
 /// Cancels the panel the app is showing, if any.
 ///
 /// A late completion outcome stays fenced by the app's job and is discarded.
+/// When AppKit already stored an outcome, the panel is closed and only the app
+/// has not drained it yet, so it is not cancelled a second time.
 pub fn cancel_save_panel() {
     if MainThreadMarker::new().is_none() {
+        return;
+    }
+    if PANEL_OUTCOME.lock().is_ok_and(|outcome| outcome.is_some()) {
         return;
     }
     // Clone out of the slot so a synchronously delivered completion cannot see
