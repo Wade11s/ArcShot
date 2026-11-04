@@ -342,8 +342,9 @@ fn core_session_51_enter_completes_the_single_frame_without_any_scrolling() {
 }
 
 #[test]
-fn core_session_52_successful_completion_ends_the_session_and_respects_the_sound_preference() {
-    // Sound on (default): the session ends and one sound effect is requested.
+fn core_session_52_successful_completion_shows_the_preview_and_keeps_the_shared_document() {
+    // Sound on (default): the whole-image document stays authoritative so the
+    // user can annotate it, and one sound effect is requested.
     let (mut session, ticket) = collecting();
     let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
         panic!("expected one compose job");
@@ -355,15 +356,20 @@ fn core_session_52_successful_completion_ends_the_session_and_respects_the_sound
         }),
         vec![
             CaptureEffect::DismissOverlay,
+            CaptureEffect::ShowCompletionPreview(ticket),
             CaptureEffect::PlayCompletionSound
         ]
     );
-    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert_eq!(session.phase(), CapturePhase::Frozen);
     assert_eq!(session.scroll_phase(), ScrollPhase::Inactive);
-    assert!(session.frame().is_none());
+    // The completion document is the shared long image, not the region crop.
+    let document = session.document().unwrap();
+    assert_eq!(document.selection().unwrap().width(), 30.0);
+    assert_eq!(document.selection().unwrap().height(), 20.0);
+    assert!(session.completion_preview().is_some());
     assert!(!session.output_busy());
 
-    // Sound off: success stays silent; the failure contract is unchanged.
+    // Sound off: the preview still appears; only the success sound changes.
     let (mut session, ticket) = collecting();
     session.set_completion_sound(false);
     let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
@@ -374,12 +380,15 @@ fn core_session_52_successful_completion_ends_the_session_and_respects_the_sound
             job,
             result: Ok(())
         }),
-        vec![CaptureEffect::DismissOverlay]
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::ShowCompletionPreview(ticket)
+        ]
     );
 }
 
 #[test]
-fn core_session_53_failed_completion_keeps_collection_and_allows_retry() {
+fn core_session_53_failed_completion_copy_shows_no_preview_and_allows_retry() {
     let (mut session, ticket) = collecting();
     let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
         panic!("expected one compose job");
@@ -393,6 +402,8 @@ fn core_session_53_failed_completion_keeps_collection_and_allows_retry() {
             arcshot_core::OutputFailure::Clipboard
         )]
     );
+    // No preview may be requested by a copy failure, and the retry is fresh.
+    assert!(session.completion_preview().is_none());
     // The collected result survives: collection continues and Enter retries.
     assert_eq!(session.scroll_phase(), ScrollPhase::Collecting);
     assert!(!session.output_busy());
@@ -769,6 +780,248 @@ fn core_session_66_frames_after_cancel_or_completion_are_ignored() {
         assert_eq!(session.dispatch(action), vec![]);
     }
     assert_eq!(session.phase(), CapturePhase::Frozen);
+}
+
+// #35 / I-11 step 7–8: a confirmed clipboard copy keeps the same whole-image
+// document authoritative for optional annotation; cancel never copies again.
+#[test]
+fn core_session_67_cancel_after_the_completion_preview_ends_without_output() {
+    let (mut session, ticket) = collecting();
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job,
+        result: Ok(()),
+    });
+    assert_eq!(session.phase(), CapturePhase::Frozen);
+    assert!(session.completion_preview().is_some());
+    let version = session.document().unwrap().version();
+
+    // Cancelling the annotation ends the session without a second job: the
+    // clipboard keeps the un-annotated copy that already succeeded.
+    assert_eq!(
+        session.dispatch(CaptureAction::CancelAttempt(ticket)),
+        vec![CaptureEffect::DismissOverlay]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert!(session.document().is_none());
+    assert!(session.completion_preview().is_none());
+    assert_eq!(version, 1, "no annotation was committed before cancel");
+}
+
+#[test]
+fn core_session_68_re_finish_outputs_the_whole_annotated_image_and_then_ends() {
+    let (mut session, ticket) = collecting();
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job,
+        result: Ok(()),
+    });
+
+    // Clicking the preview consumes the post-copy marker and enters the same
+    // document; no second annotator or re-selection is created.
+    assert_eq!(
+        session.dispatch(CaptureAction::EnterCompletionAnnotation { ticket }),
+        vec![CaptureEffect::PresentCompletionAnnotation(ticket)]
+    );
+    assert!(session.completion_preview().is_none());
+
+    // Draw one Rectangle over the top-left of the long image with the existing
+    // editor.
+    session.dispatch(CaptureAction::SelectTool {
+        ticket,
+        tool: Tool::Rectangle,
+    });
+    session.dispatch(CaptureAction::PointerPressed {
+        ticket,
+        point: [2.0, 2.0],
+    });
+    session.dispatch(CaptureAction::PointerMoved {
+        ticket,
+        point: [8.0, 9.0],
+    });
+    session.dispatch(CaptureAction::PointerReleased { ticket });
+    let document = session.document().unwrap();
+    assert_eq!(document.annotations().len(), 1);
+    assert_eq!(document.version(), 2);
+
+    // Re-finishing snapshots the full frame plus the annotation.
+    let effects = session.dispatch(CaptureAction::Finish { ticket });
+    let effect = effects
+        .into_iter()
+        .find(|effect| matches!(effect, CaptureEffect::ComposeOutput(_)))
+        .expect("one compose job");
+    let CaptureEffect::ComposeOutput(job) = effect else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.ticket(), ticket);
+    assert_eq!(job.target(), arcshot_core::OutputTarget::Clipboard);
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
+    assert_eq!(job.annotations().len(), 1);
+    assert!(session.may_publish(&job));
+
+    // A successful re-finish ends the session: there is no second preview.
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+    assert!(session.completion_preview().is_none());
+}
+
+#[test]
+fn core_session_70_re_finish_without_edits_still_ends_the_session() {
+    let (mut session, ticket) = collecting();
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job,
+        result: Ok(()),
+    });
+    session.dispatch(CaptureAction::EnterCompletionAnnotation { ticket });
+    assert!(session.completion_preview().is_none());
+
+    // Even an untouched annotation surface finishes normally: the whole frame
+    // is copied and the session ends instead of showing another preview.
+    let effects = session.dispatch(CaptureAction::Finish { ticket });
+    let effect = effects
+        .into_iter()
+        .find(|effect| matches!(effect, CaptureEffect::ComposeOutput(_)))
+        .expect("one compose job");
+    let CaptureEffect::ComposeOutput(job) = effect else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
+    assert!(job.annotations().is_empty());
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+}
+
+#[test]
+fn core_session_71_finish_during_the_preview_is_a_re_finish_not_a_second_preview() {
+    let (mut session, ticket) = collecting();
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job,
+        result: Ok(()),
+    });
+    assert!(session.completion_preview().is_some());
+
+    // Pressing Finish while the thumbnail is visible copies the same whole
+    // image again and ends the session; it must not restart the preview.
+    let effects = session.dispatch(CaptureAction::Finish { ticket });
+    let effect = effects
+        .into_iter()
+        .find(|effect| matches!(effect, CaptureEffect::ComposeOutput(_)))
+        .expect("finish submits one compose job");
+    let CaptureEffect::ComposeOutput(job) = effect else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.crop(), PixelRect::try_new(0, 0, 60, 40).unwrap());
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
+}
+
+#[test]
+fn core_session_72_accessibility_rectangle_enters_the_shared_document() {
+    let (mut session, ticket) = collecting();
+    let CaptureEffect::ComposeOutput(job) = completion_job(&mut session, ticket) else {
+        panic!("expected one compose job");
+    };
+    session.dispatch(CaptureAction::OutputCompleted {
+        job,
+        result: Ok(()),
+    });
+    session.dispatch(CaptureAction::EnterCompletionAnnotation { ticket });
+
+    // The non-drag accessibility path creates one Rectangle through the same
+    // authoritative editor at a deterministic inset of the whole image.
+    assert_eq!(
+        session.dispatch(CaptureAction::AddDefaultRectangle { ticket }),
+        vec![]
+    );
+    let document = session.document().unwrap();
+    assert_eq!(document.annotations().len(), 1);
+    assert_eq!(document.version(), 2);
+    let bounds = document.annotations()[0]
+        .shape()
+        .rectangle_bounds()
+        .expect("one rectangle object");
+    assert_eq!(bounds.x(), 3.0);
+    assert_eq!(bounds.y(), 2.0);
+    assert_eq!(bounds.width(), 6.0);
+    assert_eq!(bounds.height(), 4.0);
+
+    // While an output runs the document is fenced from further edits.
+    let effects = session.dispatch(CaptureAction::Finish { ticket });
+    let effect = effects
+        .into_iter()
+        .find(|effect| matches!(effect, CaptureEffect::ComposeOutput(_)))
+        .expect("finish submits one compose job");
+    let CaptureEffect::ComposeOutput(job) = effect else {
+        panic!("expected one compose job");
+    };
+    assert_eq!(job.annotations().len(), 1);
+    assert_eq!(
+        session.dispatch(CaptureAction::AddDefaultRectangle { ticket }),
+        vec![]
+    );
+    assert_eq!(session.document().unwrap().annotations().len(), 1);
+}
+
+#[test]
+fn core_session_69_ordinary_region_finish_still_ends_without_a_preview() {
+    let (mut session, ticket) = frozen_selected();
+    let effects = session.dispatch(CaptureAction::Finish { ticket });
+    let effect = effects
+        .into_iter()
+        .find(|effect| matches!(effect, CaptureEffect::ComposeOutput(_)))
+        .expect("one compose job");
+    let CaptureEffect::ComposeOutput(job) = effect else {
+        panic!("expected one compose job");
+    };
+    assert!(session.completion_preview().is_none());
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+    assert_eq!(session.phase(), CapturePhase::Resident);
 }
 
 // CORE-COORD-10: the display+crop → frame-geometry conversion is single and budget-fenced.

@@ -3,7 +3,7 @@ use crate::text_input::{TextInput, text_editor};
 use arcshot_app::{
     CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PermissionAction,
     PermissionNotice, ScrollPermissionAction, ScrollPermissionNotice, capture_key_action,
-    capture_press_action, capture_text_press_action,
+    capture_long_image_press_action, capture_press_action, capture_text_press_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
@@ -12,10 +12,10 @@ use arcshot_core::{
     TextStyle, Tool,
 };
 use gpui::{
-    AccessibleAction, Context, Entity, FocusHandle, Render, RenderImage, Role, Toggled, Window,
-    WindowId, div, img, prelude::*, px, rgb, rgba, text,
+    AccessibleAction, Animation, AnimationExt, Context, Entity, FocusHandle, Render, RenderImage,
+    Role, Toggled, Window, WindowId, div, img, prelude::*, px, rgb, rgba, text,
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 /// One transient pointer gesture; the committed document stays authoritative.
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +24,48 @@ pub(crate) enum DragState {
     Band { start: [f64; 2], current: [f64; 2] },
     /// Move/resize owned by the document; live preview mirrors its selection.
     Core,
+}
+
+/// Slide-in duration of the completion thumbnail (I-11 §7).
+pub(crate) const COMPLETION_PREVIEW_ENTER: Duration = Duration::from_millis(200);
+/// How long the thumbnail stays before leaving; I-11 §7 fixes this at 3 seconds.
+pub(crate) const COMPLETION_PREVIEW_HOLD: Duration = Duration::from_secs(3);
+/// Slide-out and fade duration of the completion thumbnail.
+pub(crate) const COMPLETION_PREVIEW_EXIT: Duration = Duration::from_millis(250);
+
+/// Display transform for the whole-image annotation surface.
+///
+/// `screen = image * zoom + offset`; it never feeds back into the document crop
+/// or annotation coordinates, so panning and zooming cannot change the output.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ViewTransform {
+    pub(crate) zoom: f64,
+    pub(crate) offset: [f64; 2],
+}
+
+impl ViewTransform {
+    fn to_image(self, point: [f64; 2]) -> [f64; 2] {
+        [
+            (point[0] - self.offset[0]) / self.zoom,
+            (point[1] - self.offset[1]) / self.zoom,
+        ]
+    }
+
+    fn to_screen(self, point: [f64; 2]) -> [f64; 2] {
+        [
+            point[0] * self.zoom + self.offset[0],
+            point[1] * self.zoom + self.offset[1],
+        ]
+    }
+
+    fn rect(self, selection: Selection) -> [f64; 4] {
+        [
+            selection.x() * self.zoom + self.offset[0],
+            selection.y() * self.zoom + self.offset[1],
+            selection.width() * self.zoom,
+            selection.height() * self.zoom,
+        ]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +144,10 @@ pub(crate) enum UiCommand {
     ScrollCancel(CaptureTicket),
     /// The Scroll control window closed.
     ScrollControlClosed(WindowId, CaptureTicket),
+    /// The completion preview was activated: enter the shared document.
+    EnterCompletionAnnotation(CaptureTicket),
+    /// The accessible non-drag path adds one Rectangle to the completion surface.
+    AddDefaultRectangle(CaptureTicket),
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
@@ -164,6 +210,15 @@ pub(crate) struct CaptureView {
     pub(crate) hovered_tool: Option<Tool>,
     /// Mirror of the authoritative option density from the capture session.
     pub(crate) density: Density,
+    /// Whether this surface shows the whole completed long image. Selection
+    /// gestures are disabled in that mode; only annotations are editable.
+    pub(crate) long_image: bool,
+    /// Whole-image view zoom; ignored unless `long_image` is set.
+    pub(crate) view_zoom: f64,
+    /// Whole-image view offset in window points; ignored unless `long_image`.
+    pub(crate) view_offset: [f64; 2],
+    /// Window viewport in logical points, used to keep the view clamped.
+    pub(crate) viewport: [f64; 2],
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
 }
@@ -282,6 +337,100 @@ impl CaptureView {
     fn clamp(&self, point: [f64; 2]) -> [f64; 2] {
         let [width, height] = self.logical_size();
         [point[0].clamp(0.0, width), point[1].clamp(0.0, height)]
+    }
+
+    /// The whole-image view transform, or `None` for the region surface.
+    fn view_transform(&self) -> Option<ViewTransform> {
+        self.long_image.then_some(ViewTransform {
+            zoom: self.view_zoom,
+            offset: self.view_offset,
+        })
+    }
+
+    /// Maps a window point into document coordinates.
+    ///
+    /// Region mode keeps the existing screen clamp. Whole-image mode applies
+    /// the inverse view transform and clamps to the image bounds, so panning
+    /// and zooming never extend the editable area past the document.
+    fn view_point(&self, raw: [f64; 2]) -> [f64; 2] {
+        let Some(transform) = self.view_transform() else {
+            return self.clamp(raw);
+        };
+        let [width, height] = self.logical_size();
+        let image = transform.to_image(raw);
+        [image[0].clamp(0.0, width), image[1].clamp(0.0, height)]
+    }
+
+    /// Maps one selection rectangle into window coordinates.
+    fn screen_rect(&self, selection: Selection) -> [f64; 4] {
+        match self.view_transform() {
+            Some(transform) => transform.rect(selection),
+            None => [
+                selection.x(),
+                selection.y(),
+                selection.width(),
+                selection.height(),
+            ],
+        }
+    }
+
+    /// Maps one document point into window coordinates.
+    fn screen_point(&self, point: [f64; 2]) -> [f64; 2] {
+        match self.view_transform() {
+            Some(transform) => transform.to_screen(point),
+            None => point,
+        }
+    }
+
+    /// Pans the whole-image view, keeping at least one image edge reachable.
+    fn pan_by(&mut self, delta: [f64; 2]) {
+        if self.view_transform().is_none() {
+            return;
+        }
+        self.view_offset[0] += delta[0];
+        self.view_offset[1] += delta[1];
+        self.clamp_view();
+    }
+
+    /// Zooms around one window anchor point.
+    fn zoom_at(&mut self, factor: f64, anchor: [f64; 2]) {
+        let Some(transform) = self.view_transform() else {
+            return;
+        };
+        let [viewport_width, viewport_height] = self.viewport;
+        let [image_width, image_height] = self.logical_size();
+        let fit = (viewport_width / image_width)
+            .min(viewport_height / image_height)
+            .min(1.0);
+        let zoom = (transform.zoom * factor).clamp(fit.max(f64::EPSILON), 8.0);
+        if (zoom - transform.zoom).abs() < f64::EPSILON {
+            return;
+        }
+        let image = transform.to_image(anchor);
+        self.view_zoom = zoom;
+        self.view_offset = [anchor[0] - image[0] * zoom, anchor[1] - image[1] * zoom];
+        self.clamp_view();
+    }
+
+    /// Keeps the whole-image view inside the viewport without losing the image.
+    fn clamp_view(&mut self) {
+        let Some(transform) = self.view_transform() else {
+            return;
+        };
+        let [viewport_width, viewport_height] = self.viewport;
+        let [image_width, image_height] = self.logical_size();
+        let width = image_width * transform.zoom;
+        let height = image_height * transform.zoom;
+        self.view_offset[0] = if width <= viewport_width {
+            (viewport_width - width) / 2.0
+        } else {
+            self.view_offset[0].clamp(viewport_width - width, 0.0)
+        };
+        self.view_offset[1] = if height <= viewport_height {
+            (viewport_height - height) / 2.0
+        } else {
+            self.view_offset[1].clamp(viewport_height - height, 0.0)
+        };
     }
 
     /// Creates or drops the live editor to match the authoritative text edit.
@@ -931,11 +1080,34 @@ impl Render for CaptureView {
             && !busy
             && self.selection.is_some()
             && !matches!(self.drag, Some(DragState::Band { .. }));
+        // The whole-image surface never reselects its extent, so the selection
+        // chrome would be non-interactive there; object handles stay editable.
+        let show_selection_handles = show_handles && !self.long_image;
         let error = self.error.clone();
-        let image = self
-            .image
-            .as_ref()
-            .map(|image| img(Arc::clone(image)).size_full());
+        let [document_width, document_height] = self.logical_size();
+        // The whole-image surface draws the complete document through the view
+        // transform; the region surface still fills the window exactly.
+        let image_rect = match self.view_transform() {
+            Some(transform) => {
+                let [x, y] = transform.to_screen([0.0, 0.0]);
+                [
+                    x,
+                    y,
+                    document_width * transform.zoom,
+                    document_height * transform.zoom,
+                ]
+            }
+            None => [0.0, 0.0, document_width, document_height],
+        };
+        let image = self.image.as_ref().map(|image| {
+            img(Arc::clone(image))
+                .absolute()
+                .left(px(image_rect[0] as f32))
+                .top(px(image_rect[1] as f32))
+                .w(px(image_rect[2] as f32))
+                .h(px(image_rect[3] as f32))
+                .object_fit(gpui::ObjectFit::Fill)
+        });
 
         let mut root = div()
             .id("capture-overlay")
@@ -1050,12 +1222,14 @@ impl Render for CaptureView {
             .on_mouse_down(gpui::MouseButton::Left, {
                 let entity = cx.entity();
                 move |event, _, cx| {
-                    let raw = pointer(&event.position);
                     let double = event.click_count >= 2;
                     entity.update(cx, |view, cx| {
                         if !frozen || view.busy {
                             return;
                         }
+                        // Map the window point into document space first: hit
+                        // tests, creation bounds and drags share one frame.
+                        let point = view.view_point(pointer(&event.position));
                         // A press while editing commits the draft; the same press
                         // does not also start a new object.
                         if view.text_edit.is_some() {
@@ -1066,28 +1240,39 @@ impl Render for CaptureView {
                         // Only the visible part of an object is interactive.
                         let object = view
                             .selection
-                            .filter(|selection| selection.contains(raw))
-                            .and_then(|_| arcshot_core::annotation_at(&view.annotations, raw));
+                            .filter(|selection| selection.contains(point))
+                            .and_then(|_| arcshot_core::annotation_at(&view.annotations, point));
                         let text_hit = object
                             .and_then(|index| view.annotations.get(index))
                             .and_then(|annotation| annotation.style().text())
                             .is_some();
-                        if capture_text_press_action(double, view.tool, text_hit, raw).is_some() {
-                            view.queue.borrow_mut().push(UiCommand::BeginText {
-                                ticket,
-                                point: view.clamp(raw),
-                            });
+                        if capture_text_press_action(double, view.tool, text_hit, point).is_some() {
+                            view.queue
+                                .borrow_mut()
+                                .push(UiCommand::BeginText { ticket, point });
                             cx.notify();
                             return;
                         }
-                        match capture_press_action(
-                            double,
-                            view.busy,
-                            view.tool,
-                            view.selection,
-                            object.is_some(),
-                            raw,
-                        ) {
+                        let action = if view.long_image {
+                            capture_long_image_press_action(
+                                double,
+                                view.busy,
+                                view.tool,
+                                view.selection,
+                                object.is_some(),
+                                point,
+                            )
+                        } else {
+                            capture_press_action(
+                                double,
+                                view.busy,
+                                view.tool,
+                                view.selection,
+                                object.is_some(),
+                                point,
+                            )
+                        };
+                        match action {
                             // Core checks whether the point is actually inside
                             // the selection; the toolbar is not the background.
                             Some(CapturePressAction::FinishAt(point)) => {
@@ -1098,17 +1283,15 @@ impl Render for CaptureView {
                             }
                             Some(CapturePressAction::Create) if view.tool == Tool::Text => {
                                 // The text tool positions an editor instead of a drag.
-                                view.queue.borrow_mut().push(UiCommand::BeginText {
-                                    ticket,
-                                    point: view.clamp(raw),
-                                });
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::BeginText { ticket, point });
                             }
                             Some(CapturePressAction::EditText(_)) => {}
                             Some(CapturePressAction::Create) => {
                                 // A new object starts unselected; the draft is
                                 // selected as soon as the first move lands.
                                 view.selected = None;
-                                let point = view.clamp(raw);
                                 view.drag = Some(DragState::Core);
                                 view.queue
                                     .borrow_mut()
@@ -1118,7 +1301,6 @@ impl Render for CaptureView {
                                 // Mirror the picked layer immediately so keys
                                 // pressed before the next tick see the selection.
                                 view.selected = object;
-                                let point = view.clamp(raw);
                                 view.drag = Some(DragState::Core);
                                 view.queue
                                     .borrow_mut()
@@ -1126,7 +1308,6 @@ impl Render for CaptureView {
                             }
                             Some(CapturePressAction::Drag) => {
                                 view.selected = None;
-                                let point = view.clamp(raw);
                                 view.drag = Some(DragState::Core);
                                 view.queue
                                     .borrow_mut()
@@ -1134,13 +1315,18 @@ impl Render for CaptureView {
                             }
                             Some(CapturePressAction::Band) => {
                                 view.selected = None;
-                                let point = view.clamp(raw);
                                 view.drag = Some(DragState::Band {
                                     start: point,
                                     current: point,
                                 });
                             }
-                            None => {}
+                            None => {
+                                // The whole-image surface never moves or
+                                // reselects; empty space only clears the pick.
+                                if view.long_image {
+                                    view.selected = None;
+                                }
+                            }
                         }
                         cx.notify();
                     });
@@ -1151,7 +1337,7 @@ impl Render for CaptureView {
                 let entity = cx.entity();
                 move |event, _, cx| {
                     entity.update(cx, |view, cx| {
-                        let point = view.clamp(pointer(&event.position));
+                        let point = view.view_point(pointer(&event.position));
                         match &mut view.drag {
                             Some(DragState::Band { current, .. }) => {
                                 *current = point;
@@ -1172,14 +1358,13 @@ impl Render for CaptureView {
             .on_mouse_up(gpui::MouseButton::Left, {
                 let entity = cx.entity();
                 move |event, _, cx| {
-                    let end = pointer(&event.position);
                     entity.update(cx, |view, cx| {
                         let Some(drag) = view.drag.take() else {
                             return;
                         };
+                        let end = view.view_point(pointer(&event.position));
                         match drag {
                             DragState::Band { start, .. } => {
-                                let end = view.clamp(end);
                                 if band(start, end).is_some() {
                                     view.queue.borrow_mut().push(UiCommand::SelectRegion {
                                         ticket,
@@ -1191,15 +1376,47 @@ impl Render for CaptureView {
                             DragState::Core => {
                                 // Apply the release position before committing, so a
                                 // final mouse-up without a move event is not lost.
-                                let point = view.clamp(end);
                                 view.queue
                                     .borrow_mut()
-                                    .push(UiCommand::PointerMoved { ticket, point });
+                                    .push(UiCommand::PointerMoved { ticket, point: end });
                                 view.queue
                                     .borrow_mut()
                                     .push(UiCommand::PointerReleased(ticket));
                             }
                         }
+                        cx.notify();
+                    });
+                }
+            })
+            .on_scroll({
+                let entity = cx.entity();
+                move |event: &gpui::ScrollEvent, _, cx| {
+                    entity.update(cx, |view, cx| {
+                        if !view.long_image || view.busy {
+                            return;
+                        }
+                        let delta = match event.delta {
+                            gpui::ScrollDelta::Pixels(delta) => {
+                                [f64::from(delta.x), f64::from(delta.y)]
+                            }
+                            gpui::ScrollDelta::Lines(delta) => {
+                                [f64::from(delta.x) * 20.0, f64::from(delta.y) * 20.0]
+                            }
+                        };
+                        view.pan_by(delta);
+                        cx.notify();
+                    });
+                }
+            })
+            .on_pinch({
+                let entity = cx.entity();
+                move |event: &gpui::PinchEvent, _, cx| {
+                    entity.update(cx, |view, cx| {
+                        if !view.long_image || view.busy {
+                            return;
+                        }
+                        let anchor = [f64::from(event.position.x), f64::from(event.position.y)];
+                        view.zoom_at(1.0 + f64::from(event.delta), anchor);
                         cx.notify();
                     });
                 }
@@ -1216,52 +1433,61 @@ impl Render for CaptureView {
             && preview.selection == selection
             && !matches!(self.drag, Some(DragState::Band { .. }))
         {
+            let [x, y, width, height] = self.screen_rect(selection);
             root = root.child(
                 img(Arc::clone(&preview.image))
                     .absolute()
-                    .left(px(selection.x() as f32))
-                    .top(px(selection.y() as f32))
-                    .w(px(selection.width() as f32))
-                    .h(px(selection.height() as f32))
+                    .left(px(x as f32))
+                    .top(px(y as f32))
+                    .w(px(width as f32))
+                    .h(px(height as f32))
                     .object_fit(gpui::ObjectFit::Fill),
             );
         }
 
         if let Some((x, y, width, height)) = preview {
-            let [full_width, full_height] = self.logical_size().map(|value| value as f32);
-            // Dim only outside the selection; the region itself stays untouched.
-            root = root
-                .child(region(0.0, 0.0, full_width, y).bg(rgba(0x00000099)))
-                .child(region(0.0, y, x, height).bg(rgba(0x00000099)))
-                .child(region(x + width, y, full_width - x - width, height).bg(rgba(0x00000099)))
-                .child(
-                    region(0.0, y + height, full_width, full_height - y - height)
-                        .bg(rgba(0x00000099)),
-                )
-                .child(
-                    region(x, y, width, height)
-                        .border_1()
-                        .border_color(rgb(0xffffff)),
-                )
-                .children(dimensions.map(|dimensions| {
-                    div()
-                        .absolute()
-                        .left(px(x))
-                        .top(px((y - 26.0).max(4.0)))
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(rgba(0x000000cc))
-                        .text_color(rgb(0xffffff))
-                        .text_sm()
-                        .child(dimensions)
-                }));
+            // Region mode dims outside the selection and labels its physical
+            // crop. The whole-image surface has no reselectable band and its
+            // output extent is already the complete document.
+            if self.view_transform().is_none() {
+                let [full_width, full_height] = self.logical_size().map(|value| value as f32);
+                root = root
+                    .child(region(0.0, 0.0, full_width, y).bg(rgba(0x00000099)))
+                    .child(region(0.0, y, x, height).bg(rgba(0x00000099)))
+                    .child(
+                        region(x + width, y, full_width - x - width, height).bg(rgba(0x00000099)),
+                    )
+                    .child(
+                        region(0.0, y + height, full_width, full_height - y - height)
+                            .bg(rgba(0x00000099)),
+                    )
+                    .child(
+                        region(x, y, width, height)
+                            .border_1()
+                            .border_color(rgb(0xffffff)),
+                    )
+                    .children(dimensions.map(|dimensions| {
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top(px((y - 26.0).max(4.0)))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgba(0x000000cc))
+                            .text_color(rgb(0xffffff))
+                            .text_sm()
+                            .child(dimensions)
+                    }));
+            }
 
             // Eight control points are the visible move/resize affordances; the
             // same logical centers drive the core hit test.
-            if show_handles && let Some(selection) = self.selection {
+            if show_selection_handles && let Some(selection) = self.selection {
                 for handle in RESIZE_HANDLES {
-                    let [x, y] = selection.handle_center(handle).map(|value| value as f32);
+                    let [x, y] = self
+                        .screen_point(selection.handle_center(handle))
+                        .map(|value| value as f32);
                     root = root.child(
                         region(x - 4.0, y - 4.0, 8.0, 8.0)
                             .bg(rgb(0x007aff))
@@ -1295,7 +1521,7 @@ impl Render for CaptureView {
                     Shape::Text(_) => Vec::new(),
                 };
                 for [x, y] in centers {
-                    let [x, y] = [x as f32, y as f32];
+                    let [x, y] = self.screen_point([x, y]).map(|value| value as f32);
                     root = root.child(
                         region(x - 4.0, y - 4.0, 8.0, 8.0)
                             .bg(color)
@@ -1356,42 +1582,48 @@ impl Render for CaptureView {
                     .flex()
                     .gap_2()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child({
-                        // Scroll entry: enabled with a valid selection. Existing
-                        // annotations are refused by the core with an explicit
-                        // reason; the button never silently drops them.
-                        let queue = Rc::clone(&self.queue);
-                        let a11y_queue = Rc::clone(&self.queue);
-                        let scroll_enabled = frozen && self.selection.is_some() && !busy;
-                        let mut button = div()
-                            .id("scroll-capture")
-                            .role(Role::Button)
-                            .aria_label("进入滚动截图")
-                            .accessibility_id("arcshot.overlay.scroll")
-                            .px_4()
-                            .py_2()
-                            .rounded_md()
-                            .text_color(rgb(0xffffff))
-                            .bg(if scroll_enabled {
-                                rgb(0x3b465b)
-                            } else {
-                                rgb(0x2a2f3a)
-                            })
-                            .child("滚动");
-                        if scroll_enabled {
-                            button = button
+                    .when(!self.long_image, |actions| {
+                        actions.child({
+                            // Scroll entry: enabled with a valid selection. Existing
+                            // annotations are refused by the core with an explicit
+                            // reason; the button never silently drops them.
+                            let queue = Rc::clone(&self.queue);
+                            let a11y_queue = Rc::clone(&self.queue);
+                            let scroll_enabled = frozen && self.selection.is_some() && !busy;
+                            let mut button = div()
+                                .id("scroll-capture")
                                 .role(Role::Button)
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x52617b)))
-                                .on_click(move |_, _, _| {
-                                    queue.borrow_mut().push(UiCommand::EnterScroll(ticket));
+                                .aria_label("进入滚动截图")
+                                .accessibility_id("arcshot.overlay.scroll")
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .text_color(rgb(0xffffff))
+                                .bg(if scroll_enabled {
+                                    rgb(0x3b465b)
+                                } else {
+                                    rgb(0x2a2f3a)
                                 })
-                                .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
-                                    log::info!("a11y_action=arcshot.overlay.scroll action=Click");
-                                    a11y_queue.borrow_mut().push(UiCommand::EnterScroll(ticket));
-                                });
-                        }
-                        button
+                                .child("滚动");
+                            if scroll_enabled {
+                                button = button
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(0x52617b)))
+                                    .on_click(move |_, _, _| {
+                                        queue.borrow_mut().push(UiCommand::EnterScroll(ticket));
+                                    })
+                                    .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                                        log::info!(
+                                            "a11y_action=arcshot.overlay.scroll action=Click"
+                                        );
+                                        a11y_queue
+                                            .borrow_mut()
+                                            .push(UiCommand::EnterScroll(ticket));
+                                    });
+                            }
+                            button
+                        })
                     })
                     .child({
                         let queue = Rc::clone(&self.queue);
@@ -1470,6 +1702,40 @@ impl Render for CaptureView {
                                 });
                         }
                         button
+                    })
+                    .when(self.long_image, |actions| {
+                        // Accessibility path for users who cannot perform a
+                        // press-drag gesture: the same Rectangle object through
+                        // the authoritative editor, never a second annotator.
+                        actions.child({
+                            let queue = Rc::clone(&self.queue);
+                            let a11y_queue = Rc::clone(&self.queue);
+                            div()
+                                .id("completion-add-rectangle")
+                                .role(Role::Button)
+                                .aria_label("添加矩形标注")
+                                .accessibility_id("arcshot.overlay.completion.add_rectangle")
+                                .px_4()
+                                .py_2()
+                                .rounded_md()
+                                .text_color(rgb(0xffffff))
+                                .bg(rgb(0x3b465b))
+                                .cursor_pointer()
+                                .on_click(move |_, _, _| {
+                                    queue
+                                        .borrow_mut()
+                                        .push(UiCommand::AddDefaultRectangle(ticket));
+                                })
+                                .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                                    log::info!(
+                                        "a11y_action=arcshot.overlay.completion.add_rectangle action=Click"
+                                    );
+                                    a11y_queue
+                                        .borrow_mut()
+                                        .push(UiCommand::AddDefaultRectangle(ticket));
+                                })
+                                .child("加矩形")
+                        })
                     }),
             );
         }
@@ -1583,7 +1849,17 @@ impl Render for CaptureView {
             let metrics = arcshot_image::measure_text(&edit.content, edit.style.size_points());
             let width = (metrics.max_line_width as f32).max(1.0);
             let height = (metrics.line_count as f32 * metrics.line_height as f32).max(1.0);
-            root = root.child(text_editor(input, edit.anchor, width, height, focus));
+            // The live editor shell follows the view transform; the measured
+            // document bounds stay in image coordinates.
+            let zoom = self.view_zoom;
+            let [x, y] = self.screen_point(edit.anchor);
+            root = root.child(text_editor(
+                input,
+                [x, y],
+                width * zoom as f32,
+                height * zoom as f32,
+                focus,
+            ));
         }
 
         if let Some(error) = error {
@@ -2016,6 +2292,72 @@ impl Render for ScrollPreviewView {
                     .object_fit(gpui::ObjectFit::Contain)
                     .size_full()
             }))
+    }
+}
+
+/// The three-second completion thumbnail (I-11 §7).
+///
+/// It shows the complete long image proportionally, slides in from the right,
+/// stays for exactly [`COMPLETION_PREVIEW_HOLD`] (hover never extends it), then
+/// slides out and fades. Activating it enters the shared annotation surface.
+pub(crate) struct CompletionPreviewView {
+    pub(crate) image: Option<Arc<RenderImage>>,
+    pub(crate) ticket: CaptureTicket,
+    pub(crate) queue: UiQueue,
+    /// Thumbnail window width, used as the slide travel distance.
+    pub(crate) width: f32,
+}
+
+impl Render for CompletionPreviewView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let ticket = self.ticket;
+        let queue = Rc::clone(&self.queue);
+        let a11y_queue = Rc::clone(&self.queue);
+        let travel = self.width;
+        let mut root = div()
+            .id("completion-preview")
+            .role(Role::Button)
+            .aria_label("完成预览，点击进入长图标注")
+            .accessibility_id("arcshot.completion.preview")
+            .size_full()
+            .overflow_hidden()
+            .bg(rgb(0x20242b))
+            .border_1()
+            .border_color(rgb(0x007aff))
+            .cursor_pointer()
+            .on_click(move |_, _, _| {
+                queue
+                    .borrow_mut()
+                    .push(UiCommand::EnterCompletionAnnotation(ticket));
+            })
+            .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                log::info!("a11y_action=arcshot.completion.preview action=Click");
+                a11y_queue
+                    .borrow_mut()
+                    .push(UiCommand::EnterCompletionAnnotation(ticket));
+            })
+            .with_animations(
+                "completion-preview-animation",
+                vec![
+                    Animation::new(COMPLETION_PREVIEW_ENTER).with_easing(gpui::ease_out_quint()),
+                    Animation::new(COMPLETION_PREVIEW_HOLD),
+                    Animation::new(COMPLETION_PREVIEW_EXIT),
+                ],
+                move |this, phase, delta| match phase {
+                    0 => this.left(px(travel * (1.0 - delta))).opacity(1.0),
+                    1 => this.left(px(0.0)).opacity(1.0),
+                    _ => this.left(px(travel * delta)).opacity(1.0 - delta),
+                },
+            );
+        if let Some(image) = self.image.clone() {
+            root = root.child(
+                img(image)
+                    .id("completion-preview-image")
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Contain),
+            );
+        }
+        root
     }
 }
 
