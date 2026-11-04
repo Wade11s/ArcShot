@@ -1,11 +1,23 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
-use arcshot_app::{CaptureKeyAction, PermissionAction, PermissionNotice, capture_key_action};
-use arcshot_core::{CaptureTicket, Hotkey, ScreenGeometry, Selection};
+use arcshot_app::{
+    CaptureKeyAction, CapturePressAction, KeyModifiers, PermissionAction, PermissionNotice,
+    capture_key_action, capture_press_action,
+};
+use arcshot_core::{CaptureTicket, Hotkey, ResizeHandle, ScreenGeometry, Selection};
 use gpui::{
     AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Window, WindowId, div, img,
     prelude::*, px, rgb, rgba, text,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
+
+/// One transient pointer gesture; the committed document stays authoritative.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DragState {
+    /// View-only rubber band for a new selection, committed on release.
+    Band { start: [f64; 2], current: [f64; 2] },
+    /// Move/resize owned by the document; live preview mirrors its selection.
+    Core,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum UiCommand {
@@ -23,6 +35,22 @@ pub(crate) enum UiCommand {
         from: [f64; 2],
         to: [f64; 2],
     },
+    /// A press inside the selection or on a control point starts a core drag.
+    SelectionDragStarted {
+        ticket: CaptureTicket,
+        point: [f64; 2],
+    },
+    /// Live pointer movement for that core drag.
+    SelectionDragUpdated {
+        ticket: CaptureTicket,
+        point: [f64; 2],
+    },
+    /// Release commits the drag as one history step.
+    SelectionDragEnded(CaptureTicket),
+    /// Command+Z.
+    Undo(CaptureTicket),
+    /// Command+Shift+Z.
+    Redo(CaptureTicket),
     /// Enter, the toolbar button, or a double-click point inside the selection.
     FinishCapture {
         ticket: CaptureTicket,
@@ -40,10 +68,30 @@ pub(crate) struct CaptureView {
     pub(crate) error: Option<String>,
     /// Frozen screen geometry; the single source for logical bounds and 2x output.
     pub(crate) screen: Option<ScreenGeometry>,
-    /// View-only rubber band; core owns the committed selection.
-    pub(crate) drag: Option<([f64; 2], [f64; 2])>,
+    /// Transient gesture state; core owns the committed selection and history.
+    pub(crate) drag: Option<DragState>,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
+}
+
+const RESIZE_HANDLES: [ResizeHandle; 8] = [
+    ResizeHandle::TopLeft,
+    ResizeHandle::Top,
+    ResizeHandle::TopRight,
+    ResizeHandle::Right,
+    ResizeHandle::BottomRight,
+    ResizeHandle::Bottom,
+    ResizeHandle::BottomLeft,
+    ResizeHandle::Left,
+];
+
+fn key_modifiers(modifiers: &gpui::Modifiers) -> KeyModifiers {
+    KeyModifiers {
+        command: modifiers.platform,
+        shift: modifiers.shift,
+        control: modifiers.control,
+        option: modifiers.alt,
+    }
 }
 
 fn pointer(event: &gpui::Point<gpui::Pixels>) -> [f64; 2] {
@@ -90,10 +138,10 @@ impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ticket = self.ticket;
         let busy = self.busy;
-        let dragging = self.drag.is_some();
         let frozen = self.image.is_some();
-        let preview_points = self.drag.or_else(|| {
-            self.selection.map(|selection| {
+        let preview_points = match self.drag {
+            Some(DragState::Band { start, current }) => Some((start, current)),
+            _ => self.selection.map(|selection| {
                 (
                     [selection.x(), selection.y()],
                     [
@@ -101,8 +149,8 @@ impl Render for CaptureView {
                         selection.y() + selection.height(),
                     ],
                 )
-            })
-        });
+            }),
+        };
         let preview = preview_points.and_then(|(start, end)| band(start, end));
         // Label the exact physical crop the shared output conversion would produce.
         let dimensions = preview_points
@@ -111,6 +159,10 @@ impl Render for CaptureView {
             .and_then(|(selection, screen)| selection.pixel_rect(screen).ok())
             .map(|crop| format!("{} × {}", crop.width(), crop.height()));
         let finish_enabled = frozen && self.selection.is_some() && !busy;
+        let show_handles = frozen
+            && !busy
+            && self.selection.is_some()
+            && !matches!(self.drag, Some(DragState::Band { .. }));
         let error = self.error.clone();
         let image = self
             .image
@@ -127,8 +179,18 @@ impl Render for CaptureView {
             .track_focus(&self.focus)
             .on_key_down({
                 let queue = Rc::clone(&self.queue);
+                let entity = cx.entity();
                 move |event, _, cx| {
-                    let action = capture_key_action(&event.keystroke.key, busy, dragging);
+                    // Read the live drag flag rather than the render-time snapshot,
+                    // so a key right after release never sees a stale held state.
+                    let (busy, dragging) =
+                        entity.read_with(cx, |view, _| (view.busy, view.drag.is_some()));
+                    let action = capture_key_action(
+                        &event.keystroke.key,
+                        key_modifiers(&event.keystroke.modifiers),
+                        busy,
+                        dragging,
+                    );
                     match action {
                         Some(CaptureKeyAction::Cancel) => {
                             queue.borrow_mut().push(UiCommand::CancelCapture(ticket));
@@ -141,6 +203,14 @@ impl Render for CaptureView {
                             });
                             cx.stop_propagation();
                         }
+                        Some(CaptureKeyAction::Undo) => {
+                            queue.borrow_mut().push(UiCommand::Undo(ticket));
+                            cx.stop_propagation();
+                        }
+                        Some(CaptureKeyAction::Redo) => {
+                            queue.borrow_mut().push(UiCommand::Redo(ticket));
+                            cx.stop_propagation();
+                        }
                         None => {}
                     }
                 }
@@ -148,23 +218,37 @@ impl Render for CaptureView {
             .on_mouse_down(gpui::MouseButton::Left, {
                 let entity = cx.entity();
                 move |event, _, cx| {
-                    let point = pointer(&event.position);
+                    let raw = pointer(&event.position);
                     let double = event.click_count >= 2;
                     entity.update(cx, |view, cx| {
                         if !frozen || view.busy {
                             return;
                         }
-                        if double {
+                        match capture_press_action(double, view.busy, view.selection, raw) {
                             // Core checks whether the point is actually inside
                             // the selection; the toolbar is not the background.
-                            view.queue.borrow_mut().push(UiCommand::FinishCapture {
-                                ticket,
-                                point: Some(point),
-                            });
-                            return;
+                            Some(CapturePressAction::FinishAt(point)) => {
+                                view.queue.borrow_mut().push(UiCommand::FinishCapture {
+                                    ticket,
+                                    point: Some(point),
+                                });
+                            }
+                            Some(CapturePressAction::Drag) => {
+                                let point = view.clamp(raw);
+                                view.drag = Some(DragState::Core);
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::SelectionDragStarted { ticket, point });
+                            }
+                            Some(CapturePressAction::Band) => {
+                                let point = view.clamp(raw);
+                                view.drag = Some(DragState::Band {
+                                    start: point,
+                                    current: point,
+                                });
+                            }
+                            None => {}
                         }
-                        let point = view.clamp(point);
-                        view.drag = Some((point, point));
                         cx.notify();
                     });
                     cx.stop_propagation();
@@ -174,32 +258,56 @@ impl Render for CaptureView {
                 let entity = cx.entity();
                 move |event, _, cx| {
                     entity.update(cx, |view, cx| {
-                        let Some((start, _)) = view.drag else {
-                            return;
-                        };
                         let point = view.clamp(pointer(&event.position));
-                        view.drag = Some((start, point));
-                        cx.notify();
+                        match &mut view.drag {
+                            Some(DragState::Band { current, .. }) => {
+                                *current = point;
+                                // Everything visual reads the view's band; the
+                                // authoritative document changes only on release.
+                                cx.notify();
+                            }
+                            Some(DragState::Core) => {
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::SelectionDragUpdated { ticket, point });
+                            }
+                            None => {}
+                        }
                     });
                 }
             })
             .on_mouse_up(gpui::MouseButton::Left, {
                 let entity = cx.entity();
-                let queue = Rc::clone(&self.queue);
                 move |event, _, cx| {
                     let end = pointer(&event.position);
-                    entity.update(cx, |view, _| {
-                        let Some((start, _)) = view.drag.take() else {
+                    entity.update(cx, |view, cx| {
+                        let Some(drag) = view.drag.take() else {
                             return;
                         };
-                        let end = view.clamp(end);
-                        if let Some(_band) = band(start, end) {
-                            queue.borrow_mut().push(UiCommand::SelectRegion {
-                                ticket,
-                                from: start,
-                                to: end,
-                            });
+                        match drag {
+                            DragState::Band { start, .. } => {
+                                let end = view.clamp(end);
+                                if band(start, end).is_some() {
+                                    view.queue.borrow_mut().push(UiCommand::SelectRegion {
+                                        ticket,
+                                        from: start,
+                                        to: end,
+                                    });
+                                }
+                            }
+                            DragState::Core => {
+                                // Apply the release position before committing, so a
+                                // final mouse-up without a move event is not lost.
+                                let point = view.clamp(end);
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::SelectionDragUpdated { ticket, point });
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::SelectionDragEnded(ticket));
+                            }
                         }
+                        cx.notify();
                     });
                 }
             });
@@ -237,6 +345,20 @@ impl Render for CaptureView {
                         .text_sm()
                         .child(dimensions)
                 }));
+
+            // Eight control points are the visible move/resize affordances; the
+            // same logical centers drive the core hit test.
+            if show_handles && let Some(selection) = self.selection {
+                for handle in RESIZE_HANDLES {
+                    let [x, y] = selection.handle_center(handle).map(|value| value as f32);
+                    root = root.child(
+                        region(x - 4.0, y - 4.0, 8.0, 8.0)
+                            .bg(rgb(0x007aff))
+                            .border_1()
+                            .border_color(rgb(0xffffff)),
+                    );
+                }
+            }
         }
 
         // The hint doubles as the accessible cancel affordance: it is the only

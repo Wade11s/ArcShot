@@ -1,5 +1,5 @@
 //! IMAGE-COMPOSE and IMAGE-LIMIT: physical crop truth and in-memory PNG decode.
-use arcshot_core::{CapturedFrame, PixelRect, ScreenGeometry};
+use arcshot_core::{CapturedFrame, Document, PixelRect, ResizeHandle, ScreenGeometry, Selection};
 use arcshot_image::{ComposeError, ComposedImage, compose_crop, encode_png};
 
 fn frame_with_pixels() -> CapturedFrame {
@@ -100,4 +100,42 @@ fn image_limit_04_composed_surface_rejects_budget_edge_and_length_mismatch() {
         Err(ComposeError::Length)
     );
     assert!(ComposedImage::try_new(1, 1, vec![0; 4]).is_ok());
+}
+
+#[test]
+fn image_compose_04_a_moved_and_resized_selection_crops_the_matching_physical_pixels() {
+    let mut document = Document::new(frame_with_pixels());
+    document
+        .select(Selection::try_new(0.0, 0.0, 1.0, 1.0).unwrap())
+        .unwrap();
+    assert_eq!(
+        document.crop().unwrap(),
+        PixelRect::try_new(0, 0, 2, 2).unwrap()
+    );
+
+    // Move half a logical point right: the shared conversion yields +1 pixel.
+    document.begin_drag([0.5, 0.5]);
+    document.update_drag([1.0, 0.5]);
+    document.end_drag().unwrap();
+    let crop = document.crop().unwrap();
+    assert_eq!(crop, PixelRect::try_new(1, 0, 2, 2).unwrap());
+    let composed = compose_crop(document.frame(), crop).unwrap();
+    assert_eq!(
+        composed.rgba(),
+        &[
+            0x30, 0x0A, 0x02, 0xFF, 0x30, 0x0A, 0x03, 0xFF, //
+            0x30, 0x0B, 0x02, 0xFF, 0x30, 0x0B, 0x03, 0xFF,
+        ]
+    );
+
+    // Resize the bottom-right corner from 1x1 to 1.5x1 logical points.
+    let selection = document.selection().unwrap();
+    document.begin_drag(selection.handle_center(ResizeHandle::BottomRight));
+    document.update_drag([2.0, 1.0]);
+    document.end_drag().unwrap();
+    let crop = document.crop().unwrap();
+    assert_eq!(crop, PixelRect::try_new(1, 0, 3, 2).unwrap());
+    let composed = compose_crop(document.frame(), crop).unwrap();
+    assert_eq!((composed.width(), composed.height()), (3, 2));
+    assert_eq!(&composed.rgba()[0..4], &[0x30, 0x0A, 0x02, 0xFF]);
 }
