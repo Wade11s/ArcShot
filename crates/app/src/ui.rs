@@ -1,7 +1,8 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
 use arcshot_app::{
     CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PermissionAction,
-    PermissionNotice, capture_key_action, capture_press_action,
+    PermissionNotice, ScrollPermissionAction, ScrollPermissionNotice, capture_key_action,
+    capture_press_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
@@ -76,6 +77,14 @@ pub(crate) enum UiCommand {
     },
     /// The toolbar Save button: explicit PNG file output for this attempt.
     SaveCapture(CaptureTicket),
+    /// The toolbar Scroll button: enter Scroll preparation from this selection.
+    EnterScroll(CaptureTicket),
+    /// One Scroll permission notice action.
+    ScrollPermission(WindowId, ScrollPermissionAction),
+    /// The Scroll control window requests cancel.
+    ScrollCancel(CaptureTicket),
+    /// The Scroll control window closed.
+    ScrollControlClosed(WindowId, CaptureTicket),
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
@@ -1071,6 +1080,43 @@ impl Render for CaptureView {
                     .gap_2()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child({
+                        // Scroll entry: enabled with a valid selection. Existing
+                        // annotations are refused by the core with an explicit
+                        // reason; the button never silently drops them.
+                        let queue = Rc::clone(&self.queue);
+                        let a11y_queue = Rc::clone(&self.queue);
+                        let scroll_enabled = frozen && self.selection.is_some() && !busy;
+                        let mut button = div()
+                            .id("scroll-capture")
+                            .role(Role::Button)
+                            .aria_label("进入滚动截图")
+                            .accessibility_id("arcshot.overlay.scroll")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .text_color(rgb(0xffffff))
+                            .bg(if scroll_enabled {
+                                rgb(0x3b465b)
+                            } else {
+                                rgb(0x2a2f3a)
+                            })
+                            .child("滚动");
+                        if scroll_enabled {
+                            button = button
+                                .role(Role::Button)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x52617b)))
+                                .on_click(move |_, _, _| {
+                                    queue.borrow_mut().push(UiCommand::EnterScroll(ticket));
+                                })
+                                .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                                    log::info!("a11y_action=arcshot.overlay.scroll action=Click");
+                                    a11y_queue.borrow_mut().push(UiCommand::EnterScroll(ticket));
+                                });
+                        }
+                        button
+                    })
+                    .child({
                         let queue = Rc::clone(&self.queue);
                         let a11y_queue = Rc::clone(&self.queue);
                         let mut button = div()
@@ -1394,6 +1440,219 @@ impl Render for NoticeView {
             .child(div().text_xl().child(text!(id = "notice-title", title)))
             .child(div().flex_1().child(text!(id = "notice-body", body)))
             .child(buttons)
+    }
+}
+
+/// A button with a custom element id and AX identifier for the Scroll surfaces.
+fn scroll_button(
+    element_id: String,
+    a11y_id: String,
+    label: &'static str,
+    command: UiCommand,
+    queue: &UiQueue,
+) -> impl IntoElement {
+    let click_queue = Rc::clone(queue);
+    let a11y_queue = Rc::clone(queue);
+    div()
+        .id(element_id)
+        .role(Role::Button)
+        .aria_label(label)
+        .accessibility_id(a11y_id.clone())
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(rgb(0x3b465b))
+        .hover(|style| style.bg(rgb(0x52617b)))
+        .child(label)
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+            log::info!("a11y_action={a11y_id} action=Click");
+            a11y_queue.borrow_mut().push(command);
+        })
+}
+
+/// The Scroll permission notice: per-permission purpose, matching settings pane,
+/// recheck and cancel. A successful re-check shows `Ready`; it never auto-starts.
+pub(crate) struct ScrollPermissionView {
+    pub(crate) notice: ScrollPermissionNotice,
+    pub(crate) focus: FocusHandle,
+    pub(crate) queue: UiQueue,
+}
+
+impl Render for ScrollPermissionView {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let window_id = window.window_handle().window_id();
+        let (title, body, missing) = match &self.notice {
+            ScrollPermissionNotice::Missing(missing) => (
+                "滚动截图权限",
+                "滚动截图需要以下权限。请点击对应设置项授权，返回后重新检查，然后再次点击“进入滚动截图”。",
+                Some(missing.clone()),
+            ),
+            ScrollPermissionNotice::Ready => (
+                "滚动截图权限已就绪",
+                "三项权限均已可用。请重新点击“进入滚动截图”开始。",
+                None,
+            ),
+        };
+        let mut rows = div().flex().flex_col().gap_2();
+        if let Some(missing) = missing {
+            for permission in missing {
+                let element_id = format!("scroll-permission-{}", permission.key());
+                let a11y_id = format!("arcshot.scroll.permission.{}", permission.key());
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0xffffff))
+                                        .child(permission.label()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(0x9aa4b5))
+                                        .child(permission.purpose()),
+                                ),
+                        )
+                        .child(scroll_button(
+                            element_id,
+                            a11y_id,
+                            "打开设置",
+                            UiCommand::ScrollPermission(
+                                window_id,
+                                ScrollPermissionAction::OpenSettings(permission),
+                            ),
+                            &self.queue,
+                        )),
+                );
+            }
+        }
+        let mut buttons = div().flex().gap_2();
+        if matches!(self.notice, ScrollPermissionNotice::Missing(_)) {
+            buttons = buttons
+                .child(scroll_button(
+                    "scroll-recheck".to_owned(),
+                    "arcshot.scroll.recheck".to_owned(),
+                    "重新检查",
+                    UiCommand::ScrollPermission(window_id, ScrollPermissionAction::Recheck),
+                    &self.queue,
+                ))
+                .child(scroll_button(
+                    "scroll-cancel".to_owned(),
+                    "arcshot.scroll.cancel".to_owned(),
+                    "取消",
+                    UiCommand::ScrollPermission(window_id, ScrollPermissionAction::Cancel),
+                    &self.queue,
+                ));
+        } else {
+            buttons = buttons.child(scroll_button(
+                "scroll-close".to_owned(),
+                "arcshot.scroll.close".to_owned(),
+                "关闭",
+                UiCommand::ScrollPermission(window_id, ScrollPermissionAction::Cancel),
+                &self.queue,
+            ));
+        }
+        div()
+            .id("scroll-permission-root")
+            .size_full()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .bg(rgb(0x20242b))
+            .text_color(rgb(0xffffff))
+            .text_size(px(15.0))
+            .role(Role::Group)
+            .aria_label("ArcShot 滚动截图权限")
+            .track_focus(&self.focus)
+            .on_key_down({
+                let queue = Rc::clone(&self.queue);
+                move |event, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        queue.borrow_mut().push(UiCommand::ScrollPermission(
+                            window_id,
+                            ScrollPermissionAction::Cancel,
+                        ));
+                        cx.stop_propagation();
+                    }
+                }
+            })
+            .child(
+                div()
+                    .text_xl()
+                    .child(text!(id = "scroll-permission-title", title)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(text!(id = "scroll-permission-body", body)),
+            )
+            .child(rows)
+            .child(buttons)
+    }
+}
+
+/// The minimal Scroll control UI that stays visible during preparation and is
+/// part of the fixed own-window exclusion set. It never claims "可以滚动": the
+/// input handshake and trusted first frame are later slices.
+pub(crate) struct ScrollControlView {
+    pub(crate) status: &'static str,
+    pub(crate) ticket: CaptureTicket,
+    pub(crate) focus: FocusHandle,
+    pub(crate) queue: UiQueue,
+}
+
+impl Render for ScrollControlView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let ticket = self.ticket;
+        let queue = Rc::clone(&self.queue);
+        div()
+            .id("scroll-control")
+            .role(Role::Group)
+            .aria_label("ArcShot 滚动截图控制")
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_3()
+            .px_5()
+            .py_4()
+            .rounded_lg()
+            .bg(rgba(0x20242bee))
+            .track_focus(&self.focus)
+            .on_key_down(move |event, _, cx| {
+                if event.keystroke.key == "escape" {
+                    queue.borrow_mut().push(UiCommand::ScrollCancel(ticket));
+                    cx.stop_propagation();
+                }
+            })
+            .child(
+                div()
+                    .id("scroll-status")
+                    .role(Role::Label)
+                    .aria_label(self.status)
+                    .accessibility_id("arcshot.scroll.status")
+                    .text_color(rgb(0xffffff))
+                    .text_sm()
+                    .child(self.status),
+            )
+            .child(scroll_button(
+                "scroll-control-cancel".to_owned(),
+                "arcshot.scroll.control.cancel".to_owned(),
+                "取消",
+                UiCommand::ScrollCancel(ticket),
+                &self.queue,
+            ))
     }
 }
 

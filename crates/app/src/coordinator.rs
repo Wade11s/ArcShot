@@ -1,19 +1,24 @@
 //! Connects the authoritative session to safe native operations and GPUI windows.
 use crate::{
     MenuBarGlobal,
-    ui::{CaptureView, HotkeyView, NoticeView, OverlayPreview, UiCommand, UiQueue},
+    ui::{
+        CaptureView, HotkeyView, NoticeView, OverlayPreview, ScrollControlView,
+        ScrollPermissionView, UiCommand, UiQueue,
+    },
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, DensityWriteOutcome, GuideHistory, HotkeyAction,
     HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError,
     OutputTasks, PendingSave, PermissionAction, PermissionEffect, PermissionFlow,
-    PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice, encode_document,
+    PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice,
+    ScrollPermissionAction, ScrollPermissionEffect, ScrollPermissionFlow, ScrollPermissionNotice,
+    ScrollTargetTasks, encode_document,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CaptureAction, CaptureEffect,
     CaptureFailure, CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, Density, Document,
     FrameError, LineStyle, OutputFailure, OutputJob, PixelRect, RectangleStyle, SavePanelResult,
-    ScreenGeometry, Tool,
+    ScreenGeometry, ScrollPhase, ScrollRefusal, ScrollTargetError, ScrollWindowError, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -32,10 +37,16 @@ use std::{
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// Allows the preparing window to be registered before exact native window matching.
 const PREPARE_SETTLE: Duration = Duration::from_millis(80);
+/// Allows the Scroll control window to register before the exclusion set is fixed.
+const SCROLL_WINDOW_SETTLE: Duration = Duration::from_millis(80);
 /// Heading of a capture failure notice; it is not a settings problem.
 const CAPTURE_ERROR_HEADING: &str = "无法继续截图";
 /// Heading of a menu-preference failure notice; neutral to the failing setting.
 const PREFERENCE_ERROR_HEADING: &str = "无法更新偏好设置";
+/// Control status after native preparation; it never claims "可以滚动".
+const SCROLL_PREPARED_STATUS: &str = "滚动截图已准备";
+/// Control status while preparation is running.
+const SCROLL_PREPARING_STATUS: &str = "正在准备滚动截图…";
 
 struct Coordinator {
     session: CaptureSession,
@@ -68,6 +79,21 @@ struct Coordinator {
     settings_departed: bool,
     visiting_settings: bool,
     preview: PreviewSync,
+    /// Scroll-only permission notice policy and its window.
+    scroll_permissions: ScrollPermissionFlow,
+    scroll_notice: Option<WindowHandle<ScrollPermissionView>>,
+    /// The minimal control UI that stays visible during Scroll preparation.
+    scroll_control: Option<WindowHandle<ScrollControlView>>,
+    /// Bounded worker for the Scroll target probe.
+    scroll_target_tasks: ScrollTargetTasks,
+    /// Deferred own-window exclusion probe; gives the control window time to register.
+    pending_scroll_exclusion: Option<(CaptureTicket, Instant)>,
+    /// Region overlay to restore when a Scroll permission notice closes.
+    scroll_restore: Option<CaptureTicket>,
+    /// The fixed exclusion set for the current Scroll preparation.
+    scroll_exclusion: Vec<u32>,
+    scroll_visiting_settings: bool,
+    scroll_settings_departed: bool,
 }
 
 /// One composed selection key: the fenced crop and its annotation snapshot.
@@ -128,6 +154,15 @@ pub(crate) fn launch(cx: &mut App) {
         settings_departed: false,
         visiting_settings: false,
         preview: PreviewSync::default(),
+        scroll_permissions: ScrollPermissionFlow::default(),
+        scroll_notice: None,
+        scroll_control: None,
+        scroll_target_tasks: ScrollTargetTasks::default(),
+        pending_scroll_exclusion: None,
+        scroll_restore: None,
+        scroll_exclusion: Vec::new(),
+        scroll_visiting_settings: false,
+        scroll_settings_departed: false,
     });
     coordinator.update(cx, |state, cx| {
         state
@@ -175,6 +210,7 @@ impl Coordinator {
                     self.open_hotkey_settings(cx);
                 }
                 MenuCommand::ScreenRecordingPermissions if !self.busy() => {
+                    self.close_scroll_ui(cx);
                     self.action(CaptureAction::Cancel, cx);
                     self.permission(PermissionAction::Check, cx);
                 }
@@ -263,6 +299,36 @@ impl Coordinator {
                         self.action(CaptureAction::Save { ticket }, cx);
                     }
                 }
+                UiCommand::EnterScroll(ticket) => {
+                    if self.session.may_present(ticket) {
+                        self.overlay_error = None;
+                        self.action(CaptureAction::EnterScroll { ticket }, cx);
+                    }
+                }
+                UiCommand::ScrollPermission(window_id, action)
+                    if self
+                        .scroll_notice
+                        .is_some_and(|notice| notice.window_id() == window_id) =>
+                {
+                    self.scroll_permission(action, cx);
+                }
+                UiCommand::ScrollCancel(ticket) => {
+                    if self.session.scroll_phase() != ScrollPhase::Inactive {
+                        self.close_scroll_control(cx);
+                        self.action(CaptureAction::CancelScroll { ticket }, cx);
+                    }
+                }
+                UiCommand::ScrollControlClosed(window_id, ticket) => {
+                    if self
+                        .scroll_control
+                        .is_some_and(|control| control.window_id() == window_id)
+                    {
+                        self.close_scroll_control(cx);
+                        if self.session.scroll_phase() != ScrollPhase::Inactive {
+                            self.action(CaptureAction::CancelScroll { ticket }, cx);
+                        }
+                    }
+                }
                 UiCommand::Permission(window_id, action)
                     if !self.busy()
                         && self
@@ -333,6 +399,54 @@ impl Coordinator {
                 self.permission(PermissionAction::ReturnedFromSettings, cx);
             }
         }
+        // The Scroll permission flow has its own Settings-return detection: a
+        // successful re-check never auto-starts Scroll, it only updates the notice.
+        if self.scroll_visiting_settings && self.session.scroll_phase() != ScrollPhase::Inactive {
+            if !native::application_active() {
+                self.scroll_settings_departed = true;
+            }
+            if self.scroll_settings_departed && native::application_active() {
+                self.scroll_visiting_settings = false;
+                self.scroll_permission(ScrollPermissionAction::ReturnedFromSettings, cx);
+            }
+        }
+        if let Some((ticket, ready)) = self.pending_scroll_exclusion
+            && Instant::now() >= ready
+        {
+            self.pending_scroll_exclusion = None;
+            if self.session.scroll_phase() == ScrollPhase::PreparingWindows {
+                let result = native::scroll_exclusion_set();
+                self.action(CaptureAction::ScrollWindowsPrepared { ticket, result }, cx);
+            }
+        }
+        if let Some((ticket, result)) = self.scroll_target_tasks.poll(Instant::now()) {
+            match &result {
+                Ok(target) => log::info!(
+                    "scroll_target window_id={} owner={} frame=[{},{},{},{}]",
+                    target.window_id,
+                    target.owner,
+                    target.frame.x,
+                    target.frame.y,
+                    target.frame.width,
+                    target.frame.height
+                ),
+                Err(error) => log::info!("scroll_target_failure reason={error:?}"),
+            }
+            match result {
+                Err(ScrollTargetError::NativeUncertain) => {
+                    self.action(CaptureAction::ScrollNativeUncertain { ticket }, cx);
+                }
+                other => {
+                    self.action(
+                        CaptureAction::ScrollTargetIdentified {
+                            ticket,
+                            result: other,
+                        },
+                        cx,
+                    );
+                }
+            }
+        }
         if let Some((ticket, ready)) = self.pending
             && Instant::now() >= ready
         {
@@ -378,10 +492,20 @@ impl Coordinator {
                 self.action(CaptureAction::DisplayInvalidated, cx);
             }
         }
+        // A cancelled or invalidated session must not leave a Scroll control
+        // window behind. A permission notice or a deferred restore owns the
+        // screen and keeps its own window.
+        if self.session.scroll_phase() == ScrollPhase::Inactive
+            && self.scroll_restore.is_none()
+            && self.scroll_permissions.notice().is_none()
+        {
+            self.close_scroll_control(cx);
+        }
     }
 
     /// The shared entry for the menu command and the global hotkey.
     fn start_capture(&mut self, cx: &mut Context<Self>) {
+        self.close_scroll_ui(cx);
         self.permission(PermissionAction::Cancel, cx);
         self.started = Some(Instant::now());
         self.action(CaptureAction::Start, cx);
@@ -682,10 +806,15 @@ impl Coordinator {
                 | CaptureAction::DeselectSelected { .. }
         );
         let before = self.session.phase();
+        let scroll_before = self.session.scroll_phase();
         let effects: VecDeque<_> = self.session.dispatch(action).into();
         let after = self.session.phase();
+        let scroll_after = self.session.scroll_phase();
         if after != before {
             log::info!("capture_phase from={before:?} to={after:?} action={name}");
+        }
+        if scroll_after != scroll_before {
+            log::info!("scroll_phase from={scroll_before:?} to={scroll_after:?} action={name}");
         }
         if edits && let Some(document) = self.session.document() {
             // Text-only edit diagnostics: version, geometry and style, never pixels.
@@ -740,7 +869,14 @@ impl Coordinator {
                         self.pending = Some((ticket, Instant::now() + PREPARE_SETTLE));
                     }
                 }
-                CaptureEffect::PresentFrozen(ticket) => self.prepare_preview(ticket, cx),
+                CaptureEffect::PresentFrozen(ticket) => {
+                    if self.scroll_restore.take() == Some(ticket) {
+                        // A Scroll permission notice owns the screen; the region
+                        // overlay is restored when that notice closes.
+                    } else {
+                        self.prepare_preview(ticket, cx);
+                    }
+                }
                 CaptureEffect::DismissOverlay => {
                     self.preview_task = None;
                     self.end_pending_save();
@@ -750,6 +886,11 @@ impl Coordinator {
                     self.permission(PermissionAction::Unavailable, cx)
                 }
                 CaptureEffect::ReportFailure(error) => {
+                    if matches!(error, CaptureFailure::DisplayInvalid) {
+                        // Display loss cancels the whole session; no Scroll UI
+                        // may outlive it.
+                        self.close_scroll_ui(cx);
+                    }
                     let message = if error.requires_relaunch() {
                         "原生捕获状态无法确认。已禁止输出和再次截图，请退出并重新打开 ArcShot。"
                     } else {
@@ -820,6 +961,37 @@ impl Coordinator {
                 CaptureEffect::ReportOutputFailure(error) => {
                     log::error!("output_failure={error}");
                     self.overlay_error = Some(error.to_string());
+                }
+                CaptureEffect::CheckScrollPermissions(ticket) => {
+                    self.check_scroll_permissions(ticket, cx);
+                }
+                CaptureEffect::IdentifyScrollTarget(ticket) => {
+                    self.identify_scroll_target(ticket, cx);
+                }
+                CaptureEffect::PrepareScrollWindows(ticket) => {
+                    // Give the control window time to register before the exact
+                    // own-window set is fixed and mapped.
+                    self.pending_scroll_exclusion =
+                        Some((ticket, Instant::now() + SCROLL_WINDOW_SETTLE));
+                }
+                CaptureEffect::ScrollPrepared(ticket) => {
+                    self.scroll_exclusion = self.session.scroll_exclusion().unwrap_or(&[]).to_vec();
+                    self.update_scroll_control_status(SCROLL_PREPARED_STATUS, cx);
+                    log::info!(
+                        "scroll_prepared ticket={ticket:?} exclusion={}",
+                        self.scroll_exclusion.len()
+                    );
+                }
+                CaptureEffect::ScrollRefused(ticket, refusal) => {
+                    self.handle_scroll_refusal(ticket, refusal, cx);
+                }
+                CaptureEffect::ScrollRelaunchRequired => {
+                    self.close_scroll_ui(cx);
+                    self.show_error(
+                        "原生捕获状态无法确认。已禁止输出和再次截图，请退出并重新打开 ArcShot。"
+                            .into(),
+                        cx,
+                    );
                 }
             }
         }
@@ -1199,6 +1371,283 @@ impl Coordinator {
         }
     }
 
+    /// Reads the real three-permission Scroll preflight and advances the session.
+    fn check_scroll_permissions(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        // The control UI is the only owned window allowed to stay visible during
+        // preparation; it joins the exclusion set fixed later.
+        self.open_scroll_control(ticket, cx);
+        let available = native::scroll_permissions();
+        self.log_scroll_permissions(available);
+        self.action(
+            CaptureAction::ScrollPermissionsChecked { ticket, available },
+            cx,
+        );
+        // The notice flow mirrors the same real result for the user-facing window.
+        // The initial check only shows a notice when something is missing; a
+        // fully available initial check proceeds silently to target identification.
+        let _ = self
+            .scroll_permissions
+            .dispatch(ScrollPermissionAction::Checked(available));
+        if matches!(
+            self.scroll_permissions.notice(),
+            Some(ScrollPermissionNotice::Missing(_))
+        ) {
+            self.sync_scroll_notice(cx);
+        } else {
+            self.close_scroll_notice(cx);
+        }
+    }
+
+    /// Logs the preflight without attributing a TCC denial reason.
+    fn log_scroll_permissions(&self, available: arcshot_core::ScrollPermissions) {
+        let missing = available.missing();
+        let missing = if missing.is_empty() {
+            "none".to_owned()
+        } else {
+            missing
+                .iter()
+                .map(|permission| permission.key())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        log::info!(
+            "scroll_permission screen_recording={} input_monitoring={} accessibility={} missing={}",
+            available.screen_recording,
+            available.input_monitoring,
+            available.accessibility,
+            missing
+        );
+    }
+
+    /// Submits the bounded target probe; no AppKit object crosses the worker.
+    fn identify_scroll_target(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        let Some(selection) = self.session.scroll_selection() else {
+            return;
+        };
+        let Ok(display) = native::builtin_display() else {
+            self.action(CaptureAction::DisplayInvalidated, cx);
+            return;
+        };
+        let Some(pointer) = native::pointer_location_cg(display) else {
+            self.action(CaptureAction::ScrollNativeUncertain { ticket }, cx);
+            return;
+        };
+        let Some(frontmost_pid) = native::frontmost_pid() else {
+            self.action(CaptureAction::ScrollNativeUncertain { ticket }, cx);
+            return;
+        };
+        let submitted = self
+            .scroll_target_tasks
+            .submit(ticket, Instant::now(), move || {
+                native::probe_scroll_target(selection, display, pointer, frontmost_pid)
+            });
+        if submitted.is_err() {
+            // A busy gate or an unstartable worker leaves native state unconfirmed.
+            self.action(CaptureAction::ScrollNativeUncertain { ticket }, cx);
+        }
+    }
+
+    /// Handles one known-state Scroll refusal: keep the region session, no output.
+    ///
+    /// Target and window refusals restore the frozen overlay immediately and
+    /// surface the reason inside it. A permission refusal shows the notice first
+    /// and restores the overlay when that notice closes, so the app never exposes
+    /// two windows at once.
+    fn handle_scroll_refusal(
+        &mut self,
+        ticket: CaptureTicket,
+        refusal: ScrollRefusal,
+        cx: &mut Context<Self>,
+    ) {
+        log::info!("scroll_refused reason={}", scroll_refusal_reason(&refusal));
+        self.close_scroll_control(cx);
+        match &refusal {
+            ScrollRefusal::Permissions(_) => {
+                self.scroll_restore = Some(ticket);
+                self.sync_scroll_notice(cx);
+            }
+            _ => {
+                self.overlay_error = Some(scroll_refusal_message(&refusal).to_owned());
+            }
+        }
+    }
+
+    /// Drives the Scroll permission notice policy and its native effects.
+    fn scroll_permission(&mut self, action: ScrollPermissionAction, cx: &mut Context<Self>) {
+        if matches!(action, ScrollPermissionAction::Cancel) {
+            self.scroll_visiting_settings = false;
+            self.scroll_settings_departed = false;
+            // A permission refusal deferred the region overlay; the notice
+            // closing is the point where the selection becomes visible again.
+            if let Some(ticket) = self.scroll_restore.take() {
+                self.prepare_preview(ticket, cx);
+            }
+        }
+        let effects = self.scroll_permissions.dispatch(action);
+        let mut open_settings = None;
+        for effect in effects {
+            match effect {
+                ScrollPermissionEffect::Preflight => {
+                    let available = native::scroll_permissions();
+                    self.log_scroll_permissions(available);
+                    let _ = self
+                        .scroll_permissions
+                        .dispatch(ScrollPermissionAction::Checked(available));
+                }
+                ScrollPermissionEffect::OpenSettings(permission) => {
+                    open_settings = Some(permission);
+                }
+                ScrollPermissionEffect::ShowNotice(_) => {}
+            }
+        }
+        self.sync_scroll_notice(cx);
+        if let Some(permission) = open_settings {
+            // Open after constructing our notice, so we do not steal focus back
+            // from System Settings and mistake that for a user return.
+            match native::open_scroll_permission_settings(permission) {
+                Ok(()) => {
+                    self.scroll_visiting_settings = true;
+                    self.scroll_settings_departed = false;
+                }
+                Err(error) => self.show_error(format!("无法打开系统设置：{error}"), cx),
+            }
+        }
+    }
+
+    /// Opens, updates or closes the Scroll permission notice from the flow state.
+    fn sync_scroll_notice(&mut self, cx: &mut Context<Self>) {
+        let notice = self.scroll_permissions.notice().cloned();
+        match notice {
+            Some(notice) => {
+                let updated = self.scroll_notice.as_ref().and_then(|handle| {
+                    handle
+                        .update(cx, |view, _, cx| {
+                            view.notice = notice.clone();
+                            cx.notify();
+                        })
+                        .ok()
+                });
+                if updated.is_none() {
+                    self.open_scroll_notice(notice, cx);
+                }
+            }
+            None => self.close_scroll_notice(cx),
+        }
+    }
+
+    fn open_scroll_notice(&mut self, notice: ScrollPermissionNotice, cx: &mut Context<Self>) {
+        let queue = Rc::clone(&self.queue);
+        let bounds = WindowBounds::centered(size(px(560.0), px(300.0)), cx);
+        let result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(bounds),
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let close_queue = Rc::clone(&queue);
+                let window_id = window.window_handle().window_id();
+                window.on_window_should_close(cx, move |_, _| {
+                    close_queue.borrow_mut().push(UiCommand::ScrollPermission(
+                        window_id,
+                        ScrollPermissionAction::Cancel,
+                    ));
+                    true
+                });
+                let focus = cx.focus_handle();
+                cx.new(|_| ScrollPermissionView {
+                    notice,
+                    focus: focus.clone(),
+                    queue,
+                })
+            },
+        );
+        match result {
+            Ok(handle) => {
+                self.scroll_notice = Some(handle);
+                cx.activate(true);
+            }
+            Err(error) => log::error!("scroll_notice_window_failure={error}"),
+        }
+    }
+
+    fn close_scroll_notice(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.scroll_notice.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    /// Opens the minimal control UI that stays visible during preparation.
+    fn open_scroll_control(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        if self.scroll_control.is_some() {
+            return;
+        }
+        let queue = Rc::clone(&self.queue);
+        let bounds = WindowBounds::centered(size(px(320.0), px(110.0)), cx);
+        let result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(bounds),
+                kind: WindowKind::PopUp,
+                titlebar: None,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let close_queue = Rc::clone(&queue);
+                let window_id = window.window_handle().window_id();
+                window.on_window_should_close(cx, move |_, _| {
+                    close_queue
+                        .borrow_mut()
+                        .push(UiCommand::ScrollControlClosed(window_id, ticket));
+                    true
+                });
+                let focus = cx.focus_handle();
+                cx.new(|_| ScrollControlView {
+                    status: SCROLL_PREPARING_STATUS,
+                    ticket,
+                    focus: focus.clone(),
+                    queue,
+                })
+            },
+        );
+        match result {
+            Ok(handle) => {
+                self.scroll_control = Some(handle);
+                cx.activate(true);
+            }
+            Err(error) => log::error!("scroll_control_window_failure={error}"),
+        }
+    }
+
+    fn close_scroll_control(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.scroll_control.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    /// Closes every Scroll-owned window; the region session is untouched.
+    fn close_scroll_ui(&mut self, cx: &mut Context<Self>) {
+        self.close_scroll_control(cx);
+        self.close_scroll_notice(cx);
+    }
+
+    fn update_scroll_control_status(&mut self, status: &'static str, cx: &mut Context<Self>) {
+        let updated = self.scroll_control.as_ref().and_then(|handle| {
+            handle
+                .update(cx, |view, _, cx| {
+                    view.status = status;
+                    cx.notify();
+                })
+                .ok()
+        });
+        if updated.is_none() {
+            self.scroll_control = None;
+        }
+    }
+
     fn open_preparing(
         &mut self,
         ticket: CaptureTicket,
@@ -1471,6 +1920,60 @@ fn format_style(style: AnnotationStyle) -> String {
     }
 }
 
+/// Content-free diagnostic label for one Scroll refusal; no window titles.
+fn scroll_refusal_reason(refusal: &ScrollRefusal) -> String {
+    match refusal {
+        ScrollRefusal::NoSelection => "NoSelection".to_owned(),
+        ScrollRefusal::AnnotationsPresent => "AnnotationsPresent".to_owned(),
+        ScrollRefusal::Permissions(missing) => format!(
+            "Permissions missing={}",
+            missing
+                .iter()
+                .map(|permission| permission.key())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        ScrollRefusal::Target(error) => format!("Target {error:?}"),
+        ScrollRefusal::Windows(error) => format!("Windows {error:?}"),
+    }
+}
+
+/// User-facing text for a known-state Scroll refusal; permissions use the notice.
+fn scroll_refusal_message(refusal: &ScrollRefusal) -> &'static str {
+    match refusal {
+        ScrollRefusal::NoSelection => "没有有效选区，无法进入滚动截图。",
+        ScrollRefusal::AnnotationsPresent => {
+            "当前选区已有标注。请先撤销或删除全部标注，再进入滚动截图。"
+        }
+        ScrollRefusal::Permissions(_) => "滚动截图权限尚不可用。",
+        ScrollRefusal::Target(ScrollTargetError::NoTarget) => {
+            "选区不在任何可识别的目标窗口内，无法开始滚动截图。"
+        }
+        ScrollRefusal::Target(ScrollTargetError::AmbiguousTarget) => {
+            "选区跨越多个窗口，无法确定唯一目标。"
+        }
+        ScrollRefusal::Target(ScrollTargetError::Offscreen) => "目标窗口不在屏幕上。",
+        ScrollRefusal::Target(ScrollTargetError::NotFrontmost) => {
+            "目标应用未在前台，请先切换到目标窗口。"
+        }
+        ScrollRefusal::Target(ScrollTargetError::PointerMismatch) => {
+            "指针下的窗口与目标不一致，请将指针移到目标窗口内。"
+        }
+        ScrollRefusal::Target(ScrollTargetError::Geometry) => "目标几何无法确认。",
+        ScrollRefusal::Target(ScrollTargetError::NativeUncertain)
+        | ScrollRefusal::Target(ScrollTargetError::NotMainThread) => {
+            "无法确认目标窗口的公开状态，未产生输出。"
+        }
+        ScrollRefusal::Windows(ScrollWindowError::MappingFailed) => {
+            "无法排除 ArcShot 自有窗口，未开始滚动截图。"
+        }
+        ScrollRefusal::Windows(ScrollWindowError::NativeUncertain)
+        | ScrollRefusal::Windows(ScrollWindowError::NotMainThread) => {
+            "无法确认自有窗口的公开状态，未产生输出。"
+        }
+    }
+}
+
 fn classify_native_failure(error: &native::CaptureError) -> CaptureFailure {
     match error {
         native::CaptureError::Display => CaptureFailure::DisplayInvalid,
@@ -1530,6 +2033,12 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::Finish { .. } => "Finish",
         CaptureAction::FinishAt { .. } => "FinishAt",
         CaptureAction::OutputCompleted { .. } => "OutputCompleted",
+        CaptureAction::EnterScroll { .. } => "EnterScroll",
+        CaptureAction::ScrollPermissionsChecked { .. } => "ScrollPermissionsChecked",
+        CaptureAction::ScrollTargetIdentified { .. } => "ScrollTargetIdentified",
+        CaptureAction::ScrollWindowsPrepared { .. } => "ScrollWindowsPrepared",
+        CaptureAction::CancelScroll { .. } => "CancelScroll",
+        CaptureAction::ScrollNativeUncertain { .. } => "ScrollNativeUncertain",
     }
 }
 

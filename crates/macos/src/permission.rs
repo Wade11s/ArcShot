@@ -47,7 +47,15 @@ impl Error for PermissionError {}
 /// # Errors
 /// Returns an error if the URL cannot be constructed or the system refuses to open it.
 pub fn open_screen_recording_settings() -> Result<(), PermissionError> {
-    let url = NSURL::URLWithString(&NSString::from_str(SETTINGS_URL)).ok_or(PermissionError)?;
+    open_settings_url(SETTINGS_URL)
+}
+
+/// Opens one System Settings pane URL; shared by the Region and Scroll flows.
+///
+/// # Errors
+/// Returns an error if the URL cannot be constructed or the system refuses to open it.
+pub(crate) fn open_settings_url(url: &str) -> Result<(), PermissionError> {
+    let url = NSURL::URLWithString(&NSString::from_str(url)).ok_or(PermissionError)?;
     if NSWorkspace::sharedWorkspace().openURL(&url) {
         Ok(())
     } else {

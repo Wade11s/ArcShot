@@ -255,6 +255,24 @@ GPUI tooltip/`aria_description`，`--headed` 坐标拖拽不能作为验收证�
 实测记录见 `docs/validation/30-sound-login.md`。完成音效的关闭状态只证明
 “不产生音效副作用”，真实静音效果与系统音量属于实机观感项。
 
+### #31 的稳定自动化入口
+
+滚动入口、三权限与目标准备只覆盖已确认接缝：core 的入口闸门/三权限矩阵/目标锁定/
+自有窗口排除集/失败分级，app 的注入式权限通知策略与有界目标探测，以及原生的三权限
+预检、公开 hit-test 目标识别与自有窗口映射。真实 TCC 切换、目标应用前台/指针
+hit-test 的实机时序与滚动采样/预览保持 **Not tested**（见 §4.4）。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/scroll.rs` | CORE-SESSION-28～43：无选区拒绝、已有标注拒启且不丢弃、沿用唯一选区进入三权限预检、缺失权限停止并保留区域会话、三权限通过进入目标识别、目标必须完整包含选区、已知目标失败分级、自有窗口映射失败拒绝、成功准备固定排除集、取消保留选区、原生不确定终态禁止重启、内屏失效取消整会话、热键重启放弃准备、过期动作不影响新尝试、三权限用途/键序 | 真实 TCC/SCK/窗口/指针 hit-test |
+| `crates/app/tests/scroll_flow.rs` | APP-EFFECT-38～41：缺失权限提供用途/设置/重检/取消；重检不自动启动；取消清除通知与设置等待；Ready 通知不产生启动副作用 | 真实 TCC 切换与系统设置返回时序 |
+| `crates/app/tests/scroll_target_tasks.rs` | APP-ASYNC-10～12：绝对期限独立于 SCK；已知目标失败可重试；单在途闸门只在一个已知结果后重开 | 真实 SCK 查询内容与窗口枚举 |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-24：入口在无选区时不可激活；以 `--headed` 拖拽作为前置创建选区；AX 激活入口后出现 `scroll_permission` 诊断；目标识别产生 `scroll_target`/`scroll_refused` 诊断；区域会话与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）、目标锁定成功后的控制窗与 `scroll_prepared` |
+
+实测记录见 `docs/validation/31-scroll-entry.md`。滚动入口的 `arcshot.overlay.scroll`
+AX 标识已落地；权限通知与滚动控制窗的 AX 标识由 APP-EFFECT 与 UI 代码守护，
+本机三项权限均已授权，因此 MAC-PERMISSION 的缺失通知分支保持 **Not tested**。
+
 ### #29 的稳定自动化入口
 
 选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
@@ -380,6 +398,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
 | MAC-E2E-22 | 读启动日志 `preferences_launch density=`；冻结后保持 Rectangle 与一个已改样式；状态菜单点击 选项密度 两次并重启一次 | 每次出现 `option_density density=… persisted=true`；工具坞 `arcshot.overlay.density` 的 AX `value` 变为对应密度；`arcshot.overlay.option.rectangle.*` 仍可寻址、工具与样式保持；重启后 `preferences_launch density=` 等于切换值；结束时还原用户原值 | 密度图标/间距的像素观感、悬停收起延迟、键盘单独访问选项 |
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
+| MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `drag --from-xy 400,300 --to-xy 700,500 --headed` 作为前置创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；拖拽后出现 `capture_edit action=SelectRegion` 与 `selection=Some([…])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared`；`--headed` 拖拽只是选区前置，不作为指针手势的验收证据 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -428,6 +447,18 @@ agent-desktop press escape --headed
   （`Compact` / `Standard`），状态菜单切换另写一行
   `option_density density=… persisted=true`，启动时写 `preferences_launch density=…`。
   `agent-desktop` 不暴露 NSMenuItem 勾选状态，因此工具坞属性是唯一可驱动的密度断言。
+- 已落地（#31）：滚动入口 `arcshot.overlay.scroll` 始终以 `button` 可寻址；无选区时
+  不注册 `on_a11y_action`，点击返回 `POLICY_DENIED`；有选区时 AX 点击写一行
+  `a11y_action=arcshot.overlay.scroll action=Click`。三权限预检写一行
+  `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；
+  目标锁定写 `scroll_target window_id=… owner=… frame=[…]`，失败写
+  `scroll_target_failure reason=…` 与 `scroll_refused reason=…`；相位写
+  `scroll_phase from=… to=… action=…`。权限通知与滚动控制窗的 AX 标识
+  （`arcshot.scroll.permission.*`、`arcshot.scroll.recheck`、`arcshot.scroll.cancel`、
+  `arcshot.scroll.close`、`arcshot.scroll.status`、`arcshot.scroll.control.cancel`）已落地，
+  但本机三项权限均已授权，缺失通知分支不能由 E2E 驱动，保持 **Not tested**。
+  滚动入口的选区前置由 `--headed` 拖拽创建（`capture_edit action=SelectRegion`
+  证明），拖拽只是前置，不作为指针手势的验收证据。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
@@ -466,13 +497,13 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | 稳定用例组 | 实机范围 | 本轮 `agent-desktop` 可行性 |
 | --- | --- | --- |
 | MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、两个偏好项与完成音效跨重启见 §4.3（MAC-E2E-01/15/16/17），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
-| MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；TCC 授权与设置返回属 §4.4 |
+| MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；Scroll 三权限预检诊断与入口闸门见 MAC-E2E-24；本机三项权限均已授权，缺失通知/设置返回重检/运行中失效属 §4.4，保持 **Not tested** |
 | MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
 | MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分：五个工具与矩形/直线/箭头样式选项、模糊三档可 AX 驱动；绘制、对象命中与端点拖动仍无 AX 节点 |
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层尚未实现，落地时须补 AX 标注 |
-| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 否：双击/拖拽只能靠 `--headed` 坐标；单帧与 Esc 可用 AX 动作表达 |
+| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分：入口/三权限/目标识别与拒绝子流程已落地；目标识别的公开 hit-test 与前台交叉核对在本机返回 `AmbiguousTarget`（多个窗口包含选区），锁定成功、输入握手与滚动采样属 #32/#33，保持 **Not tested** |
 | MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖视觉结果，需 `screenshot` 或人工（§4.4） |
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |

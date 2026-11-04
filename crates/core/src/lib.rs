@@ -5,6 +5,7 @@ mod density;
 mod document;
 mod frame;
 mod hotkey;
+mod scroll;
 mod session;
 
 pub use annotation::{
@@ -18,6 +19,10 @@ pub use document::{
 };
 pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry};
 pub use hotkey::Hotkey;
+pub use scroll::{
+    ScrollPermission, ScrollPermissions, ScrollPhase, ScrollPrepOutcome, ScrollPreparation,
+    ScrollRefusal, ScrollTarget, ScrollTargetError, ScrollTargetFrame, ScrollWindowError,
+};
 pub use session::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
     OutputFailure, OutputJob, OutputTarget, SavePanelResult,

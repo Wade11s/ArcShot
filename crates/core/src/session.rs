@@ -2,6 +2,10 @@
 use crate::{
     Annotation, ArrowOption, BlurOption, CapturedFrame, Density, Document, LineOption, PixelRect,
     RectangleOption, Selection, Tool,
+    scroll::{
+        ScrollPermissions, ScrollPhase, ScrollPrepOutcome, ScrollPreparation, ScrollRefusal,
+        ScrollTarget, ScrollTargetError, ScrollWindowError,
+    },
 };
 use std::{error::Error, fmt};
 
@@ -168,6 +172,48 @@ pub enum CaptureAction {
         /// `Ok` only after the clipboard reported success.
         result: Result<(), OutputFailure>,
     },
+    /// Enters Scroll preparation from the current frozen selection (I-11 step 1).
+    ///
+    /// The selection is reused verbatim: no re-framing, no new capture and no
+    /// automatic scroll-to-top. A missing selection or existing annotations
+    /// refuses without output.
+    EnterScroll {
+        /// Attempt whose frozen overlay produced the entry.
+        ticket: CaptureTicket,
+    },
+    /// Reports the real three-permission Scroll preflight.
+    ScrollPermissionsChecked {
+        /// Preparation that requested the check.
+        ticket: CaptureTicket,
+        /// Actual results, never the user's intended setting.
+        available: ScrollPermissions,
+    },
+    /// Reports the identified target window, or a classified identification failure.
+    ScrollTargetIdentified {
+        /// Preparation that requested the target.
+        ticket: CaptureTicket,
+        /// Locked public identity, or a known-state failure.
+        result: Result<ScrollTarget, ScrollTargetError>,
+    },
+    /// Reports the fixed own-window exclusion set, or a mapping failure.
+    ScrollWindowsPrepared {
+        /// Preparation that requested the exclusion set.
+        ticket: CaptureTicket,
+        /// Mapped public window IDs, or a known-state failure.
+        result: Result<Vec<u32>, ScrollWindowError>,
+    },
+    /// Cancels Scroll preparation and keeps the region selection (I-11 step 10).
+    CancelScroll {
+        /// Preparation to cancel.
+        ticket: CaptureTicket,
+    },
+    /// A Scroll native request's state could not be confirmed (I-12).
+    ///
+    /// This is terminal: no output, no partial result and no in-session restart.
+    ScrollNativeUncertain {
+        /// Preparation whose native state is uncertain.
+        ticket: CaptureTicket,
+    },
     /// Invalidates the built-in screen; never migrates to another display.
     DisplayInvalidated,
 }
@@ -195,6 +241,18 @@ pub enum CaptureEffect {
     PlayCompletionSound,
     /// Report an output failure without discarding the document.
     ReportOutputFailure(OutputFailure),
+    /// Preflight the three Scroll-only permissions.
+    CheckScrollPermissions(CaptureTicket),
+    /// Identify and lock the single target window for the frozen selection.
+    IdentifyScrollTarget(CaptureTicket),
+    /// Fix ArcShot's own visible window set and map it to one exclusion array.
+    PrepareScrollWindows(CaptureTicket),
+    /// Native Scroll preparation finished; the input handshake is a later slice.
+    ScrollPrepared(CaptureTicket),
+    /// Preparation stopped with a known-state reason; keep the region session.
+    ScrollRefused(CaptureTicket, ScrollRefusal),
+    /// Native state is uncertain; close Scroll UI and require a relaunch.
+    ScrollRelaunchRequired,
 }
 
 /// Where one fenced output action publishes its encoded PNG.
@@ -374,6 +432,10 @@ pub struct CaptureSession {
     /// I-09 option density. Session-scoped (outside the replaceable `Document`),
     /// so switching it never clears the tool, styles, selection or objects.
     density: Density,
+    /// I-11/I-12 Scroll preparation entered from the frozen selection. It is a
+    /// sub-flow of the one Capture Session: it reuses the selection and never
+    /// starts a second capture. `None` while Region Capture is active.
+    scroll: Option<ScrollPreparation>,
 }
 impl Default for CaptureSession {
     fn default() -> Self {
@@ -385,6 +447,7 @@ impl Default for CaptureSession {
             completion_sound: true,
             // I-09: Compact is the documented default.
             density: Density::Compact,
+            scroll: None,
         }
     }
 }
@@ -434,6 +497,42 @@ impl CaptureSession {
     /// produced and the frozen document is left byte-for-byte unchanged.
     pub const fn set_density(&mut self, density: Density) {
         self.density = density;
+    }
+
+    /// The current Scroll preparation phase; `Inactive` when Region Capture is active.
+    #[must_use]
+    pub const fn scroll_phase(&self) -> ScrollPhase {
+        match &self.scroll {
+            Some(preparation) => preparation.phase(),
+            None => ScrollPhase::Inactive,
+        }
+    }
+
+    /// The single selection Scroll preparation reuses, if one is active.
+    #[must_use]
+    pub const fn scroll_selection(&self) -> Option<Selection> {
+        match &self.scroll {
+            Some(preparation) => Some(preparation.selection()),
+            None => None,
+        }
+    }
+
+    /// The locked public target identity, once identification succeeded.
+    #[must_use]
+    pub fn scroll_target(&self) -> Option<&ScrollTarget> {
+        self.scroll.as_ref().and_then(ScrollPreparation::target)
+    }
+
+    /// The fixed own-window exclusion set, once preparation finished.
+    #[must_use]
+    pub fn scroll_exclusion(&self) -> Option<&[u32]> {
+        self.scroll.as_ref().and_then(ScrollPreparation::exclusion)
+    }
+
+    /// The refusal that stopped Scroll preparation, if one is exposed.
+    #[must_use]
+    pub fn scroll_refusal(&self) -> Option<&ScrollRefusal> {
+        self.scroll.as_ref().and_then(ScrollPreparation::refusal)
     }
 
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.
@@ -497,25 +596,30 @@ impl CaptureSession {
             // The shared output/save mutex ignores the capture hotkey and the
             // menu Start alike; output slices release it explicitly.
             CaptureAction::Start if self.output.is_some() => vec![],
-            CaptureAction::Start => match self.state {
-                State::Relaunch => vec![CaptureEffect::ReportFailure(
-                    CaptureFailure::NativeUncertain,
-                )],
-                State::Preparing(ticket) | State::Draining { ticket, .. } => {
-                    self.state = State::Draining {
-                        ticket,
-                        restart: true,
-                    };
-                    vec![CaptureEffect::DismissOverlay]
+            CaptureAction::Start => {
+                // A hotkey restart abandons any Scroll preparation together with
+                // the region session; the new capture starts from Resident.
+                self.scroll = None;
+                match self.state {
+                    State::Relaunch => vec![CaptureEffect::ReportFailure(
+                        CaptureFailure::NativeUncertain,
+                    )],
+                    State::Preparing(ticket) | State::Draining { ticket, .. } => {
+                        self.state = State::Draining {
+                            ticket,
+                            restart: true,
+                        };
+                        vec![CaptureEffect::DismissOverlay]
+                    }
+                    State::Frozen { .. } => {
+                        let mut effects = vec![CaptureEffect::DismissOverlay];
+                        effects.extend(self.begin());
+                        effects
+                    }
+                    State::Checking(_) => vec![],
+                    State::Resident => self.begin(),
                 }
-                State::Frozen { .. } => {
-                    let mut effects = vec![CaptureEffect::DismissOverlay];
-                    effects.extend(self.begin());
-                    effects
-                }
-                State::Checking(_) => vec![],
-                State::Resident => self.begin(),
-            },
+            }
             CaptureAction::PermissionChecked { ticket, available } => {
                 if !matches!(self.state,State::Checking(current) if current==ticket) {
                     return vec![];
@@ -671,9 +775,100 @@ impl CaptureSession {
                     Err(error) => vec![CaptureEffect::ReportOutputFailure(error)],
                 }
             }
+            CaptureAction::EnterScroll { ticket } => {
+                if self.output.is_some() {
+                    return vec![];
+                }
+                let State::Frozen {
+                    ticket: current,
+                    document,
+                } = &self.state
+                else {
+                    return vec![];
+                };
+                if *current != ticket {
+                    return vec![];
+                }
+                let Some(selection) = document.selection() else {
+                    return vec![CaptureEffect::ScrollRefused(
+                        ticket,
+                        ScrollRefusal::NoSelection,
+                    )];
+                };
+                if !document.annotations().is_empty() {
+                    return vec![CaptureEffect::ScrollRefused(
+                        ticket,
+                        ScrollRefusal::AnnotationsPresent,
+                    )];
+                }
+                self.scroll = Some(ScrollPreparation::new(ticket, selection));
+                vec![
+                    CaptureEffect::DismissOverlay,
+                    CaptureEffect::CheckScrollPermissions(ticket),
+                ]
+            }
+            CaptureAction::ScrollPermissionsChecked { ticket, available } => {
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.check_permissions(available);
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::ScrollTargetIdentified { ticket, result } => {
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.lock_target(result);
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::ScrollWindowsPrepared { ticket, result } => {
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.fix_windows(result);
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::CancelScroll { ticket } => {
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.stop();
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::ScrollNativeUncertain { ticket } => {
+                if !self
+                    .scroll
+                    .as_ref()
+                    .is_some_and(|preparation| preparation.ticket() == ticket)
+                {
+                    return vec![];
+                }
+                self.scroll = None;
+                self.output = None;
+                self.state = State::Relaunch;
+                vec![
+                    CaptureEffect::DismissOverlay,
+                    CaptureEffect::ScrollRelaunchRequired,
+                ]
+            }
             CaptureAction::Cancel | CaptureAction::DisplayInvalidated => {
                 // A cancelled output job may still finish; its fence must fail.
                 self.output = None;
+                // Display loss and cancellation abandon Scroll preparation too;
+                // the region session is kept for a known Scroll refusal only.
+                self.scroll = None;
                 let invalid = matches!(action, CaptureAction::DisplayInvalidated);
                 self.state = match self.state {
                     State::Preparing(ticket) | State::Draining { ticket, .. } => State::Draining {
@@ -688,6 +883,37 @@ impl CaptureSession {
                     effects.push(CaptureEffect::ReportFailure(CaptureFailure::DisplayInvalid));
                 }
                 effects
+            }
+        }
+    }
+
+    /// Maps one pure Scroll preparation transition to app effects.
+    ///
+    /// A known-state refusal or a user cancel clears the preparation and
+    /// re-presents the frozen region overlay, so the selection is preserved and
+    /// no output is produced.
+    fn finish_scroll_outcome(
+        &mut self,
+        ticket: CaptureTicket,
+        outcome: ScrollPrepOutcome,
+    ) -> Vec<CaptureEffect> {
+        match outcome {
+            ScrollPrepOutcome::CheckPermissions => {
+                vec![CaptureEffect::CheckScrollPermissions(ticket)]
+            }
+            ScrollPrepOutcome::IdentifyTarget => vec![CaptureEffect::IdentifyScrollTarget(ticket)],
+            ScrollPrepOutcome::PrepareWindows => vec![CaptureEffect::PrepareScrollWindows(ticket)],
+            ScrollPrepOutcome::Prepared => vec![CaptureEffect::ScrollPrepared(ticket)],
+            ScrollPrepOutcome::Refused(refusal) => {
+                self.scroll = None;
+                vec![
+                    CaptureEffect::ScrollRefused(ticket, refusal),
+                    CaptureEffect::PresentFrozen(ticket),
+                ]
+            }
+            ScrollPrepOutcome::Stopped => {
+                self.scroll = None;
+                vec![CaptureEffect::PresentFrozen(ticket)]
             }
         }
     }
