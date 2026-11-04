@@ -3,7 +3,7 @@
 //! Region capture and scroll output use this single crop/composite/encode path.
 //! The input frame is immutable and never modified; no intermediate image is
 //! written to disk.
-use arcshot_core::{CapturedFrame, MAX_EDGE, MAX_PIXELS, MAX_PNG_BYTES, PixelRect};
+use arcshot_core::{Annotation, CapturedFrame, MAX_EDGE, MAX_PIXELS, MAX_PNG_BYTES, PixelRect};
 use std::{
     error::Error,
     fmt,
@@ -86,6 +86,114 @@ pub fn compose_crop(frame: &CapturedFrame, crop: PixelRect) -> Result<ComposedIm
         height: crop.height(),
         rgba,
     })
+}
+
+/// Crops the selected physical rectangle and rasterizes every visible annotation.
+///
+/// Preview and final output call this one function, so the same document version
+/// produces the same rectangle pixels. Layers draw bottom-to-top and every
+/// annotation is clipped to the crop; retained geometry outside it is ignored,
+/// never resampled.
+///
+/// # Errors
+/// Returns [`ComposeError::Crop`] for an out-of-frame crop and the shared
+/// budget/encoding errors of [`compose_crop`].
+pub fn compose_document(
+    frame: &CapturedFrame,
+    crop: PixelRect,
+    annotations: &[Annotation],
+) -> Result<ComposedImage, ComposeError> {
+    let mut image = compose_crop(frame, crop)?;
+    let scale = frame.geometry().scale();
+    for annotation in annotations {
+        draw_rectangle(&mut image, crop, scale, *annotation);
+    }
+    Ok(image)
+}
+
+/// Converts composed RGBA pixels to the BGRA layout GPUI's `RenderImage` expects.
+///
+/// # Errors
+/// Returns [`ComposeError::ResourceLimit`] when the preview copy cannot be reserved.
+pub fn preview_bgra(image: &ComposedImage) -> Result<Vec<u8>, ComposeError> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(image.rgba.len())
+        .map_err(|_| ComposeError::ResourceLimit)?;
+    for pixel in image.rgba.as_chunks::<4>().0 {
+        bytes.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Ok(bytes)
+}
+
+fn physical(value: f64, scale: f64, origin: u32) -> i64 {
+    let limit = f64::from(i32::MAX);
+    ((value * scale).round().clamp(-limit, limit) as i64) - i64::from(origin)
+}
+
+fn span(start: i64, end: i64, limit: u32) -> std::ops::Range<usize> {
+    let limit = i64::from(limit);
+    (start.clamp(0, limit) as usize)..(end.clamp(0, limit) as usize)
+}
+
+/// Draws one rectangle with an opaque stroke and an optional 20% same-colour fill.
+fn draw_rectangle(image: &mut ComposedImage, crop: PixelRect, scale: f64, annotation: Annotation) {
+    let bounds = annotation.bounds();
+    let x0 = physical(bounds.x(), scale, crop.x());
+    let y0 = physical(bounds.y(), scale, crop.y());
+    let x1 = physical(bounds.x() + bounds.width(), scale, crop.x());
+    let y1 = physical(bounds.y() + bounds.height(), scale, crop.y());
+    let style = annotation.style();
+    let thickness = ((style.width().points() * scale).round() as i64).max(1);
+    let [red, green, blue] = style.stroke().rgb();
+
+    if style.fill() {
+        for y in span(y0, y1, image.height) {
+            for x in span(x0, x1, image.width) {
+                blend_pixel(image, x, y, [red, green, blue]);
+            }
+        }
+    }
+
+    // The stroke is centred on the path: `thickness` pixels around each edge,
+    // with the extra pixel (if any) on the right/bottom side.
+    let half = thickness / 2;
+    let left = x0 - half;
+    let right = x1 - half;
+    let top = y0 - half;
+    let bottom = y1 - half;
+    for y in top..bottom + thickness {
+        if y < 0 || y >= i64::from(image.height) {
+            continue;
+        }
+        for x in left..right + thickness {
+            if x < 0 || x >= i64::from(image.width) {
+                continue;
+            }
+            let on_vertical =
+                (x >= left && x < left + thickness) || (x >= right && x < right + thickness);
+            let on_horizontal =
+                (y >= top && y < top + thickness) || (y >= bottom && y < bottom + thickness);
+            if on_vertical || on_horizontal {
+                set_pixel(image, x as usize, y as usize, [red, green, blue]);
+            }
+        }
+    }
+}
+
+fn set_pixel(image: &mut ComposedImage, x: usize, y: usize, color: [u8; 3]) {
+    let index = (y * image.width as usize + x) * 4;
+    image.rgba[index..index + 3].copy_from_slice(&color);
+    image.rgba[index + 3] = 255;
+}
+
+/// Composites the fill at 20% opacity (51/255) over the base pixel.
+fn blend_pixel(image: &mut ComposedImage, x: usize, y: usize, color: [u8; 3]) {
+    let index = (y * image.width as usize + x) * 4;
+    for (channel, source) in color.into_iter().enumerate() {
+        let base = u32::from(image.rgba[index + channel]);
+        image.rgba[index + channel] = ((u32::from(source) * 51 + base * 204 + 127) / 255) as u8;
+    }
 }
 
 /// Encodes a composed surface as an 8-bit RGBA PNG with an sRGB chunk.

@@ -2,7 +2,9 @@
 
 mod compose;
 mod preview;
-pub use compose::{ComposeError, ComposedImage, compose_crop, encode_png};
+pub use compose::{
+    ComposeError, ComposedImage, compose_crop, compose_document, encode_png, preview_bgra,
+};
 pub use preview::{CapturePreview, PreviewError, capture_preview};
 
 use arcshot_core::StatusItemIcon;

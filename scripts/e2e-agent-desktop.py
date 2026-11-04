@@ -224,6 +224,37 @@ def wait_node(app: str, predicate, timeout: float) -> dict:
     fail(f"accessibility node did not appear in {timeout}s; last tree: {json.dumps(last)[:600]}")
 
 
+def checked_state(node: dict) -> bool:
+    """Reads the checked/toggled state AccessKit exposes for a button value."""
+    if node.get("value") is True:
+        return True
+    return "checked" in (node.get("states") or [])
+
+
+def hover(ref: str) -> None:
+    """Moves the physical pointer onto an overlay control (headed precondition)."""
+    data = agent("hover", ref, "--headed")
+    steps = data.get("steps", [])
+    if not steps or steps[0].get("outcome") != "succeeded":
+        fail(f"hover {ref} did not report success: {data}")
+
+
+def wait_tool_state(app: str, native_id: str, expected: bool, timeout: float) -> dict:
+    """Waits for a tool/option node whose checked state matches the product state."""
+    return wait_node(
+        app,
+        lambda tree: next(
+            (
+                node
+                for node in find_nodes(tree, native_id=native_id)
+                if checked_state(node) == expected
+            ),
+            None,
+        ),
+        timeout,
+    )
+
+
 def press(combo: str, *, headed: bool) -> None:
     args = ["press", combo] + (["--headed"] if headed else [])
     data = agent(*args)
@@ -500,9 +531,85 @@ def main() -> int:
             f"round_trip={original}->{temporary}->{original}"
         )
 
-        # MAC-E2E-12: the frozen overlay is addressable and cancels through AX.
+        # MAC-E2E-12/13/14: the frozen overlay, tool dock and hovered options are
+        # addressable and drivable through AX alone, then cancel through AX.
         click(app, "开始截图")
         wait_log(log, "capture_wake_window_submit_us=", 15.0)
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        dock = (find_nodes(root, role="group", name="标注工具") or [None])[0]
+        if dock is None:
+            fail("frozen overlay exposes no tool dock")
+        select_tool = wait_tool_state(app, "arcshot.overlay.tool.select", True, 10.0)
+        rectangle_tool = wait_tool_state(app, "arcshot.overlay.tool.rectangle", False, 10.0)
+        if not select_tool.get("ref_id") or not rectangle_tool.get("ref_id"):
+            fail("tool dock buttons are not addressable")
+        if find_nodes(root, native_id="arcshot.overlay.delete"):
+            fail("delete is offered without a selected object")
+        agent("click", rectangle_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.rectangle action=Click", 10.0)
+        wait_log(log, "capture_edit action=SelectTool", 10.0)
+        rectangle_tool = wait_tool_state(app, "arcshot.overlay.tool.rectangle", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.select", False, 10.0)
+        note("mac_e2e_13=pass tool_dock=ax tool=Rectangle selected_state=toggled")
+
+        # Hover is the only way to reveal options; the activation itself is AX.
+        hover(rectangle_tool["ref_id"])
+        width_five = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.rectangle.width.5",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        red = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.rectangle.color.red",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not red.get("ref_id"):
+            fail("hovered rectangle options are not addressable")
+        agent("click", width_five["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.rectangle.width.5 action=Click", 10.0)
+        wait_log(log, "capture_edit action=RectangleOption", 10.0)
+        wait_log(log, "width=5", 10.0)
+        blue = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.rectangle.color.blue",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        agent("click", blue["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.rectangle.color.blue action=Click", 10.0)
+        wait_log(log, "style=stroke=#007AFF width=5", 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.width.5", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.color.blue", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.color.red", False, 10.0)
+        note("mac_e2e_14=pass hover_options=ax style=#007AFF width=5 version_unchanged")
+
         root = wait_node(
             app,
             lambda tree: (
@@ -546,7 +653,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=12")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=14")
     return 0
 
 

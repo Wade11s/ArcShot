@@ -224,8 +224,13 @@ fn core_session_06_save_dialog_mutex_ignores_hotkey_start_until_closed() {
     });
     // The shared output/save mutex: an open save dialog must ignore the capture
     // hotkey (and the menu Start) without disturbing the frozen session.
-    let CaptureEffect::RequestSavePanel(job) = s.dispatch(CaptureAction::Save { ticket })[0] else {
-        panic!("expected a native save panel request");
+    let job = match s
+        .dispatch(CaptureAction::Save { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::RequestSavePanel(job)) => job,
+        _ => panic!("expected a native save panel request"),
     };
     assert!(s.output_busy());
     assert!(s.dispatch(CaptureAction::Start).is_empty());
