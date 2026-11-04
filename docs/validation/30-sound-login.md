@@ -39,7 +39,9 @@
   `target/e2e-agent-desktop-debug-restart-1.log`、`target/e2e-agent-desktop-debug-restart-2.log`、
   `target/startup-smoke-debug.log`、`target/startup-smoke-release.log`。日志是本地
   构建产物，不入库；本报告保存摘要。
-- `worktree_dirty=false`（实测提交时）；本报告本身是之后的纯证据文档提交。
+- 实测时工作区只有本报告与 `docs/validation/e2e-agent-desktop.md` 两处未提交
+  文档；产品源码、`scripts/` 与 `TEST.md` 与上述 SHA 完全一致。本报告与那处追加
+  是之后的纯证据文档提交，不改产品代码或脚本。
 
 ## 执行
 
