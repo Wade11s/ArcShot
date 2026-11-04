@@ -58,7 +58,7 @@ impl PendingSave {
 
 /// The single side effect one fenced output job performs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OutputPublish {
+enum OutputPublish {
     /// Finish: copy the PNG to the pasteboard.
     Clipboard,
     /// Explicit Save: write the PNG to the chosen file.
