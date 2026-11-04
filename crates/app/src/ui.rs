@@ -1913,11 +1913,14 @@ impl Render for ScrollPermissionView {
     }
 }
 
-/// The minimal Scroll control UI that stays visible during preparation and is
-/// part of the fixed own-window exclusion set. It never claims "可以滚动": the
-/// input handshake and trusted first frame are later slices.
+/// The minimal Scroll control UI that stays visible across preparation and
+/// collection and is part of the fixed own-window exclusion set. During
+/// collection it shows a concise status plus the operation hint — never a
+/// percentage, ETA or pause control — and its cancel button stays operable
+/// because the session tap passes events inside its rect through to ArcShot.
 pub(crate) struct ScrollControlView {
-    pub(crate) status: &'static str,
+    pub(crate) status: String,
+    pub(crate) hint: Option<String>,
     pub(crate) ticket: CaptureTicket,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
@@ -1927,6 +1930,7 @@ impl Render for ScrollControlView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let ticket = self.ticket;
         let queue = Rc::clone(&self.queue);
+        let hint = self.hint.clone();
         div()
             .id("scroll-control")
             .role(Role::Group)
@@ -1950,12 +1954,22 @@ impl Render for ScrollControlView {
                 div()
                     .id("scroll-status")
                     .role(Role::Label)
-                    .aria_label(self.status)
+                    .aria_label(self.status.clone())
                     .accessibility_id("arcshot.scroll.status")
                     .text_color(rgb(0xffffff))
                     .text_sm()
-                    .child(self.status),
+                    .child(self.status.clone()),
             )
+            .children(hint.map(|hint| {
+                div()
+                    .id("scroll-hint")
+                    .role(Role::Label)
+                    .aria_label(hint.clone())
+                    .accessibility_id("arcshot.scroll.hint")
+                    .text_color(rgb(0x9aa4b5))
+                    .text_xs()
+                    .child(hint)
+            }))
             .child(scroll_button(
                 "scroll-control-cancel".to_owned(),
                 "arcshot.scroll.control.cancel".to_owned(),

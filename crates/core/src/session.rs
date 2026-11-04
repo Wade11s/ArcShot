@@ -32,7 +32,7 @@ pub enum CapturePhase {
 }
 
 /// Semantic inputs and typed worker results.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CaptureAction {
     /// Starts or safely restarts a capture.
     Start,

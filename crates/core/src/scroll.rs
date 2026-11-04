@@ -149,6 +149,8 @@ pub struct ScrollTarget {
     pub window_id: u32,
     /// Owning application bundle identifier; never a window title.
     pub owner: String,
+    /// Owning application process identifier, for foreground checks.
+    pub owner_pid: u32,
     /// Target window frame in display-local logical points.
     pub frame: ScrollTargetFrame,
 }

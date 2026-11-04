@@ -8,10 +8,11 @@ mod permission;
 mod preferences;
 mod save;
 mod scroll;
+mod scroll_input;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
-    owned_visible_window_ids,
+    capture_scroll_region, owned_visible_window_ids,
 };
 pub use clipboard::{
     ClipboardError, ClipboardSmoke, play_completion_sound, validate_png_pasteboard,
@@ -33,8 +34,13 @@ pub use save::{
     take_save_panel_outcome, write_png_to_file,
 };
 pub use scroll::{
-    frontmost_pid, open_scroll_permission_settings, pointer_location_cg, probe_scroll_target,
-    request_scroll_permission, scroll_exclusion_set, scroll_permissions,
+    activate_scroll_target, frontmost_pid, open_scroll_permission_settings,
+    owned_visible_window_frames, pointer_location_cg, probe_scroll_target,
+    request_scroll_permission, scroll_exclusion_set, scroll_permissions, scroll_target_intact,
+};
+pub use scroll_input::{
+    GlobalRect, ScrollInputTap, ScrollTapError, TapEvent, TapEventKind, TapGate, TapGateCommand,
+    TapStats,
 };
 
 use std::{cell::RefCell, error::Error, fmt};

@@ -211,6 +211,40 @@ fn dimensions(snapshot: DisplaySnapshot) -> Result<(u32, u32, usize, usize), Cap
     Ok((width as u32, height as u32, stride, len))
 }
 
+/// Validates one selection crop's physical size against the same budgets.
+///
+/// The authoritative `PixelRect` already enforces the 16,384 edge and 24M pixel
+/// limits; this re-checks before any allocation so a native caller cannot
+/// bypass them.
+///
+/// # Errors
+/// Returns [`CaptureError::Budget`] for non-integral or over-budget sizes and
+/// [`CaptureError::Frame`] when the crop leaves the display.
+fn region_dimensions(physical: (f64, f64)) -> Result<(u32, u32, usize, usize), CaptureError> {
+    let (w, h) = physical;
+    if !w.is_finite()
+        || !h.is_finite()
+        || w < 1.0
+        || h < 1.0
+        || w.fract() != 0.0
+        || h.fract() != 0.0
+    {
+        return Err(CaptureError::Frame);
+    }
+    if w > MAX_SIDE as f64 || h > MAX_SIDE as f64 {
+        return Err(CaptureError::Budget);
+    }
+    let width = w as usize;
+    let height = h as usize;
+    let pixels = width.checked_mul(height).ok_or(CaptureError::Budget)?;
+    if pixels > MAX_PIXELS {
+        return Err(CaptureError::Budget);
+    }
+    let stride = width.checked_mul(4).ok_or(CaptureError::Budget)?;
+    let len = stride.checked_mul(height).ok_or(CaptureError::Budget)?;
+    Ok((width as u32, height as u32, stride, len))
+}
+
 /// Captures the expected built-in display synchronously, excluding exact window IDs.
 ///
 /// Call on a worker, never on the UI thread. The caller must implement an absolute
@@ -225,10 +259,76 @@ pub fn capture_builtin(
     expected: DisplaySnapshot,
     excluding_window_ids: Vec<u32>,
 ) -> Result<NativeCapture, CaptureError> {
+    capture_display_region(expected, excluding_window_ids, None)
+}
+
+/// Captures one fixed selection-sized region of the display (I-12 sourceRect).
+///
+/// `crop` is the `(x, y, width, height)` physical-pixel rectangle of the fixed
+/// selection on the display; the SCK `sourceRect` is its logical-point form and
+/// the output size is the crop's physical size, so the captured frame matches
+/// the authoritative selection conversion exactly. The same exclusion,
+/// color-space and admission contract as [`capture_builtin`] applies.
+///
+/// # Errors
+/// Returns a classified failure for display changes, exclusion, budget, frame, or
+/// uncertain ScreenCaptureKit requests.
+pub fn capture_scroll_region(
+    expected: DisplaySnapshot,
+    excluding_window_ids: Vec<u32>,
+    crop: (u32, u32, u32, u32),
+) -> Result<NativeCapture, CaptureError> {
+    let (crop_x, crop_y, crop_w, crop_h) = crop;
+    let scale = expected.scale;
+    let logical = (
+        f64::from(crop_x) / scale,
+        f64::from(crop_y) / scale,
+        f64::from(crop_w) / scale,
+        f64::from(crop_h) / scale,
+    );
+    let physical = (f64::from(crop_w), f64::from(crop_h));
+    if logical.0 < 0.0 || logical.1 < 0.0 || logical.2 <= 0.0 || logical.3 <= 0.0 {
+        return Err(CaptureError::Frame);
+    }
+    capture_display_region(
+        expected,
+        excluding_window_ids,
+        Some(CaptureRegion {
+            source: logical,
+            size: physical,
+        }),
+    )
+}
+
+/// One display-relative capture region: the SCK `sourceRect` in display-local
+/// logical points and the physical output size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaptureRegion {
+    /// `(x, y, width, height)` in display-local logical points.
+    source: (f64, f64, f64, f64),
+    /// `(width, height)` in physical pixels.
+    size: (f64, f64),
+}
+
+/// The one SCScreenshotManager request shared by full-display and scroll frames.
+///
+/// `region` is `None` for the whole display, or the fixed selection crop.
+///
+/// # Errors
+/// Returns a classified failure for display changes, exclusion, budget, frame,
+/// or uncertain ScreenCaptureKit requests.
+fn capture_display_region(
+    expected: DisplaySnapshot,
+    excluding_window_ids: Vec<u32>,
+    region: Option<CaptureRegion>,
+) -> Result<NativeCapture, CaptureError> {
     if builtin_display()? != expected {
         return Err(CaptureError::Display);
     }
-    let (width, height, stride, len) = dimensions(expected)?;
+    let (width, height, stride, len) = match region {
+        None => dimensions(expected)?,
+        Some(region) => region_dimensions(region.size)?,
+    };
     let content = SCShareableContent::get().map_err(|e| CaptureError::Request(e.to_string()))?;
     if builtin_display()? != expected {
         return Err(CaptureError::Display);
@@ -287,7 +387,13 @@ pub fn capture_builtin(
         .with_height(height)
         .with_pixel_format(PixelFormat::BGRA)
         .with_shows_cursor(false)
-        .with_source_rect(CGRect::new(0.0, 0.0, expected.width, expected.height))
+        .with_source_rect(match region {
+            None => CGRect::new(0.0, 0.0, expected.width, expected.height),
+            Some(region) => {
+                let (x, y, width, height) = region.source;
+                CGRect::new(x, y, width, height)
+            }
+        })
         .with_color_space_name(color_space::SRGB)
         .map_err(|_| CaptureError::Frame)?
         .with_capture_dynamic_range(SCCaptureDynamicRange::SDR)

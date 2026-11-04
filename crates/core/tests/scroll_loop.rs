@@ -64,6 +64,7 @@ fn target() -> ScrollTarget {
     ScrollTarget {
         window_id: 4242,
         owner: "com.example.target".to_owned(),
+        owner_pid: 999,
         frame: ScrollTargetFrame {
             x: 0.0,
             y: 0.0,
