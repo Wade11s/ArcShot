@@ -21,6 +21,20 @@ pub use session::{
     OutputFailure, OutputJob, OutputTarget, SavePanelResult,
 };
 
+/// Actual login-item state reported by the system, never a requested value.
+///
+/// Menu presentation and policy both derive from a fresh read of this value, so
+/// an unconfirmed request can never be displayed as an enabled login item.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LoginItemState {
+    /// Registered and eligible to launch the app at login.
+    Enabled,
+    /// Not registered, so the app does not launch at login.
+    Disabled,
+    /// Registered but waiting for the user to approve it in System Settings.
+    RequiresApproval,
+}
+
 /// Text displayed by the native menu-bar interface.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MenuBarText {

@@ -5,8 +5,9 @@ use crate::{
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, GuideHistory, HotkeyAction, HotkeyEffect, HotkeyFlow,
-    HotkeyNotice, HotkeyOutcome, OutputSubmitError, OutputTasks, PendingSave, PermissionAction,
-    PermissionEffect, PermissionFlow, encode_document,
+    HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError, OutputTasks, PendingSave,
+    PermissionAction, PermissionEffect, PermissionFlow, PreferencesAction, PreferencesEffect,
+    PreferencesFlow, PreferencesNotice, encode_document,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, CaptureAction, CaptureEffect, CaptureFailure,
@@ -30,6 +31,10 @@ use std::{
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// Allows the preparing window to be registered before exact native window matching.
 const PREPARE_SETTLE: Duration = Duration::from_millis(80);
+/// Heading of a capture failure notice; it is not a settings problem.
+const CAPTURE_ERROR_HEADING: &str = "无法继续截图";
+/// Heading of a menu-preference failure notice.
+const PREFERENCE_ERROR_HEADING: &str = "无法更新登录项设置";
 
 struct Coordinator {
     session: CaptureSession,
@@ -45,11 +50,18 @@ struct Coordinator {
     hotkey_settings: Option<WindowHandle<HotkeyView>>,
     hotkey_view_error: Option<String>,
     hotkey_error: Option<String>,
+    preferences: PreferencesFlow,
+    /// Preference failure text waiting for a window without an active session.
+    preferences_error: Option<String>,
+    /// Whether the current notice window belongs to a preference failure.
+    settings_notice: bool,
     queue: UiQueue,
     overlay: Option<WindowHandle<CaptureView>>,
     overlay_error: Option<String>,
     notice: Option<WindowHandle<NoticeView>>,
     pending: Option<(CaptureTicket, Instant)>,
+    /// True while the frozen overlay still needs one active-application check.
+    overlay_activation_pending: bool,
     preview_task: Option<Task<()>>,
     started: Option<Instant>,
     settings_departed: bool,
@@ -69,11 +81,14 @@ struct PreviewSync {
 pub(crate) fn launch(cx: &mut App) {
     let hotkeys = native::GlobalHotkeys::install().ok();
     let hotkey_flow = HotkeyFlow::new(native::hotkey_settings_load());
+    let completion_sound = native::completion_sound_enabled();
     log::info!(
         "hotkey_launch config={} adapter={:?}",
         hotkey_flow.config(),
         hotkeys.is_some()
     );
+    // The persisted menu preference is the only authority for a silent success.
+    log::info!("preferences_launch completion_sound={completion_sound}");
     let coordinator = cx.new(|_| Coordinator {
         session: CaptureSession::default(),
         tasks: CaptureTasks::default(),
@@ -90,11 +105,15 @@ pub(crate) fn launch(cx: &mut App) {
         hotkey_settings: None,
         hotkey_view_error: None,
         hotkey_error: None,
+        preferences: PreferencesFlow::new(completion_sound),
+        preferences_error: None,
+        settings_notice: false,
         queue: Rc::new(RefCell::new(Vec::new())),
         overlay: None,
         overlay_error: None,
         notice: None,
         pending: None,
+        overlay_activation_pending: false,
         preview_task: None,
         started: None,
         settings_departed: false,
@@ -102,8 +121,12 @@ pub(crate) fn launch(cx: &mut App) {
         preview: PreviewSync::default(),
     });
     coordinator.update(cx, |state, cx| {
+        state
+            .session
+            .set_completion_sound(state.preferences.completion_sound());
         state.permission(PermissionAction::Launch, cx);
         state.hotkey(HotkeyAction::Launch, cx);
+        state.preference(PreferencesAction::Launch, cx);
     });
     // The foreground task owns the coordinator; workers never own GPUI or AppKit state.
     //
@@ -141,6 +164,12 @@ impl Coordinator {
                 MenuCommand::ScreenRecordingPermissions if !self.busy() => {
                     self.action(CaptureAction::Cancel, cx);
                     self.permission(PermissionAction::Check, cx);
+                }
+                MenuCommand::ToggleCompletionSound => {
+                    self.preference(PreferencesAction::ToggleCompletionSound, cx)
+                }
+                MenuCommand::ToggleLaunchAtLogin => {
+                    self.preference(PreferencesAction::ToggleLoginItem, cx)
                 }
                 _ => {}
             }
@@ -223,7 +252,13 @@ impl Coordinator {
                             .notice
                             .is_some_and(|notice| notice.window_id() == window_id) =>
                 {
-                    self.permission(action, cx)
+                    if self.settings_notice {
+                        // The preference failure notice only offers dismissal;
+                        // the menu itself stays available for a retry.
+                        self.preference(PreferencesAction::DismissNotice, cx);
+                    } else {
+                        self.permission(action, cx);
+                    }
                 }
                 UiCommand::HotkeySave(window_id, candidate)
                     if self
@@ -263,6 +298,15 @@ impl Coordinator {
         }) {
             self.show_error(error, cx);
         }
+        // A preference failure never steals the frozen session's window; it is
+        // shown as soon as the mouse capture is gone and no notice is open.
+        let busy = self.busy();
+        if let Some(error) = self
+            .preferences_error
+            .take_if(|_| self.notice.is_none() && self.overlay.is_none() && !busy)
+        {
+            self.show_preferences_error(error, cx);
+        }
         if self.visiting_settings && !self.busy() {
             if !native::application_active() {
                 self.settings_departed = true;
@@ -298,6 +342,13 @@ impl Coordinator {
         }
         if let Some(outcome) = native::take_save_panel_outcome() {
             self.resolve_save_panel(outcome, cx);
+        }
+        // The overlay takes keyboard focus after it opens; report the first tick
+        // where the app really owns focus, so E2E can gate headed key delivery on
+        // a product observation instead of a guess.
+        if self.overlay_activation_pending && native::application_active() {
+            self.overlay_activation_pending = false;
+            log::info!("app_active surface=frozen");
         }
         // No SCK call is made for this continuous screen validity check.
         if let Some(frame) = self.session.frame() {
@@ -370,6 +421,69 @@ impl Coordinator {
         let exit_recording =
             !matches!(action, HotkeyAction::RecordingStarted) || self.hotkey_view_error.is_some();
         self.refresh_hotkey_view(cx, exit_recording);
+    }
+
+    /// Drives the two I-04 menu preferences, executing their native effects.
+    ///
+    /// The completion-sound choice is persisted before the next output; every
+    /// login-item decision is taken from, and confirmed by, a real system read.
+    fn preference(&mut self, action: PreferencesAction, cx: &mut Context<Self>) {
+        let mut source = match action {
+            PreferencesAction::Launch => "launch",
+            _ => "toggle",
+        };
+        let mut effects: VecDeque<_> = self.preferences.dispatch(action).into();
+        while let Some(effect) = effects.pop_front() {
+            match effect {
+                PreferencesEffect::StoreCompletionSound(enabled) => {
+                    native::store_completion_sound(enabled);
+                    self.session.set_completion_sound(enabled);
+                    cx.global::<MenuBarGlobal>()
+                        .0
+                        .set_completion_sound_state(enabled);
+                    log::info!("completion_sound enabled={enabled} persisted=true");
+                }
+                PreferencesEffect::ReadLoginItemStatus => {
+                    let state = native::login_item_status();
+                    cx.global::<MenuBarGlobal>()
+                        .0
+                        .set_launch_at_login_state(state);
+                    log::info!("login_item_status state={state:?} source={source}");
+                    effects.extend(
+                        self.preferences
+                            .dispatch(PreferencesAction::LoginItemStatusRead(Some(state))),
+                    );
+                }
+                PreferencesEffect::SetLoginItem(enabled) => {
+                    let outcome = match native::set_login_item_enabled(enabled) {
+                        Ok(()) => LoginItemOutcome::Applied,
+                        Err(error) => {
+                            log::error!("login_item_set_failure={error}");
+                            LoginItemOutcome::Failed
+                        }
+                    };
+                    log::info!("login_item_set enabled={enabled} outcome={outcome:?}");
+                    // The next status read confirms or contradicts the request.
+                    source = "verify";
+                    effects.extend(
+                        self.preferences
+                            .dispatch(PreferencesAction::LoginItemSetResult(outcome)),
+                    );
+                }
+                PreferencesEffect::Notice(notice) => {
+                    log::warn!("preference_notice={notice:?}");
+                    self.preferences_error = Some(preferences_notice_text(notice));
+                }
+            }
+        }
+        // A dismissed or retried failure releases its notice window and any
+        // failure text that had not reached a window yet.
+        if self.preferences.notice().is_none() {
+            self.preferences_error = None;
+            if self.settings_notice {
+                self.close_notice(cx);
+            }
+        }
     }
 
     fn with_hotkeys(
@@ -1009,6 +1123,7 @@ impl Coordinator {
     }
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        self.overlay_activation_pending = false;
         self.preview = PreviewSync::default();
         if let Some(handle) = self.overlay.take() {
             let _ = handle.update(cx, |view, window, cx| {
@@ -1023,6 +1138,7 @@ impl Coordinator {
         }
     }
     fn close_notice(&mut self, cx: &mut Context<Self>) {
+        self.settings_notice = false;
         if let Some(handle) = self.notice.take() {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
@@ -1146,6 +1262,7 @@ impl Coordinator {
                 entity
             },
         )?);
+        self.overlay_activation_pending = true;
         cx.activate(true);
         Ok(())
     }
@@ -1172,7 +1289,7 @@ impl Coordinator {
         }
         self.close_notice(cx);
         if self.permissions.notice().is_some() {
-            self.open_notice(None, cx);
+            self.open_notice(None, CAPTURE_ERROR_HEADING, cx);
         }
         if open_settings {
             // Open after constructing our notice, so we do not steal focus back
@@ -1188,9 +1305,20 @@ impl Coordinator {
     }
     fn show_error(&mut self, message: String, cx: &mut Context<Self>) {
         self.close_notice(cx);
-        self.open_notice(Some(message), cx);
+        self.open_notice(Some(message), CAPTURE_ERROR_HEADING, cx);
     }
-    fn open_notice(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+    /// Reports a menu-preference failure; dismissal leaves the menu available.
+    fn show_preferences_error(&mut self, message: String, cx: &mut Context<Self>) {
+        self.close_notice(cx);
+        self.open_notice(Some(message), PREFERENCE_ERROR_HEADING, cx);
+        self.settings_notice = true;
+    }
+    fn open_notice(
+        &mut self,
+        error: Option<String>,
+        error_heading: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         let notice = if error.is_some() {
             None
         } else {
@@ -1218,6 +1346,7 @@ impl Coordinator {
                 let entity = cx.new(|_| NoticeView {
                     notice,
                     error,
+                    error_heading,
                     focus: focus.clone(),
                     queue,
                 });
@@ -1234,6 +1363,22 @@ impl Coordinator {
         }
     }
 }
+/// User-facing text for each preference failure; the failure itself is logged too.
+fn preferences_notice_text(notice: PreferencesNotice) -> String {
+    match notice {
+        PreferencesNotice::LoginItemToggleFailed => {
+            "“登录时启动”没能切换成功。已重新读取系统里的实际状态，可再次切换重试。".to_owned()
+        }
+        PreferencesNotice::LoginItemUnreadable => {
+            "无法读取“登录时启动”的实际状态，本次未做任何更改；可再次切换重试。".to_owned()
+        }
+        PreferencesNotice::LoginItemApprovalRequired => {
+            "已在系统登录项中登记，但还需要在“系统设置 › 通用 › 登录项”中允许；当前不会随登录启动。"
+                .to_owned()
+        }
+    }
+}
+
 fn format_style(style: AnnotationStyle) -> String {
     match style {
         AnnotationStyle::Rectangle(style) => format!(

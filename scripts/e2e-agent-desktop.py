@@ -27,6 +27,8 @@ MENU = [
     ("开始截图", "startCapture:"),
     ("截图快捷键…", "hotkeySettings:"),
     ("屏幕录制权限…", "screenRecordingPermissions:"),
+    ("完成音效", "toggleCompletionSound:"),
+    ("登录时启动", "toggleLaunchAtLogin:"),
     ("退出 ArcShot", "terminate:"),
 ]
 
@@ -97,6 +99,46 @@ def wait_log(path: pathlib.Path, needle: str, timeout: float, *, after: int = 0)
     fail(f"timeout waiting for {needle!r} in {path}")
 
 
+def wait_line(path: pathlib.Path, predicate, timeout: float) -> str:
+    """Waits until one diagnostic line satisfies the predicate."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for line in read_log(path):
+            if predicate(line):
+                return line
+        time.sleep(POLL)
+    fail(f"timeout waiting for a matching line in {path}")
+
+
+def wait_frontmost(app: str, timeout: float) -> None:
+    """Waits until the app is frontmost, for keys meant for its titled window."""
+    deadline = time.monotonic() + timeout
+    last: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            last = agent("snapshot", "--surface", "focused").get("app")
+        except Failure as error:
+            if "WINDOW_NOT_FOUND" not in str(error) and "APP_NOT_FOUND" not in str(error):
+                raise
+            last = None
+        if last == app:
+            return
+        time.sleep(POLL)
+    fail(f"{app} did not become the frontmost application; currently {last!r}")
+
+
+def wait_frozen_active(log: pathlib.Path, after: int, timeout: float = 15.0) -> int:
+    """Waits for this session's freeze and the product's own activation line.
+
+    Headed key delivery to the borderless overlay is only meaningful once the
+    app reports it owns keyboard focus; without this wait a focus race can send
+    Escape to whatever application is still in front.
+    """
+    wake = wait_log(log, "capture_wake_window_submit_us=", timeout, after=after)
+    wait_log(log, "app_active surface=frozen", timeout, after=wake)
+    return wake
+
+
 def count_log(path: pathlib.Path, needle: str) -> int:
     return sum(1 for line in read_log(path) if needle in line)
 
@@ -121,6 +163,40 @@ def click(app: str, name: str) -> None:
     steps = data.get("steps", [])
     if not steps or steps[0].get("outcome") != "succeeded":
         fail(f"click {name!r} did not report success: {data}")
+
+
+def start(executable: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
+    """Starts the bundle under test with its diagnostics in one fresh log."""
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("")
+    stderr = log.open("w")
+    process = subprocess.Popen(
+        [str(executable)], stdout=subprocess.DEVNULL, stderr=stderr, cwd=ROOT
+    )
+    stderr.close()
+    return process
+
+
+def quit_app(app: str, process: subprocess.Popen, *, expect_status_item_removed: bool) -> None:
+    """Quits through the real menu item and checks the process is really gone."""
+    click(app, "退出 ArcShot")
+    try:
+        status_code = process.wait(timeout=10.0)
+    except subprocess.TimeoutExpired:
+        fail("process did not exit after the quit command")
+    if status_code != 0:
+        fail(f"process exited {status_code} after the quit command")
+    if agent("list-apps", "--app", "ArcShot").get("apps"):
+        fail("an ArcShot instance is still running after quit")
+    if not expect_status_item_removed:
+        return
+    try:
+        agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem")
+    except Failure as error:
+        if "APP_NOT_FOUND" not in str(error):
+            raise
+    else:
+        fail("status item is still addressable after quit")
 
 
 def windows(app: str) -> list[dict]:
@@ -331,11 +407,12 @@ def main() -> int:
     if (actual, actual_name) != (identifier, app):
         fail(f"bundle identity mismatch: {actual} / {actual_name}, expected {identifier} / {app}")
 
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_text("")
-    stderr = log.open("w")
-    process = subprocess.Popen([str(executable)], stdout=subprocess.DEVNULL, stderr=stderr, cwd=ROOT)
-    stderr.close()
+    log = ROOT / "target" / f"e2e-agent-desktop-{configuration}.log"
+    process = start(executable, log)
+    restart_logs = [
+        ROOT / "target" / f"e2e-agent-desktop-{configuration}-restart-{index}.log"
+        for index in (1, 2)
+    ]
     try:
         wait_log(log, "hotkey_launch config=", 10.0)
 
@@ -358,16 +435,43 @@ def main() -> int:
             fail(f"menu commands differ: {actual_menu}")
         note(f"mac_e2e_01=pass menu_items={len(MENU)} refs={surface.get('ref_count')}")
 
+        # MAC-E2E-17: the login item shows the system's actual state (read only).
+        # The snapshot above opens the status menu, which validates the two
+        # preference items; no registration is requested by this case.
+        launch_read = wait_line(
+            log,
+            lambda line: "login_item_status state=" in line and "source=launch" in line,
+            10.0,
+        )
+        menu_read = wait_line(
+            log,
+            lambda line: "login_item_status state=" in line and "source=menu" in line,
+            10.0,
+        )
+        menu_state = menu_read.split("state=", 1)[1].split(" ", 1)[0]
+        launch_state = launch_read.split("state=", 1)[1].split(" ", 1)[0]
+        if menu_state not in ("Enabled", "Disabled", "RequiresApproval"):
+            fail(f"unexpected login-item state: {menu_state}")
+        if menu_state != launch_state:
+            fail(f"menu and launch login-item reads disagree: {menu_state} / {launch_state}")
+        if count_log(log, "login_item_set ") != 0:
+            fail("reading the menu must never register or unregister the login item")
+        note(
+            f"mac_e2e_17=pass login_item_actual={menu_state} "
+            "source=menu source=launch read_only=true"
+        )
+
         # MAC-E2E-02: a resident instance exposes no own window.
         if windows(app):
             fail(f"resident instance exposes own windows: {windows(app)}")
         note("mac_e2e_02=pass own_windows=0")
 
         # MAC-E2E-03: the menu command enters the session and freezes the screen.
+        log_mark = len(read_log(log))
         click(app, "开始截图")
-        wait_log(log, "capture_request_us=", 15.0)
-        wait_log(log, "capture_wake_window_submit_us=", 15.0)
-        wait_log(log, "to=Frozen action=Completed", 15.0)
+        wait_log(log, "capture_request_us=", 15.0, after=log_mark)
+        wait_frozen_active(log, log_mark)
+        wait_log(log, "to=Frozen action=Completed", 15.0, after=log_mark)
         if windows(app):
             fail(f"frozen session exposes a capturable own window: {windows(app)}")
         note("mac_e2e_03=pass menu_start=frozen own_windows=0")
@@ -392,20 +496,23 @@ def main() -> int:
         time.sleep(1.5)
         if count_log(log, "capture_request_us=") != before:
             fail("an unregistered key combination started a capture")
+        log_mark = len(read_log(log))
         press(hotkey_combo(config), headed=False)
         wait_count(log, "capture_request_us=", before + 1, 10.0)
         if count_log(log, "capture_request_us=") != before + 1:
             fail("the registered hotkey did not start exactly one capture")
-        wait_log(log, "to=Frozen action=Completed", 15.0)
+        wait_frozen_active(log, log_mark)
+        wait_log(log, "to=Frozen action=Completed", 15.0, after=log_mark)
         note(f"mac_e2e_04=pass hotkey={config} negative_control=no_capture")
         press("escape", headed=True)
-        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=log_mark)
 
         # MAC-E2E-07: the permission notice appears and Escape closes it.
         click(app, "屏幕录制权限…")
         notice = wait_window_size(app, 560.0, 282.0, 10.0)
         if not notice.get("is_focused"):
             fail(f"permission notice is not focused, refusing headed key delivery: {notice}")
+        wait_frontmost(app, 5.0)
         size = notice.get("bounds", {})
         press("escape", headed=True)
         wait_windows(app, 0, 10.0)
@@ -486,6 +593,7 @@ def main() -> int:
         first_label = recorder[0].get("name")
         agent("click", recorder[0]["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
+        wait_frontmost(app, 5.0)
         original = next(
             line.split("config=", 1)[1].split(" ", 1)[0]
             for line in read_log(log)
@@ -512,6 +620,7 @@ def main() -> int:
         recorder = find_nodes(root, native_id="arcshot.hotkey.recorder", require_ref=True)[0]
         agent("click", recorder["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
+        wait_frontmost(app, 5.0)
         press(hotkey_combo(original), headed=False)
         wait_log(log, f"candidate={original}", 10.0)
         save = wait_node(
@@ -616,7 +725,7 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.rectangle.color.red", False, 10.0)
         note("mac_e2e_14=pass hover_options=ax style=#007AFF width=5 version_unchanged")
 
-        # MAC-E2E-15: the two line-class tools are addressable and mutually
+        # MAC-E2E-18: the two line-class tools are addressable and mutually
         # exclusive with the existing Select/Rectangle checked states.
         line_tool = wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
         arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", False, 10.0)
@@ -639,9 +748,9 @@ def main() -> int:
             fail(f"arrow tool diagnostic was {arrow!r}")
         wait_tool_state(app, "arcshot.overlay.tool.arrow", True, 10.0)
         wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
-        note("mac_e2e_15=pass tool_dock=ax tools=Line,Arrow selected_state=toggled")
+        note("mac_e2e_18=pass tool_dock=ax tools=Line,Arrow selected_state=toggled")
 
-        # MAC-E2E-16: hovering Line exposes its options; AX toggles the dash and
+        # MAC-E2E-19: hovering Line exposes its options; AX toggles the dash and
         # changes width/colour, all as tool memory without a document version.
         line_tool = wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
         hover(line_tool["ref_id"])
@@ -707,9 +816,9 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.line.dash", True, 10.0)
         wait_tool_state(app, "arcshot.overlay.option.line.width.2", True, 10.0)
         wait_tool_state(app, "arcshot.overlay.option.line.color.green", True, 10.0)
-        note("mac_e2e_16=pass hover_options=ax line_style=#34C759/2/dash version_unchanged")
+        note("mac_e2e_19=pass hover_options=ax line_style=#34C759/2/dash version_unchanged")
 
-        # MAC-E2E-17: the arrow options toggle Inward and change width/colour.
+        # MAC-E2E-20: the arrow options toggle Inward and change width/colour.
         arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", True, 10.0)
         hover(arrow_tool["ref_id"])
         inward = wait_node(
@@ -774,15 +883,15 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.arrow.inward", True, 10.0)
         wait_tool_state(app, "arcshot.overlay.option.arrow.width.5", True, 10.0)
         wait_tool_state(app, "arcshot.overlay.option.arrow.color.orange", True, 10.0)
-        note("mac_e2e_17=pass hover_options=ax arrow_style=#FF9500/5/inward version_unchanged")
+        note("mac_e2e_20=pass hover_options=ax arrow_style=#FF9500/5/inward version_unchanged")
 
-        # MAC-E2E-18: rectangle keeps its own style memory after the other tools
+        # MAC-E2E-21: rectangle keeps its own style memory after the other tools
         # changed theirs.
         rectangle_tool = wait_tool_state(app, "arcshot.overlay.tool.rectangle", False, 10.0)
         hover(rectangle_tool["ref_id"])
         wait_tool_state(app, "arcshot.overlay.option.rectangle.width.5", True, 10.0)
         wait_tool_state(app, "arcshot.overlay.option.rectangle.color.blue", True, 10.0)
-        note("mac_e2e_18=pass tool_memory=independent rectangle=#007AFF/5")
+        note("mac_e2e_21=pass tool_memory=independent rectangle=#007AFF/5")
 
         root = wait_node(
             app,
@@ -801,24 +910,51 @@ def main() -> int:
             fail(f"AX-cancelled session left own windows: {windows(app)}")
         note("mac_e2e_12=pass overlay_cancel=ax phase=Resident")
 
+        # MAC-E2E-15: the 完成音效 preference toggles through AX and is persisted.
+        original_sound = next(
+            line.split("completion_sound=", 1)[1].split(" ", 1)[0]
+            for line in read_log(log)
+            if "preferences_launch completion_sound=" in line
+        )
+        if original_sound not in ("true", "false"):
+            fail(f"unexpected persisted completion-sound value: {original_sound!r}")
+        flipped_sound = "false" if original_sound == "true" else "true"
+        click(app, "完成音效")
+        wait_log(log, f"completion_sound enabled={flipped_sound} persisted=true", 10.0)
+        click(app, "完成音效")
+        wait_log(log, f"completion_sound enabled={original_sound} persisted=true", 10.0)
+        note(
+            f"mac_e2e_15=pass sound={original_sound}->{flipped_sound}->{original_sound} "
+            "selector=toggleCompletionSound:"
+        )
+        # Leave the opposite value in the preferences domain before the restart.
+        click(app, "完成音效")
+        wait_log(log, f"completion_sound enabled={flipped_sound} persisted=true", 10.0)
+
         # MAC-E2E-08: Quit removes process, status item and windows.
-        click(app, "退出 ArcShot")
-        try:
-            status_code = process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            fail("process did not exit after the quit command")
-        if status_code != 0:
-            fail(f"process exited {status_code} after the quit command")
-        if agent("list-apps", "--app", "ArcShot").get("apps"):
-            fail("an ArcShot instance is still running after quit")
-        try:
-            agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem")
-        except Failure as error:
-            if "APP_NOT_FOUND" not in str(error):
-                raise
-        else:
-            fail("status item is still addressable after quit")
+        quit_app(app, process, expect_status_item_removed=True)
         note("mac_e2e_08=pass exit=0 status_item=removed")
+
+        # MAC-E2E-16: the stored preference survives a real restart and is then
+        # restored to the value the user had before this run.
+        process = start(executable, restart_logs[0])
+        wait_log(
+            restart_logs[0], f"preferences_launch completion_sound={flipped_sound}", 10.0
+        )
+        click(app, "完成音效")
+        wait_log(
+            restart_logs[0], f"completion_sound enabled={original_sound} persisted=true", 10.0
+        )
+        quit_app(app, process, expect_status_item_removed=False)
+        process = start(executable, restart_logs[1])
+        wait_log(
+            restart_logs[1], f"preferences_launch completion_sound={original_sound}", 10.0
+        )
+        quit_app(app, process, expect_status_item_removed=False)
+        note(
+            f"mac_e2e_16=pass restart_restored={flipped_sound} "
+            f"restart_restored={original_sound} preference=local"
+        )
     finally:
         if process.poll() is None:
             process.terminate()
@@ -827,7 +963,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=18")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=21")
     return 0
 
 
