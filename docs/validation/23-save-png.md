@@ -10,8 +10,8 @@ PNG。
 ## 实测来源与环境
 
 - 基线 SHA：`65343e5`（`spec/v1` = #22 区域捕获切片）。
-- 实测实现/脚本 SHA：`0d2e6228b6e20c16ac44aab06bd2130801a64d66`。
-- 时间：2026-11-04T04:25:07Z（record-validation Debug/Release 各一次，同一提交）；
+- 实测实现/脚本 SHA：`ddcafffabc4d26de4aff71d93103e7cf5c44529b`。
+- 时间：2026-11-04T04:27:43Z（record-validation Debug/Release 各一次，同一提交）；
   完整入口 `scripts/check-all.sh` 在同一提交上 exit 0。
 - 构建配置：Debug 与 Release。
 - Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
@@ -29,7 +29,7 @@ PNG。
 - 夹具：2x 合成不透明 BGRA frame（1×1 与 100×50 逻辑、200×100 物理含 stride）、
   2×2 全 255 RGBA 的 87 字节 PNG、`$TMPDIR` 临时文件、私有命名 pasteboard。
   夹具 v1，不含用户截图。
-- 日志：`target/23-check-all.log`、`target/startup-smoke-debug.log`、
+- 日志：`target/23-final-check-all.log`、`target/startup-smoke-debug.log`、
   `target/startup-smoke-release.log`、`target/23-validation-debug.txt`、
   `target/23-validation-release.txt`。日志是本地构建产物，不入库；本报告保存摘要。
 - `worktree_dirty=false`；报告本身是之后的纯证据文档提交。
@@ -37,12 +37,12 @@ PNG。
 ## 执行
 
 ```sh
-scripts/check-all.sh > target/23-check-all.log 2>&1
+scripts/check-all.sh > target/23-final-check-all.log 2>&1
 target/bundle/debug/ArcShot.app/Contents/MacOS/arcshot --check-capture-environment
 scripts/record-validation.sh --configuration debug \
-  --logs target/23-check-all.log,target/startup-smoke-debug.log
+  --logs target/23-final-check-all.log,target/startup-smoke-debug.log
 scripts/record-validation.sh --configuration release \
-  --logs target/23-check-all.log,target/startup-smoke-release.log
+  --logs target/23-final-check-all.log,target/startup-smoke-release.log
 cargo test --locked -p arcshot-core --test save
 cargo test --locked -p arcshot-app --test output_publish
 cargo test --locked -p arcshot-macos --test save_native
@@ -98,6 +98,9 @@ save_file_smoke=pass bytes=87 roundtrip=true rejected_destination=true invalid_b
   长度覆盖发布前拒绝，原生适配器另有签名/预算/读回校验。
 - 文件写入是原子写入后校验字节数；读回不一致会删除刚写入的文件并报失败。
   只读卷、磁盘满与覆盖确认属于 MAC-RECOVERY 人工项。
+- 会话在“面板已完成、app 尚未取走结果”的同一 tick 内结束时，适配器不会再次
+  cancel 已关闭的面板，并且会丢弃该结果；job 栅栏同时禁止发布。这个时序由代码
+  路径保证，本轮未构造原生竞态注入。
 - 完成音效沿用 #22 现有行为（无条件播放）；音效偏好开关属后续票据，本轮未实现
   也未验证关闭后无声音。
 
