@@ -14,6 +14,12 @@ pub use preferences_flow::{
 };
 mod output_tasks;
 pub use output_tasks::{OutputSubmitError, OutputTasks};
+mod scroll_flow;
+pub use scroll_flow::{
+    ScrollPermissionAction, ScrollPermissionEffect, ScrollPermissionFlow, ScrollPermissionNotice,
+};
+mod scroll_target_tasks;
+pub use scroll_target_tasks::{ScrollTargetSubmitError, ScrollTargetTasks};
 mod output_publish;
 pub use output_publish::{PendingSave, encode_document, publish_output};
 mod key_policy;
