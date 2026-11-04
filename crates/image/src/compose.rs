@@ -3,7 +3,10 @@
 //! Region capture and scroll output use this single crop/composite/encode path.
 //! The input frame is immutable and never modified; no intermediate image is
 //! written to disk.
-use arcshot_core::{Annotation, CapturedFrame, MAX_EDGE, MAX_PIXELS, MAX_PNG_BYTES, PixelRect};
+use arcshot_core::{
+    Annotation, AnnotationStyle, CapturedFrame, LineStyle, MAX_EDGE, MAX_PIXELS, MAX_PNG_BYTES,
+    PixelRect, RectangleStyle, Selection,
+};
 use std::{
     error::Error,
     fmt,
@@ -106,7 +109,7 @@ pub fn compose_document(
     let mut image = compose_crop(frame, crop)?;
     let scale = frame.geometry().scale();
     for annotation in annotations {
-        draw_rectangle(&mut image, crop, scale, *annotation);
+        draw_annotation(&mut image, crop, scale, *annotation);
     }
     Ok(image)
 }
@@ -136,14 +139,35 @@ fn span(start: i64, end: i64, limit: u32) -> std::ops::Range<usize> {
     (start.clamp(0, limit) as usize)..(end.clamp(0, limit) as usize)
 }
 
+/// Rasterizes one retained annotation in its creation order.
+fn draw_annotation(image: &mut ComposedImage, crop: PixelRect, scale: f64, annotation: Annotation) {
+    match annotation.style() {
+        AnnotationStyle::Rectangle(style) => {
+            if let Some(bounds) = annotation.shape().rectangle_bounds() {
+                draw_rectangle(image, crop, scale, bounds, style);
+            }
+        }
+        AnnotationStyle::Line(style) => {
+            if let Some(segment) = annotation.shape().segment() {
+                draw_line(image, crop, scale, segment, style);
+            }
+        }
+        AnnotationStyle::Arrow(_) => draw_arrow(image, crop, scale, annotation),
+    }
+}
+
 /// Draws one rectangle with an opaque stroke and an optional 20% same-colour fill.
-fn draw_rectangle(image: &mut ComposedImage, crop: PixelRect, scale: f64, annotation: Annotation) {
-    let bounds = annotation.bounds();
+fn draw_rectangle(
+    image: &mut ComposedImage,
+    crop: PixelRect,
+    scale: f64,
+    bounds: Selection,
+    style: RectangleStyle,
+) {
     let x0 = physical(bounds.x(), scale, crop.x());
     let y0 = physical(bounds.y(), scale, crop.y());
     let x1 = physical(bounds.x() + bounds.width(), scale, crop.x());
     let y1 = physical(bounds.y() + bounds.height(), scale, crop.y());
-    let style = annotation.style();
     let thickness = ((style.width().points() * scale).round() as i64).max(1);
     let [red, green, blue] = style.stroke().rgb();
 
@@ -176,6 +200,198 @@ fn draw_rectangle(image: &mut ComposedImage, crop: PixelRect, scale: f64, annota
                 (y >= top && y < top + thickness) || (y >= bottom && y < bottom + thickness);
             if on_vertical || on_horizontal {
                 set_pixel(image, x as usize, y as usize, [red, green, blue]);
+            }
+        }
+    }
+}
+
+/// Logical-to-physical conversion for paths, centre-aligned like the rectangle stroke.
+fn physical_f(value: f64, scale: f64, origin: u32) -> f64 {
+    let limit = f64::from(i32::MAX);
+    (value * scale).clamp(-limit, limit) - f64::from(origin)
+}
+
+/// Draws a butt-capped thick line, solid or split into width-scaled dashes.
+fn draw_line(
+    image: &mut ComposedImage,
+    crop: PixelRect,
+    scale: f64,
+    segment: arcshot_core::Segment,
+    style: LineStyle,
+) {
+    let start = [
+        physical_f(segment.start()[0], scale, crop.x()),
+        physical_f(segment.start()[1], scale, crop.y()),
+    ];
+    let end = [
+        physical_f(segment.end()[0], scale, crop.x()),
+        physical_f(segment.end()[1], scale, crop.y()),
+    ];
+    let dx = end[0] - start[0];
+    let dy = end[1] - start[1];
+    let length = dx.hypot(dy);
+    if length == 0.0 || !length.is_finite() {
+        return;
+    }
+    let direction = [dx / length, dy / length];
+    let perpendicular = [-direction[1], direction[0]];
+    let half = ((style.width().points() * scale).round().max(1.0)) / 2.0;
+    let [red, green, blue] = style.stroke().rgb();
+    let color = [red, green, blue];
+    let quad = |from: f64, to: f64| {
+        let along = |distance: f64| {
+            [
+                start[0] + direction[0] * distance,
+                start[1] + direction[1] * distance,
+            ]
+        };
+        let (a, b) = (along(from), along(to));
+        [
+            [
+                a[0] + perpendicular[0] * half,
+                a[1] + perpendicular[1] * half,
+            ],
+            [
+                b[0] + perpendicular[0] * half,
+                b[1] + perpendicular[1] * half,
+            ],
+            [
+                b[0] - perpendicular[0] * half,
+                b[1] - perpendicular[1] * half,
+            ],
+            [
+                a[0] - perpendicular[0] * half,
+                a[1] - perpendicular[1] * half,
+            ],
+        ]
+    };
+    if !style.dash() {
+        fill_polygon(image, &quad(0.0, length), color);
+        return;
+    }
+    let (dash, gap) = style.dash_pattern();
+    let dash = (dash * scale).round().max(1.0);
+    let gap = (gap * scale).round().max(1.0);
+    let period = dash + gap;
+    // Only dashes intersecting the output surface are visited, so the loop is
+    // bounded by the image diagonal even when the retained segment is huge.
+    let limit = i64::from(i32::MAX) as f64;
+    let margin = [-half.clamp(-limit, limit), -half.clamp(-limit, limit)];
+    let Some((from, to)) = clip_parameter(
+        start,
+        end,
+        [margin[0].max(-limit), margin[1].max(-limit)],
+        [
+            f64::from(image.width) + half,
+            f64::from(image.height) + half,
+        ],
+    ) else {
+        return;
+    };
+    let first = (from * length / period).floor().max(0.0) as u64;
+    let last = (to * length / period).ceil().max(0.0) as u64;
+    for index in first..=last {
+        let begin = index as f64 * period;
+        let finish = (begin + dash).min(length);
+        if finish <= begin || finish <= from * length || begin >= to * length {
+            continue;
+        }
+        fill_polygon(image, &quad(begin.max(0.0), finish), color);
+    }
+}
+
+/// Clips a segment parameter range to an axis-aligned physical box.
+fn clip_parameter(
+    start: [f64; 2],
+    end: [f64; 2],
+    minimum: [f64; 2],
+    maximum: [f64; 2],
+) -> Option<(f64, f64)> {
+    let direction = [end[0] - start[0], end[1] - start[1]];
+    let (mut from, mut to) = (0.0_f64, 1.0_f64);
+    for axis in 0..2 {
+        if direction[axis] == 0.0 {
+            if start[axis] < minimum[axis] || start[axis] > maximum[axis] {
+                return None;
+            }
+            continue;
+        }
+        let mut enter = (minimum[axis] - start[axis]) / direction[axis];
+        let mut leave = (maximum[axis] - start[axis]) / direction[axis];
+        if enter > leave {
+            std::mem::swap(&mut enter, &mut leave);
+        }
+        from = from.max(enter);
+        to = to.min(leave);
+        if from > to {
+            return None;
+        }
+    }
+    Some((from, to))
+}
+
+/// Fills the arrow silhouette from the shared logical outline.
+fn draw_arrow(image: &mut ComposedImage, crop: PixelRect, scale: f64, annotation: Annotation) {
+    let Some(outlines) = annotation.arrow_outlines() else {
+        return;
+    };
+    let [red, green, blue] = annotation.style().stroke().rgb();
+    for outline in outlines {
+        let vertices: Vec<[f64; 2]> = outline
+            .into_iter()
+            .map(|[x, y]| {
+                [
+                    physical_f(x, scale, crop.x()),
+                    physical_f(y, scale, crop.y()),
+                ]
+            })
+            .collect();
+        fill_polygon(image, &vertices, [red, green, blue]);
+    }
+}
+
+/// Scanline-fills a polygon using pixel centres, clipped to the composed surface.
+fn fill_polygon(image: &mut ComposedImage, vertices: &[[f64; 2]], color: [u8; 3]) {
+    if vertices.len() < 3 {
+        return;
+    }
+    let mut minimum_y = f64::INFINITY;
+    let mut maximum_y = f64::NEG_INFINITY;
+    for vertex in vertices {
+        minimum_y = minimum_y.min(vertex[1]);
+        maximum_y = maximum_y.max(vertex[1]);
+    }
+    if !minimum_y.is_finite() || !maximum_y.is_finite() {
+        return;
+    }
+    let last_row = i64::from(image.height) - 1;
+    let first_row = ((minimum_y - 0.5).ceil() as i64).max(0);
+    let last_row = (((maximum_y - 0.5).ceil() as i64) - 1).min(last_row);
+    if first_row > last_row {
+        return;
+    }
+    let mut crossings: Vec<f64> = Vec::with_capacity(vertices.len());
+    for row in first_row..=last_row {
+        let center = row as f64 + 0.5;
+        crossings.clear();
+        let mut previous = vertices[vertices.len() - 1];
+        for &current in vertices {
+            let (x0, y0) = (previous[0], previous[1]);
+            let (x1, y1) = (current[0], current[1]);
+            if (y0 <= center) != (y1 <= center) {
+                crossings.push(x0 + (center - y0) * (x1 - x0) / (y1 - y0));
+            }
+            previous = current;
+        }
+        crossings.sort_by(f64::total_cmp);
+        for pair in crossings.as_chunks::<2>().0 {
+            let left = ((pair[0] - 0.5).ceil() as i64).max(0);
+            let right = (((pair[1] - 0.5).ceil() as i64) - 1).min(i64::from(image.width) - 1);
+            if left > right {
+                continue;
+            }
+            for x in left..=right {
+                set_pixel(image, x as usize, row as usize, color);
             }
         }
     }

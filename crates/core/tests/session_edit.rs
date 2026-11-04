@@ -1,7 +1,8 @@
 //! CORE-SESSION: selection drags, reselect, undo/redo and new-session history.
 use arcshot_core::{
-    CaptureAction, CaptureEffect, CapturePhase, CaptureSession, CaptureTicket, CapturedFrame,
-    OutputFailure, PaletteColor, RectangleOption, ScreenGeometry, Selection, Tool,
+    ArrowOption, ArrowStyle, CaptureAction, CaptureEffect, CapturePhase, CaptureSession,
+    CaptureTicket, CapturedFrame, LineOption, LineStyle, OutputFailure, PaletteColor,
+    RectangleOption, ScreenGeometry, Selection, StrokeWidth, Tool,
 };
 
 fn screen() -> ScreenGeometry {
@@ -339,6 +340,128 @@ fn core_session_24_annotation_actions_share_the_edit_fence_and_history() {
     assert_eq!(document.tool(), Tool::Rectangle);
     assert!(!document.rectangle_style().fill());
     assert_eq!(document.version(), version + 5);
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+}
+
+#[test]
+fn core_session_25_line_and_arrow_actions_share_the_edit_fence() {
+    let (mut session, ticket) = frozen();
+    select(&mut session, ticket);
+    let version = session.document().unwrap().version();
+
+    session.dispatch(CaptureAction::SelectTool {
+        ticket,
+        tool: Tool::Line,
+    });
+    session.dispatch(CaptureAction::PointerPressed {
+        ticket,
+        point: [12.0, 8.0],
+    });
+    session.dispatch(CaptureAction::PointerMoved {
+        ticket,
+        point: [38.0, 8.0],
+    });
+    session.dispatch(CaptureAction::PointerReleased { ticket });
+    assert_eq!(session.document().unwrap().version(), version + 1);
+    assert_eq!(
+        session.document().unwrap().annotations()[0].style(),
+        arcshot_core::AnnotationStyle::Line(LineStyle::default())
+    );
+
+    session.dispatch(CaptureAction::LineOption {
+        ticket,
+        option: LineOption::Dash(true),
+    });
+    session.dispatch(CaptureAction::LineOption {
+        ticket,
+        option: LineOption::Width(StrokeWidth::Five),
+    });
+    let document = session.document().unwrap();
+    let style = document.annotations()[0].style().line().unwrap();
+    assert!(style.dash());
+    assert_eq!(style.width(), StrokeWidth::Five);
+    assert_eq!(document.version(), version + 3);
+
+    // An arrow option while a line is selected only changes the arrow memory.
+    let current = session.document().unwrap().version();
+    session.dispatch(CaptureAction::ArrowOption {
+        ticket,
+        option: ArrowOption::Inward(true),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.version(), current);
+    assert!(document.arrow_style().inward());
+    assert_eq!(
+        document.annotations()[0].style().line().unwrap().width(),
+        StrokeWidth::Five
+    );
+
+    // A newly created arrow takes the arrow memory and stays editable.
+    session.dispatch(CaptureAction::SelectTool {
+        ticket,
+        tool: Tool::Arrow,
+    });
+    session.dispatch(CaptureAction::PointerPressed {
+        ticket,
+        point: [14.0, 12.0],
+    });
+    session.dispatch(CaptureAction::PointerMoved {
+        ticket,
+        point: [34.0, 12.0],
+    });
+    session.dispatch(CaptureAction::PointerReleased { ticket });
+    session.dispatch(CaptureAction::ArrowOption {
+        ticket,
+        option: ArrowOption::Stroke(PaletteColor::Green),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.annotations().len(), 2);
+    assert_eq!(
+        document.annotations()[1].style(),
+        arcshot_core::AnnotationStyle::Arrow(
+            ArrowStyle::default()
+                .with_option(ArrowOption::Inward(true))
+                .with_option(ArrowOption::Stroke(PaletteColor::Green))
+        )
+    );
+
+    // Output ownership disables tool and style edits for both tools.
+    let job = match session
+        .dispatch(CaptureAction::Finish { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::ComposeOutput(job)) => job,
+        _ => panic!("expected output job"),
+    };
+    let version = session.document().unwrap().version();
+    let annotations = session.document().unwrap().annotations().to_vec();
+    session.dispatch(CaptureAction::SelectTool {
+        ticket,
+        tool: Tool::Rectangle,
+    });
+    session.dispatch(CaptureAction::LineOption {
+        ticket,
+        option: LineOption::Stroke(PaletteColor::Blue),
+    });
+    session.dispatch(CaptureAction::ArrowOption {
+        ticket,
+        option: ArrowOption::Width(StrokeWidth::Two),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.version(), version);
+    assert_eq!(document.annotations(), annotations.as_slice());
+    assert_eq!(document.tool(), Tool::Arrow);
+
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
             job,

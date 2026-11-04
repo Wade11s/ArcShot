@@ -1,5 +1,8 @@
 //! Authority for capture preparation, cancellation and native uncertainty.
-use crate::{Annotation, CapturedFrame, Document, PixelRect, RectangleOption, Selection, Tool};
+use crate::{
+    Annotation, ArrowOption, CapturedFrame, Document, LineOption, PixelRect, RectangleOption,
+    Selection, Tool,
+};
 use std::{error::Error, fmt};
 
 /// Identifies one capture attempt across permission, worker and window effects.
@@ -88,6 +91,20 @@ pub enum CaptureAction {
         ticket: CaptureTicket,
         /// Style option the user selected.
         option: RectangleOption,
+    },
+    /// Applies one line option to the tool memory and any selected line.
+    LineOption {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Style option the user selected.
+        option: LineOption,
+    },
+    /// Applies one arrow option to the tool memory and any selected arrow.
+    ArrowOption {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Style option the user selected.
+        option: ArrowOption,
     },
     /// Deletes the single selected object as one undoable step.
     DeleteSelected {
@@ -531,6 +548,18 @@ impl CaptureSession {
             CaptureAction::RectangleOption { ticket, option } => {
                 if let Some(document) = self.editable(ticket) {
                     let _ = document.apply_rectangle_option(option);
+                }
+                vec![]
+            }
+            CaptureAction::LineOption { ticket, option } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.apply_line_option(option);
+                }
+                vec![]
+            }
+            CaptureAction::ArrowOption { ticket, option } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.apply_arrow_option(option);
                 }
                 vec![]
             }

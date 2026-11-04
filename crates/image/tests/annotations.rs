@@ -32,7 +32,7 @@ fn document(annotations: &[(Selection, RectangleStyle)]) -> Document {
     document.select(selection(0.0, 0.0, 40.0, 20.0)).unwrap();
     for (bounds, style) in annotations {
         set_style(&mut document, *style);
-        document.add_annotation(*bounds).unwrap();
+        document.add_rectangle(*bounds).unwrap();
     }
     document
 }
@@ -162,7 +162,7 @@ fn image_compose_08_the_selection_crop_clips_annotation_pixels_at_its_edges() {
     document.select(selection(5.0, 2.0, 10.0, 5.0)).unwrap();
     // The rectangle leaves the selection on every side; only the crop is output.
     document
-        .add_annotation(selection(6.0, 1.0, 8.0, 6.0))
+        .add_rectangle(selection(6.0, 1.0, 8.0, 6.0))
         .unwrap();
     let crop = document.crop().unwrap();
     assert_eq!(crop, PixelRect::try_new(10, 4, 20, 10).unwrap());

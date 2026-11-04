@@ -101,6 +101,12 @@ def count_log(path: pathlib.Path, needle: str) -> int:
     return sum(1 for line in read_log(path) if needle in line)
 
 
+def wait_log_line(path: pathlib.Path, needle: str, timeout: float, *, after: int = 0) -> str:
+    """Returns the first matching log line at or after an index."""
+    index = wait_log(path, needle, timeout, after=after)
+    return read_log(path)[index]
+
+
 def find_ref(app: str, name: str) -> str:
     data = agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem", "--name", name)
     matches = data.get("matches", [])
@@ -610,6 +616,174 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.rectangle.color.red", False, 10.0)
         note("mac_e2e_14=pass hover_options=ax style=#007AFF width=5 version_unchanged")
 
+        # MAC-E2E-15: the two line-class tools are addressable and mutually
+        # exclusive with the existing Select/Rectangle checked states.
+        line_tool = wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
+        arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", False, 10.0)
+        if not line_tool.get("ref_id") or not arrow_tool.get("ref_id"):
+            fail("line/arrow tool buttons are not addressable")
+        mark = len(read_log(log))
+        agent("click", line_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.line action=Click", 10.0, after=mark)
+        line = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+        if "tool=Line" not in line:
+            fail(f"line tool diagnostic was {line!r}")
+        wait_tool_state(app, "arcshot.overlay.tool.line", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.rectangle", False, 10.0)
+        arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", False, 10.0)
+        mark = len(read_log(log))
+        agent("click", arrow_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.arrow action=Click", 10.0, after=mark)
+        arrow = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+        if "tool=Arrow" not in arrow:
+            fail(f"arrow tool diagnostic was {arrow!r}")
+        wait_tool_state(app, "arcshot.overlay.tool.arrow", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
+        note("mac_e2e_15=pass tool_dock=ax tools=Line,Arrow selected_state=toggled")
+
+        # MAC-E2E-16: hovering Line exposes its options; AX toggles the dash and
+        # changes width/colour, all as tool memory without a document version.
+        line_tool = wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
+        hover(line_tool["ref_id"])
+        dash = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.line.dash",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not dash.get("ref_id"):
+            fail("hovered line options are not addressable")
+        if checked_state(dash):
+            fail("a new line session must default to solid")
+        mark = len(read_log(log))
+        agent("click", dash["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.line.dash action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=LineOption", 10.0, after=mark)
+        if "dash=true" not in edit or "width=3" not in edit:
+            fail(f"line dash diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.line.dash", True, 10.0)
+        width_two = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.line.width.2",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", width_two["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.line.width.2 action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=LineOption", 10.0, after=mark)
+        if "width=2" not in edit or "dash=true" not in edit:
+            fail(f"line width diagnostic was {edit!r}")
+        green = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.line.color.green",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", green["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.line.color.green action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=LineOption", 10.0, after=mark)
+        if "stroke=#34C759 width=2 dash=true" not in edit:
+            fail(f"line colour diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.line.dash", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.line.width.2", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.line.color.green", True, 10.0)
+        note("mac_e2e_16=pass hover_options=ax line_style=#34C759/2/dash version_unchanged")
+
+        # MAC-E2E-17: the arrow options toggle Inward and change width/colour.
+        arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", True, 10.0)
+        hover(arrow_tool["ref_id"])
+        inward = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.arrow.inward",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not inward.get("ref_id"):
+            fail("hovered arrow options are not addressable")
+        if checked_state(inward):
+            fail("a new arrow session must default to flat")
+        mark = len(read_log(log))
+        agent("click", inward["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.arrow.inward action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=ArrowOption", 10.0, after=mark)
+        if "inward=true" not in edit or "width=3" not in edit:
+            fail(f"arrow inward diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.arrow.inward", True, 10.0)
+        width_five = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.arrow.width.5",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", width_five["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.arrow.width.5 action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=ArrowOption", 10.0, after=mark)
+        if "width=5" not in edit or "inward=true" not in edit:
+            fail(f"arrow width diagnostic was {edit!r}")
+        orange = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.arrow.color.orange",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", orange["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.arrow.color.orange action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=ArrowOption", 10.0, after=mark)
+        if "stroke=#FF9500 width=5 inward=true" not in edit:
+            fail(f"arrow colour diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.arrow.inward", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.arrow.width.5", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.arrow.color.orange", True, 10.0)
+        note("mac_e2e_17=pass hover_options=ax arrow_style=#FF9500/5/inward version_unchanged")
+
+        # MAC-E2E-18: rectangle keeps its own style memory after the other tools
+        # changed theirs.
+        rectangle_tool = wait_tool_state(app, "arcshot.overlay.tool.rectangle", False, 10.0)
+        hover(rectangle_tool["ref_id"])
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.width.5", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.color.blue", True, 10.0)
+        note("mac_e2e_18=pass tool_memory=independent rectangle=#007AFF/5")
+
         root = wait_node(
             app,
             lambda tree: (
@@ -653,7 +827,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=14")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=18")
     return 0
 
 
