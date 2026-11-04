@@ -401,7 +401,9 @@ impl Coordinator {
         }
         // The Scroll permission flow has its own Settings-return detection: a
         // successful re-check never auto-starts Scroll, it only updates the notice.
-        if self.scroll_visiting_settings && self.session.scroll_phase() != ScrollPhase::Inactive {
+        // The session's Scroll phase is already Inactive after a permission
+        // refusal, so the detection must not depend on it.
+        if self.scroll_visiting_settings {
             if !native::application_active() {
                 self.scroll_settings_departed = true;
             }
