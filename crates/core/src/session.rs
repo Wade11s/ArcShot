@@ -3,8 +3,9 @@ use crate::{
     Annotation, ArrowOption, BlurOption, CapturedFrame, Density, Document, LineOption, PixelRect,
     RectangleOption, Selection, TextOption, Tool,
     scroll::{
-        ScrollPermissions, ScrollPhase, ScrollPrepOutcome, ScrollPreparation, ScrollRefusal,
-        ScrollTarget, ScrollTargetError, ScrollWindowError,
+        ScrollFrameError, ScrollInputError, ScrollPermissions, ScrollPhase, ScrollPrepOutcome,
+        ScrollPreparation, ScrollRefusal, ScrollTarget, ScrollTargetError, ScrollWindowError,
+        scroll_frame_geometry,
     },
 };
 use std::{error::Error, fmt};
@@ -237,6 +238,41 @@ pub enum CaptureAction {
         /// Mapped public window IDs, or a known-state failure.
         result: Result<Vec<u32>, ScrollWindowError>,
     },
+    /// Reports the input-protection installation result (I-12 input handshake).
+    ScrollInputInstalled {
+        /// Preparation that requested input protection.
+        ticket: CaptureTicket,
+        /// The tap exists (`Ok`) or a known-state reason it does not.
+        result: Result<(), ScrollInputError>,
+    },
+    /// Reports the trusted-initial-frame capture (I-11 step 3 / I-12 admission).
+    ScrollFrameAdmitted {
+        /// Preparation that requested the frame.
+        ticket: CaptureTicket,
+        /// An admitted named-sRGB frame, or a classified capture failure.
+        result: Result<CapturedFrame, CaptureFailure>,
+    },
+    /// The session event tap was disabled; input protection is explicitly lost.
+    ScrollInputLost {
+        /// Preparation whose protection was lost.
+        ticket: CaptureTicket,
+    },
+    /// The locked target moved, disappeared, resized or lost the foreground.
+    ScrollTargetLost {
+        /// Preparation whose target was lost.
+        ticket: CaptureTicket,
+        /// The classified target failure.
+        error: ScrollTargetError,
+    },
+    /// Enter or an ArcShot-owned double-click completes from the single frame.
+    ///
+    /// Valid only while collecting: the completion document is the trusted
+    /// initial frame and the one side effect is the shared clipboard Finish.
+    /// This only means the user stopped collecting; it never claims coverage.
+    CompleteScroll {
+        /// Preparation that owns collection.
+        ticket: CaptureTicket,
+    },
     /// Cancels Scroll preparation and keeps the region selection (I-11 step 10).
     CancelScroll {
         /// Preparation to cancel.
@@ -282,8 +318,12 @@ pub enum CaptureEffect {
     IdentifyScrollTarget(CaptureTicket),
     /// Fix ArcShot's own visible window set and map it to one exclusion array.
     PrepareScrollWindows(CaptureTicket),
-    /// Native Scroll preparation finished; the input handshake is a later slice.
+    /// Native Scroll preparation finished; the app installs input protection next.
     ScrollPrepared(CaptureTicket),
+    /// Input protection was established; capture the one trusted initial frame.
+    CaptureScrollFrame(CaptureTicket),
+    /// Collection opened; the control UI may release raw scroll in the selection.
+    ScrollCollecting(CaptureTicket),
     /// Preparation stopped with a known-state reason; keep the region session.
     ScrollRefused(CaptureTicket, ScrollRefusal),
     /// Native state is uncertain; close Scroll UI and require a relaunch.
@@ -834,6 +874,9 @@ impl CaptureSession {
                 match result {
                     Ok(()) => {
                         self.state = State::Resident;
+                        // A successful Scroll completion ends the whole session;
+                        // the stashed region document is not restored.
+                        self.scroll = None;
                         let mut effects = vec![CaptureEffect::DismissOverlay];
                         // The preference only silences success; failure still reports.
                         if self.completion_sound {
@@ -841,7 +884,12 @@ impl CaptureSession {
                         }
                         effects
                     }
-                    Err(error) => vec![CaptureEffect::ReportOutputFailure(error)],
+                    Err(error) => {
+                        // A failed Scroll completion keeps the collected result:
+                        // the region document returns so Esc and retry work.
+                        self.restore_scroll_region_document();
+                        vec![CaptureEffect::ReportOutputFailure(error)]
+                    }
                 }
             }
             CaptureAction::EnterScroll { ticket } => {
@@ -906,14 +954,63 @@ impl CaptureSession {
                 let outcome = preparation.fix_windows(result);
                 self.finish_scroll_outcome(ticket, outcome)
             }
-            CaptureAction::CancelScroll { ticket } => {
+            CaptureAction::ScrollInputInstalled { ticket, result } => {
                 let Some(preparation) = self.scroll.as_mut() else {
                     return vec![];
                 };
                 if preparation.ticket() != ticket {
                     return vec![];
                 }
-                let outcome = preparation.stop();
+                let outcome = preparation.install_input(result);
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::ScrollFrameAdmitted { ticket, result } => {
+                self.admit_scroll_frame(ticket, result)
+            }
+            CaptureAction::ScrollInputLost { ticket } => {
+                // An output already in flight outranks protection: the frame is
+                // trusted, so the publish fence governs and this is too late.
+                if self.output.is_some() {
+                    return vec![];
+                }
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.lose_input_protection();
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::ScrollTargetLost { ticket, error } => {
+                // Same fence as input loss: a running output completes anyway.
+                if self.output.is_some() {
+                    return vec![];
+                }
+                let Some(preparation) = self.scroll.as_mut() else {
+                    return vec![];
+                };
+                if preparation.ticket() != ticket {
+                    return vec![];
+                }
+                let outcome = preparation.stop_collecting(ScrollRefusal::Target(error));
+                self.finish_scroll_outcome(ticket, outcome)
+            }
+            CaptureAction::CompleteScroll { ticket } => self.complete_scroll(ticket),
+            CaptureAction::CancelScroll { ticket } => {
+                let owned = self
+                    .scroll
+                    .as_ref()
+                    .is_some_and(|preparation| preparation.ticket() == ticket);
+                if !owned {
+                    return vec![];
+                }
+                // A completion output in flight is abandoned with its fence.
+                self.output = None;
+                let outcome = self
+                    .scroll
+                    .as_mut()
+                    .map_or(ScrollPrepOutcome::Ignored, ScrollPreparation::stop);
                 self.finish_scroll_outcome(ticket, outcome)
             }
             CaptureAction::ScrollNativeUncertain { ticket } => {
@@ -973,7 +1070,13 @@ impl CaptureSession {
             ScrollPrepOutcome::IdentifyTarget => vec![CaptureEffect::IdentifyScrollTarget(ticket)],
             ScrollPrepOutcome::PrepareWindows => vec![CaptureEffect::PrepareScrollWindows(ticket)],
             ScrollPrepOutcome::Prepared => vec![CaptureEffect::ScrollPrepared(ticket)],
+            ScrollPrepOutcome::CaptureFrame => vec![CaptureEffect::CaptureScrollFrame(ticket)],
+            ScrollPrepOutcome::Collecting => vec![CaptureEffect::ScrollCollecting(ticket)],
+            ScrollPrepOutcome::Ignored => vec![],
             ScrollPrepOutcome::Refused(refusal) => {
+                // A refusal never abandons output the user already owns: the
+                // region document returns before the overlay re-presents.
+                self.restore_scroll_region_document();
                 self.scroll = None;
                 vec![
                     CaptureEffect::ScrollRefused(ticket, refusal),
@@ -981,10 +1084,144 @@ impl CaptureSession {
                 ]
             }
             ScrollPrepOutcome::Stopped => {
+                self.restore_scroll_region_document();
                 self.scroll = None;
                 vec![CaptureEffect::PresentFrozen(ticket)]
             }
         }
+    }
+
+    /// Returns a stashed region document to the frozen state, if one exists.
+    ///
+    /// Collection stashes the region document while a completion output runs;
+    /// abandon and failure paths put it back so Esc always returns the
+    /// pre-scroll selection on the same frozen frame.
+    fn restore_scroll_region_document(&mut self) {
+        let Some(region) = self
+            .scroll
+            .as_mut()
+            .and_then(ScrollPreparation::take_region_document)
+        else {
+            return;
+        };
+        if let State::Frozen { document, .. } = &mut self.state {
+            *document = region;
+        }
+    }
+
+    /// Validates and admits one Scroll frame result (I-12 admission contract).
+    ///
+    /// Uncertain native state and display loss reuse the terminal paths; every
+    /// known-state frame failure refuses without output and keeps the region
+    /// session. An admitted frame must exactly match the fixed display,
+    /// selection and scale through the shared `scroll_frame_geometry` conversion.
+    fn admit_scroll_frame(
+        &mut self,
+        ticket: CaptureTicket,
+        result: Result<CapturedFrame, CaptureFailure>,
+    ) -> Vec<CaptureEffect> {
+        let matches_prepared = self.scroll.as_ref().is_some_and(|preparation| {
+            preparation.ticket() == ticket && preparation.phase() == ScrollPhase::Prepared
+        });
+        if !matches_prepared {
+            return vec![]; // A late or duplicate frame never opens collection.
+        }
+        let failure = match result {
+            Ok(frame) => {
+                let expected = self.scroll_frame_expectation();
+                if expected.is_some_and(|geometry| frame.geometry() == geometry) {
+                    let outcome = self
+                        .scroll
+                        .as_mut()
+                        .map_or(ScrollPrepOutcome::Ignored, |preparation| {
+                            preparation.admit_frame(frame)
+                        });
+                    return self.finish_scroll_outcome(ticket, outcome);
+                }
+                ScrollFrameError::Geometry
+            }
+            Err(CaptureFailure::InvalidFrame) => ScrollFrameError::Admission,
+            Err(CaptureFailure::ResourceLimit) => ScrollFrameError::ResourceLimit,
+            Err(CaptureFailure::WorkerUnavailable) => ScrollFrameError::Worker,
+            Err(CaptureFailure::DisplayInvalid) => {
+                return self.dispatch(CaptureAction::DisplayInvalidated);
+            }
+            Err(CaptureFailure::NativeUncertain) | Err(CaptureFailure::WorkerPanicked) => {
+                return self.dispatch(CaptureAction::ScrollNativeUncertain { ticket });
+            }
+        };
+        let outcome = self
+            .scroll
+            .as_mut()
+            .map_or(ScrollPrepOutcome::Ignored, |preparation| {
+                preparation.stop_prepared(ScrollRefusal::Frame(failure))
+            });
+        self.finish_scroll_outcome(ticket, outcome)
+    }
+
+    /// The frame geometry the fixed selection must produce, if it is still valid.
+    fn scroll_frame_expectation(&self) -> Option<crate::ScreenGeometry> {
+        let State::Frozen { document, .. } = &self.state else {
+            return None;
+        };
+        let preparation = self.scroll.as_ref()?;
+        let region = document.frame().geometry();
+        let crop = preparation.selection().pixel_rect(region).ok()?;
+        scroll_frame_geometry(region, crop).ok()
+    }
+
+    /// Completes from the trusted single frame (I-11 step 6).
+    ///
+    /// The completion document is the admitted frame with a whole-frame
+    /// selection, run through the same fenced clipboard Finish as a region
+    /// capture. The region document is stashed so Esc and failure return the
+    /// pre-scroll selection; success ends the session without restoring it.
+    /// Completing only means the user stopped collecting: it never claims
+    /// top/bottom coverage.
+    fn complete_scroll(&mut self, ticket: CaptureTicket) -> Vec<CaptureEffect> {
+        if self.output.is_some() {
+            return vec![]; // Repeated completion is disabled while output runs.
+        }
+        let may_complete = self.scroll.as_ref().is_some_and(|preparation| {
+            preparation.ticket() == ticket
+                && preparation.phase() == ScrollPhase::Collecting
+                && preparation.frame().is_some()
+        }) && matches!(self.state, State::Frozen { ticket: current, .. } if current == ticket);
+        if !may_complete {
+            return vec![];
+        }
+        let frame = self
+            .scroll
+            .as_ref()
+            .and_then(ScrollPreparation::frame)
+            .cloned();
+        let Some(frame) = frame else {
+            return vec![];
+        };
+        let geometry = frame.geometry();
+        let [width, height] = geometry.pixel_size();
+        let scale = geometry.scale();
+        let Some(full) = Selection::try_new(
+            0.0,
+            0.0,
+            f64::from(width) / scale,
+            f64::from(height) / scale,
+        )
+        .ok() else {
+            return vec![];
+        };
+        let mut completion = Document::new(frame);
+        if completion.select(full).is_err() {
+            return vec![]; // A completion document must publish its whole frame.
+        }
+        let State::Frozen { document, .. } = &mut self.state else {
+            return vec![];
+        };
+        let region = std::mem::replace(document, Box::new(completion));
+        if let Some(preparation) = self.scroll.as_mut() {
+            preparation.stash_region_document(region);
+        }
+        self.begin_output(ticket, OutputTarget::Clipboard, None)
     }
 
     /// Runs the shared pre-output contract, then fences one output snapshot.

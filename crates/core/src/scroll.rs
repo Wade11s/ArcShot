@@ -1,11 +1,16 @@
-//! Pure Scroll Capture preparation: permissions, target lock and own-window exclusion.
+//! Pure Scroll Capture preparation and the protected single-frame collection
+//! loop: permissions, target lock, own-window exclusion, input handshake and
+//! trusted first frame.
 //!
-//! This module is the authoritative, platform-neutral half of I-11 steps 1–2 and
-//! the permission/target half of I-12. It never touches system I/O: the app
-//! injects the real permission results, the identified target and the fixed
-//! exclusion set, and this module decides whether preparation may continue,
-//! stop without output, or require a relaunch.
-use crate::{CaptureTicket, Selection};
+//! This module is the authoritative, platform-neutral half of I-11 steps 1–3
+//! and 6/10 plus the permission/target/input half of I-12. It never touches
+//! system I/O: the app injects the real permission results, the identified
+//! target, the fixed exclusion set, the input-protection result and the
+//! admitted frame; this module decides whether preparation may continue,
+//! collection may open, completion may publish, or the process must relaunch.
+use crate::{
+    CaptureTicket, CapturedFrame, Document, PixelRect, ScreenGeometry, Selection, frame::FrameError,
+};
 
 /// The three permissions Scroll Capture requires, in preflight order.
 ///
@@ -176,7 +181,40 @@ pub enum ScrollWindowError {
     NotMainThread,
 }
 
-/// Why Scroll preparation stopped without producing output.
+/// Why the Scroll input protection could not be established or was lost.
+///
+/// Every variant is a known state: collection stops without output and the
+/// region session survives for another attempt.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ScrollInputError {
+    /// The target application could not be brought to the front.
+    NotFrontmost,
+    /// The session event tap could not be created or enabled.
+    TapUnavailable,
+    /// A physical button or capture key was held when protection started.
+    GestureInProgress,
+    /// The system disabled the tap; protection is explicitly lost.
+    ProtectionLost,
+    /// A previous tap is still releasing the input it owns.
+    StillDraining,
+}
+
+/// Why a Scroll initial frame could not be trusted.
+///
+/// These are known-state content failures: collection stops without output.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ScrollFrameError {
+    /// The frame failed admission (dimensions, stride, bytes or opacity).
+    Admission,
+    /// The frame geometry does not match the fixed display/selection/scale.
+    Geometry,
+    /// The capture exceeds the Scroll resource budget.
+    ResourceLimit,
+    /// The capture worker could not start; no native request began.
+    Worker,
+}
+
+/// Why Scroll preparation or collection stopped without producing output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScrollRefusal {
     /// The frozen document has no valid selection.
@@ -189,9 +227,13 @@ pub enum ScrollRefusal {
     Target(ScrollTargetError),
     /// The own-window exclusion set could not be fixed.
     Windows(ScrollWindowError),
+    /// The input protection could not be established or was lost.
+    Input(ScrollInputError),
+    /// The trusted first frame could not be captured or admitted.
+    Frame(ScrollFrameError),
 }
 
-/// Observable Scroll preparation lifecycle, independent of the region phase.
+/// Observable Scroll lifecycle, independent of the region phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollPhase {
     /// No Scroll preparation is active.
@@ -202,13 +244,15 @@ pub enum ScrollPhase {
     IdentifyingTarget,
     /// ArcShot's own visible window set is being fixed.
     PreparingWindows,
-    /// Native preparation finished; the input handshake/first frame is a later slice.
+    /// Native preparation finished; input protection and the first frame come next.
     Prepared,
-    /// Preparation stopped; the region session and its selection are kept.
+    /// Input protection is active and the trusted first frame was admitted.
+    Collecting,
+    /// Preparation or collection stopped; the region session and its selection are kept.
     Stopped,
 }
 
-/// The state transition one preparation action produces.
+/// The state transition one Scroll action produces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScrollPrepOutcome {
     /// Ask the app to preflight the three permissions.
@@ -219,10 +263,16 @@ pub enum ScrollPrepOutcome {
     PrepareWindows,
     /// Native preparation finished.
     Prepared,
+    /// Input protection was established; ask the app to capture the first frame.
+    CaptureFrame,
+    /// The trusted first frame was admitted; collection may open.
+    Collecting,
     /// Preparation stopped with a known-state refusal; keep the region session.
     Refused(ScrollRefusal),
     /// Preparation was cancelled; keep the region session.
     Stopped,
+    /// The action belongs to another phase or a finished attempt; nothing changes.
+    Ignored,
 }
 
 /// One Scroll preparation entered from a frozen region selection.
@@ -235,12 +285,17 @@ pub struct ScrollPreparation {
     target: Option<ScrollTarget>,
     exclusion: Option<Vec<u32>>,
     refusal: Option<ScrollRefusal>,
+    /// The one trusted initial frame; the single-frame loop never queues a second.
+    frame: Option<CapturedFrame>,
+    /// The region document, stashed while a completion output runs; restored on
+    /// abandon or failure so Esc always returns the pre-scroll selection.
+    region_document: Option<Box<Document>>,
 }
 
 impl ScrollPreparation {
     /// Starts preparation for one frozen selection.
     #[must_use]
-    pub const fn new(ticket: CaptureTicket, selection: Selection) -> Self {
+    pub fn new(ticket: CaptureTicket, selection: Selection) -> Self {
         Self {
             ticket,
             selection,
@@ -253,6 +308,8 @@ impl ScrollPreparation {
             target: None,
             exclusion: None,
             refusal: None,
+            frame: None,
+            region_document: None,
         }
     }
 
@@ -290,6 +347,73 @@ impl ScrollPreparation {
     #[must_use]
     pub fn refusal(&self) -> Option<&ScrollRefusal> {
         self.refusal.as_ref()
+    }
+
+    /// The trusted initial frame, once collection has opened.
+    #[must_use]
+    pub fn frame(&self) -> Option<&CapturedFrame> {
+        self.frame.as_ref()
+    }
+
+    /// Applies the input-protection installation result.
+    ///
+    /// Only valid while prepared; a success asks the app for the trusted first
+    /// frame, a failure stops with a known-state refusal.
+    pub fn install_input(&mut self, result: Result<(), ScrollInputError>) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Prepared {
+            return ScrollPrepOutcome::Ignored;
+        }
+        match result {
+            Ok(()) => ScrollPrepOutcome::CaptureFrame,
+            Err(error) => self.stop_with(ScrollRefusal::Input(error)),
+        }
+    }
+
+    /// Admits the trusted initial frame and opens collection.
+    ///
+    /// Only valid while prepared and awaiting the frame; a duplicate admission
+    /// (the single-frame loop never queues a second raw frame) is ignored.
+    pub fn admit_frame(&mut self, frame: CapturedFrame) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Prepared {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.frame = Some(frame);
+        self.phase = ScrollPhase::Collecting;
+        ScrollPrepOutcome::Collecting
+    }
+
+    /// Stops with a known-state refusal from collection (protection or target loss).
+    pub fn stop_collecting(&mut self, refusal: ScrollRefusal) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Collecting {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.stop_with(refusal)
+    }
+
+    /// Stops with a known-state refusal from the frame-admission handshake.
+    pub fn stop_prepared(&mut self, refusal: ScrollRefusal) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Prepared {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.stop_with(refusal)
+    }
+
+    /// The session tap was disabled while armed or collecting.
+    pub fn lose_input_protection(&mut self) -> ScrollPrepOutcome {
+        if !matches!(self.phase, ScrollPhase::Prepared | ScrollPhase::Collecting) {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.stop_with(ScrollRefusal::Input(ScrollInputError::ProtectionLost))
+    }
+
+    /// Stashes the region document while a completion output runs.
+    pub fn stash_region_document(&mut self, document: Box<Document>) {
+        self.region_document = Some(document);
+    }
+
+    /// Takes the stashed region document back, if completion did not end the session.
+    pub fn take_region_document(&mut self) -> Option<Box<Document>> {
+        self.region_document.take()
     }
 
     /// Applies the real permission preflight result.
@@ -348,4 +472,31 @@ impl ScrollPreparation {
         self.refusal = Some(refusal.clone());
         ScrollPrepOutcome::Refused(refusal)
     }
+}
+
+/// The single display+crop → frame-geometry conversion for Scroll captures.
+///
+/// The initial (and every later) Scroll frame is captured with `sourceRect` at
+/// the fixed selection, so its geometry is the display-anchored rectangle of
+/// the selection's physical crop. The app and the core share this one
+/// conversion; an admitted frame whose geometry differs is not the fixed
+/// selection and is refused.
+///
+/// # Errors
+/// Returns the [`FrameError`] of [`ScreenGeometry::try_new`] when the crop
+/// cannot become a valid 2x frame geometry (edges, pixel budget, arithmetic).
+pub fn scroll_frame_geometry(
+    region: ScreenGeometry,
+    crop: PixelRect,
+) -> Result<ScreenGeometry, FrameError> {
+    let scale = region.scale();
+    let [origin_x, origin_y] = region.screen_origin();
+    ScreenGeometry::try_new(
+        region.display_id(),
+        origin_x + f64::from(crop.x()) / scale,
+        origin_y + f64::from(crop.y()) / scale,
+        f64::from(crop.width()) / scale,
+        f64::from(crop.height()) / scale,
+        scale,
+    )
 }
