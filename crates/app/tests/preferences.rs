@@ -1,12 +1,12 @@
-//! APP-EFFECT: the two I-04 menu preferences with injected store and native outcomes.
+//! APP-EFFECT: the I-04 menu preferences with injected store and native outcomes.
 use arcshot_app::{
-    LoginItemOutcome, PreferencesAction as A, PreferencesEffect as E, PreferencesFlow,
-    PreferencesNotice,
+    DensityWriteOutcome, LoginItemOutcome, PreferencesAction as A, PreferencesEffect as E,
+    PreferencesFlow, PreferencesNotice,
 };
-use arcshot_core::LoginItemState;
+use arcshot_core::{Density, LoginItemState};
 
 fn launched(completion_sound: bool, login_item: LoginItemState) -> PreferencesFlow {
-    let mut flow = PreferencesFlow::new(completion_sound);
+    let mut flow = PreferencesFlow::new(completion_sound, Density::Compact);
     assert_eq!(flow.dispatch(A::Launch), vec![E::ReadLoginItemStatus]);
     assert_eq!(
         flow.dispatch(A::LoginItemStatusRead(Some(login_item))),
@@ -17,7 +17,7 @@ fn launched(completion_sound: bool, login_item: LoginItemState) -> PreferencesFl
 
 #[test]
 fn app_effect_27_completion_sound_defaults_on_and_every_toggle_persists_the_new_value() {
-    let mut flow = PreferencesFlow::new(true);
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
     assert!(flow.completion_sound(), "I-04 default is on");
     assert_eq!(
         flow.dispatch(A::ToggleCompletionSound),
@@ -32,7 +32,7 @@ fn app_effect_27_completion_sound_defaults_on_and_every_toggle_persists_the_new_
     assert!(flow.completion_sound());
 
     // The persisted value, not the default, is what a restart restores.
-    let mut restored = PreferencesFlow::new(false);
+    let mut restored = PreferencesFlow::new(false, Density::Compact);
     assert!(!restored.completion_sound());
     assert_eq!(restored.dispatch(A::Launch), vec![E::ReadLoginItemStatus]);
 }
@@ -147,7 +147,7 @@ fn app_effect_30_failed_toggle_rereads_the_actual_state_and_can_be_retried_after
 #[test]
 fn app_effect_31_unreadable_login_item_state_never_requests_a_blind_change() {
     // A read failure on the toggle path blocks the change and reports it.
-    let mut flow = PreferencesFlow::new(true);
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
     flow.dispatch(A::Launch);
     assert_eq!(
         flow.dispatch(A::ToggleLoginItem),
@@ -172,7 +172,7 @@ fn app_effect_31_unreadable_login_item_state_never_requests_a_blind_change() {
     assert_eq!(flow.login_item(), None);
 
     // A launch-time read failure is silent: no menu action was attempted.
-    let mut flow = PreferencesFlow::new(true);
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
     flow.dispatch(A::Launch);
     assert_eq!(flow.dispatch(A::LoginItemStatusRead(None)), vec![]);
     assert_eq!(flow.notice(), None);
@@ -196,4 +196,134 @@ fn app_effect_32_requires_approval_is_reported_instead_of_showing_the_intent() {
         Some(LoginItemState::RequiresApproval),
         "the reported state is the system's, so the menu shows it as not enabled"
     );
+}
+
+// --- I-09 选项密度 (APP-EFFECT-33..37) -------------------------------------
+
+#[test]
+fn app_effect_33_density_defaults_compact_and_a_restart_restores_the_injected_value() {
+    let flow = PreferencesFlow::new(true, Density::Compact);
+    assert_eq!(flow.density(), Density::Compact, "I-09 default is Compact");
+    // A restart injects the real persisted value; no default is re-applied.
+    let mut restored = PreferencesFlow::new(true, Density::Standard);
+    assert_eq!(restored.density(), Density::Standard);
+    // Launch only reads the login item; it neither writes nor reflects density.
+    assert_eq!(restored.dispatch(A::Launch), vec![E::ReadLoginItemStatus]);
+}
+
+#[test]
+fn app_effect_34_toggle_density_derives_intent_from_a_fresh_read_and_persists_it() {
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
+    assert_eq!(flow.dispatch(A::ToggleDensity), vec![E::ReadDensity]);
+    // One change at a time: a second click while the read is outstanding queues
+    // no second intent.
+    assert_eq!(flow.dispatch(A::ToggleDensity), vec![]);
+    // A fresh read that disagrees with the injected value wins (real state).
+    assert_eq!(
+        flow.dispatch(A::DensityRead(Some(Density::Standard))),
+        vec![E::StoreDensity(Density::Compact)]
+    );
+    // A write in flight is also guarded.
+    assert_eq!(flow.dispatch(A::ToggleDensity), vec![]);
+    assert_eq!(
+        flow.dispatch(A::DensityWriteResult(DensityWriteOutcome::Applied)),
+        vec![E::ReflectDensity(Density::Compact)],
+        "only a confirmed write changes the shown density"
+    );
+    assert_eq!(flow.density(), Density::Compact);
+
+    // A second toggle flips from the now-current value.
+    assert_eq!(flow.dispatch(A::ToggleDensity), vec![E::ReadDensity]);
+    assert_eq!(
+        flow.dispatch(A::DensityRead(Some(Density::Compact))),
+        vec![E::StoreDensity(Density::Standard)]
+    );
+    assert_eq!(
+        flow.dispatch(A::DensityWriteResult(DensityWriteOutcome::Applied)),
+        vec![E::ReflectDensity(Density::Standard)]
+    );
+    assert_eq!(flow.density(), Density::Standard);
+}
+
+#[test]
+fn app_effect_35_unreadable_density_reports_instead_of_silently_changing_intent() {
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
+    assert_eq!(flow.dispatch(A::ToggleDensity), vec![E::ReadDensity]);
+    assert_eq!(
+        flow.dispatch(A::DensityRead(None)),
+        vec![E::Notice(PreferencesNotice::DensityUnreadable)],
+        "a failed read never silently flips the user's choice"
+    );
+    assert_eq!(flow.density(), Density::Compact);
+    assert_eq!(flow.notice(), Some(PreferencesNotice::DensityUnreadable));
+
+    // The notice is dismissible and the menu path stays available for a retry.
+    assert_eq!(flow.dispatch(A::DismissNotice), vec![]);
+    assert_eq!(flow.notice(), None);
+    assert_eq!(flow.dispatch(A::ToggleDensity), vec![E::ReadDensity]);
+    assert_eq!(
+        flow.dispatch(A::DensityRead(Some(Density::Compact))),
+        vec![E::StoreDensity(Density::Standard)]
+    );
+}
+
+#[test]
+fn app_effect_36_failed_density_write_rereads_and_never_shows_the_intent_as_applied() {
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
+    flow.dispatch(A::ToggleDensity);
+    assert_eq!(
+        flow.dispatch(A::DensityRead(Some(Density::Compact))),
+        vec![E::StoreDensity(Density::Standard)]
+    );
+    assert_eq!(
+        flow.dispatch(A::DensityWriteResult(DensityWriteOutcome::Failed)),
+        vec![
+            E::Notice(PreferencesNotice::DensityWriteFailed),
+            E::ReadDensity,
+        ],
+        "a rejected write reports and re-reads the real state"
+    );
+    assert_eq!(
+        flow.density(),
+        Density::Compact,
+        "the intent is not reflected"
+    );
+    assert_eq!(flow.notice(), Some(PreferencesNotice::DensityWriteFailed));
+    // The verification read only syncs the real value; it emits no reflection.
+    assert_eq!(
+        flow.dispatch(A::DensityRead(Some(Density::Compact))),
+        vec![]
+    );
+    assert_eq!(flow.density(), Density::Compact);
+
+    // A verification read that also fails reports that, still without a write.
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
+    flow.dispatch(A::ToggleDensity);
+    flow.dispatch(A::DensityRead(Some(Density::Compact)));
+    flow.dispatch(A::DensityWriteResult(DensityWriteOutcome::Failed));
+    assert_eq!(
+        flow.dispatch(A::DensityRead(None)),
+        vec![E::Notice(PreferencesNotice::DensityUnreadable)]
+    );
+    assert_eq!(flow.density(), Density::Compact);
+    assert_eq!(flow.notice(), Some(PreferencesNotice::DensityUnreadable));
+}
+
+#[test]
+fn app_effect_37_a_density_switch_never_emits_another_preferences_effect() {
+    // Switching density must preserve the completion-sound and login-item state:
+    // the policy produces only density effects, never a sound or login effect.
+    let mut flow = PreferencesFlow::new(true, Density::Compact);
+    let effects = [
+        flow.dispatch(A::ToggleDensity),
+        flow.dispatch(A::DensityRead(Some(Density::Compact))),
+        flow.dispatch(A::DensityWriteResult(DensityWriteOutcome::Applied)),
+    ]
+    .concat();
+    assert!(effects.iter().all(|effect| matches!(
+        effect,
+        E::ReadDensity | E::StoreDensity(_) | E::ReflectDensity(_)
+    )));
+    assert!(flow.completion_sound());
+    assert_eq!(flow.login_item(), None);
 }

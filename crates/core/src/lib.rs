@@ -1,6 +1,7 @@
 //! Platform-neutral data shared by ArcShot's product crates.
 
 mod annotation;
+mod density;
 mod document;
 mod frame;
 mod hotkey;
@@ -11,6 +12,7 @@ pub use annotation::{
     Endpoint, LineOption, LineStyle, PaletteColor, RectangleOption, RectangleStyle, Segment, Shape,
     StrokeWidth, Tool, annotation_at,
 };
+pub use density::Density;
 pub use document::{
     Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle, Selection,
 };
