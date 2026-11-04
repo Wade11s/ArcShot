@@ -51,21 +51,27 @@ fn editing() -> (CaptureSession, CaptureTicket) {
 
 fn clipboard_job() -> OutputJob {
     let (mut session, ticket) = editing();
-    let CaptureEffect::ComposeOutput(job) = session.dispatch(CaptureAction::Finish { ticket })[0]
-    else {
-        panic!("missing clipboard job");
-    };
-    job
+    match session
+        .dispatch(CaptureAction::Finish { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::ComposeOutput(job)) => job,
+        _ => panic!("missing clipboard job"),
+    }
 }
 
 fn save_job_with_selection(from: [f64; 2], to: [f64; 2]) -> OutputJob {
     let (mut session, ticket) = frozen();
     session.dispatch(CaptureAction::SelectRegion { ticket, from, to });
-    let CaptureEffect::RequestSavePanel(job) = session.dispatch(CaptureAction::Save { ticket })[0]
-    else {
-        panic!("missing save panel request");
-    };
-    job
+    match session
+        .dispatch(CaptureAction::Save { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::RequestSavePanel(job)) => job,
+        _ => panic!("missing save panel request"),
+    }
 }
 
 fn save_job() -> OutputJob {
@@ -81,12 +87,12 @@ fn app_effect_22_a_save_destination_is_used_by_exactly_its_job() {
     let save = save_job();
     assert_eq!(save.target(), OutputTarget::SaveFile);
     let mut pending = PendingSave::default();
-    pending.remember(save, path());
+    pending.remember(save.clone(), path());
 
     let mut clipboard_calls = 0;
     let mut file_calls = Vec::new();
     let published = publish_output(
-        save,
+        save.clone(),
         &[1, 2, 3],
         &mut pending,
         |_| {
@@ -114,7 +120,7 @@ fn app_effect_22_a_save_destination_is_used_by_exactly_its_job() {
 fn app_effect_23_a_changed_document_version_never_writes_the_old_destination() {
     let save = save_job();
     let mut pending = PendingSave::default();
-    pending.remember(save, path());
+    pending.remember(save.clone(), path());
 
     // A newer selection bumps the document version; the old snapshot is stale.
     let newer = save_job_with_selection([0.0, 0.0], [20.0, 20.0]);
@@ -177,7 +183,7 @@ fn app_effect_25_one_snapshot_yields_identical_png_bytes_for_both_actions() {
 fn app_effect_26_over_budget_png_bytes_are_rejected_before_any_side_effect() {
     let save = save_job();
     let mut pending = PendingSave::default();
-    pending.remember(save, path());
+    pending.remember(save.clone(), path());
     let oversized = vec![0u8; MAX_PNG_BYTES + 1];
     let published = publish_output(
         save,

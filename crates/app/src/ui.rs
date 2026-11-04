@@ -1,12 +1,15 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
 use arcshot_app::{
-    CaptureKeyAction, CapturePressAction, KeyModifiers, PermissionAction, PermissionNotice,
-    capture_key_action, capture_press_action,
+    CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PermissionAction,
+    PermissionNotice, capture_key_action, capture_press_action,
 };
-use arcshot_core::{CaptureTicket, Hotkey, ResizeHandle, ScreenGeometry, Selection};
+use arcshot_core::{
+    Annotation, CaptureTicket, Hotkey, PaletteColor, RectangleOption, RectangleStyle, ResizeHandle,
+    ScreenGeometry, Selection, StrokeWidth, Tool,
+};
 use gpui::{
-    AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Window, WindowId, div, img,
-    prelude::*, px, rgb, rgba, text,
+    AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Toggled, Window, WindowId,
+    div, img, prelude::*, px, rgb, rgba, text,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -35,18 +38,26 @@ pub(crate) enum UiCommand {
         from: [f64; 2],
         to: [f64; 2],
     },
-    /// A press inside the selection or on a control point starts a core drag.
-    SelectionDragStarted {
+    /// A press the core resolves to a selection or object gesture.
+    PointerPressed {
         ticket: CaptureTicket,
         point: [f64; 2],
     },
     /// Live pointer movement for that core drag.
-    SelectionDragUpdated {
+    PointerMoved {
         ticket: CaptureTicket,
         point: [f64; 2],
     },
     /// Release commits the drag as one history step.
-    SelectionDragEnded(CaptureTicket),
+    PointerReleased(CaptureTicket),
+    /// The tool dock selected a tool; interaction state, never history.
+    SelectTool(CaptureTicket, Tool),
+    /// One rectangle option from the hover strip.
+    RectangleOption(CaptureTicket, RectangleOption),
+    /// Delete the single selected object.
+    DeleteObject(CaptureTicket),
+    /// Esc layer one: clear the selected object.
+    DeselectSelected(CaptureTicket),
     /// Command+Z.
     Undo(CaptureTicket),
     /// Command+Shift+Z.
@@ -61,6 +72,12 @@ pub(crate) enum UiCommand {
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
+/// One composed selection preview produced by the shared image rasterizer.
+pub(crate) struct OverlayPreview {
+    pub(crate) image: Arc<RenderImage>,
+    pub(crate) selection: Selection,
+}
+
 pub(crate) struct CaptureView {
     pub(crate) ticket: CaptureTicket,
     pub(crate) image: Option<Arc<RenderImage>>,
@@ -72,6 +89,18 @@ pub(crate) struct CaptureView {
     pub(crate) screen: Option<ScreenGeometry>,
     /// Transient gesture state; core owns the committed selection and history.
     pub(crate) drag: Option<DragState>,
+    /// Mirror of the authoritative active tool.
+    pub(crate) tool: Tool,
+    /// Mirror of the single selected object index.
+    pub(crate) selected: Option<usize>,
+    /// Mirror of the layer-ordered objects for hit testing and chrome.
+    pub(crate) annotations: Vec<Annotation>,
+    /// Mirror of the session-scoped rectangle tool style.
+    pub(crate) rectangle_style: RectangleStyle,
+    /// Composed selection pixels; the overlay draws only interaction chrome on top.
+    pub(crate) preview: Option<OverlayPreview>,
+    /// Hovered tool row, including its option strip, for the hover-only options.
+    pub(crate) hovered_tool: Option<Tool>,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
 }
@@ -136,6 +165,306 @@ impl CaptureView {
     }
 }
 
+impl CaptureView {
+    /// The style the option strip reflects: the selected rectangle, else the tool memory.
+    fn effective_style(&self) -> RectangleStyle {
+        self.selected
+            .and_then(|index| self.annotations.get(index))
+            .map_or(self.rectangle_style, |annotation| annotation.style())
+    }
+
+    /// One dock row: the tool button plus, while hovered, its option strip.
+    ///
+    /// The row owns the hover listener so moving from the tool into the strip
+    /// keeps it open; leaving the row closes it. Hover never switches tools.
+    fn tool_row(
+        &self,
+        tool: Tool,
+        row_id: &'static str,
+        id: &'static str,
+        label: &'static str,
+        glyph: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let ticket = self.ticket;
+        let queue = Rc::clone(&self.queue);
+        let entity = cx.entity();
+        let mut row =
+            div()
+                .id(row_id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .on_hover(move |hovered, _, cx| {
+                    let hovered = *hovered;
+                    entity.update(cx, |view, cx| {
+                        if hovered {
+                            view.hovered_tool = Some(tool);
+                        } else if view.hovered_tool == Some(tool) {
+                            view.hovered_tool = None;
+                        }
+                        cx.notify();
+                    });
+                });
+        row = row.child(tool_button(
+            ticket,
+            tool,
+            id,
+            label,
+            glyph,
+            self.tool == tool,
+            &queue,
+        ));
+        if self.hovered_tool == Some(tool) && tool == Tool::Rectangle {
+            row = row.child(self.option_strip(cx));
+        }
+        row
+    }
+
+    fn option_strip(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let ticket = self.ticket;
+        let queue = Rc::clone(&self.queue);
+        let style = self.effective_style();
+        let mut strip = div()
+            .id("rectangle-options")
+            .role(Role::Group)
+            .aria_label("矩形选项")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .ml_2()
+            .px_2()
+            .py_1()
+            .rounded_lg()
+            .bg(rgba(0x20242bee));
+        for width in StrokeWidth::ALL {
+            let id = match width {
+                StrokeWidth::Two => "arcshot.overlay.option.rectangle.width.2",
+                StrokeWidth::Three => "arcshot.overlay.option.rectangle.width.3",
+                StrokeWidth::Five => "arcshot.overlay.option.rectangle.width.5",
+            };
+            let label = match width {
+                StrokeWidth::Two => "线宽 2 点",
+                StrokeWidth::Three => "线宽 3 点",
+                StrokeWidth::Five => "线宽 5 点",
+            };
+            strip = strip.child(option_button(
+                id,
+                label,
+                width.label(),
+                style.width() == width,
+                None,
+                UiCommand::RectangleOption(ticket, RectangleOption::Width(width)),
+                &queue,
+            ));
+        }
+        for color in PaletteColor::ALL {
+            strip = strip.child(option_button(
+                color_id(color),
+                color_label(color),
+                "",
+                style.stroke() == color,
+                Some(color.rgb()),
+                UiCommand::RectangleOption(ticket, RectangleOption::Stroke(color)),
+                &queue,
+            ));
+        }
+        strip.child(option_button(
+            "arcshot.overlay.option.rectangle.fill",
+            "20% 同色填充",
+            "▨",
+            style.fill(),
+            None,
+            UiCommand::RectangleOption(ticket, RectangleOption::Fill(!style.fill())),
+            &queue,
+        ))
+    }
+}
+
+const fn color_id(color: PaletteColor) -> &'static str {
+    match color {
+        PaletteColor::Red => "arcshot.overlay.option.rectangle.color.red",
+        PaletteColor::Orange => "arcshot.overlay.option.rectangle.color.orange",
+        PaletteColor::Yellow => "arcshot.overlay.option.rectangle.color.yellow",
+        PaletteColor::Green => "arcshot.overlay.option.rectangle.color.green",
+        PaletteColor::Blue => "arcshot.overlay.option.rectangle.color.blue",
+        PaletteColor::White => "arcshot.overlay.option.rectangle.color.white",
+        PaletteColor::Black => "arcshot.overlay.option.rectangle.color.black",
+    }
+}
+
+const fn color_label(color: PaletteColor) -> &'static str {
+    match color {
+        PaletteColor::Red => "红色 #FF3B30",
+        PaletteColor::Orange => "橙色 #FF9500",
+        PaletteColor::Yellow => "黄色 #FFCC00",
+        PaletteColor::Green => "绿色 #34C759",
+        PaletteColor::Blue => "蓝色 #007AFF",
+        PaletteColor::White => "白色 #FFFFFF",
+        PaletteColor::Black => "黑色 #000000",
+    }
+}
+
+fn rgb_u32([red, green, blue]: [u8; 3]) -> u32 {
+    u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn option_button(
+    id: &'static str,
+    label: &'static str,
+    glyph: &'static str,
+    selected: bool,
+    swatch: Option<[u8; 3]>,
+    command: UiCommand,
+    queue: &UiQueue,
+) -> impl IntoElement {
+    let click_queue = Rc::clone(queue);
+    let a11y_queue = Rc::clone(queue);
+    let background = match swatch {
+        Some(channels) => rgb(rgb_u32(channels)),
+        None => rgba(0x2a2f3add),
+    };
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .aria_selected(selected)
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .accessibility_id(id)
+        .tooltip(move |_, cx| cx.new(|_| TooltipView { label }).into())
+        .w(px(28.0))
+        .h(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .border_2()
+        .border_color(if selected {
+            rgb(0xffffff)
+        } else {
+            rgba(0xffffff33)
+        })
+        .bg(background)
+        .text_color(rgb(0xffffff))
+        .text_sm()
+        .child(glyph)
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+            log::info!("a11y_action={id} action=Click");
+            a11y_queue.borrow_mut().push(command);
+        })
+}
+
+fn tool_button(
+    ticket: CaptureTicket,
+    tool: Tool,
+    id: &'static str,
+    label: &'static str,
+    glyph: &'static str,
+    active: bool,
+    queue: &UiQueue,
+) -> impl IntoElement {
+    let click_queue = Rc::clone(queue);
+    let a11y_queue = Rc::clone(queue);
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .aria_selected(active)
+        .aria_toggled(if active {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .accessibility_id(id)
+        .tooltip(move |_, cx| cx.new(|_| TooltipView { label }).into())
+        .w(px(36.0))
+        .h(px(36.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(if active {
+            rgb(0x007aff)
+        } else {
+            rgba(0x20242bdd)
+        })
+        .text_color(rgb(0xffffff))
+        .text_xl()
+        .hover(move |style| style.bg(if active { rgb(0x0062d6) } else { rgb(0x2a2f3a) }))
+        .child(glyph)
+        .on_click(move |_, _, _| {
+            click_queue
+                .borrow_mut()
+                .push(UiCommand::SelectTool(ticket, tool));
+        })
+        .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+            log::info!("a11y_action={id} action=Click");
+            a11y_queue
+                .borrow_mut()
+                .push(UiCommand::SelectTool(ticket, tool));
+        })
+}
+
+fn delete_button(ticket: CaptureTicket, queue: &UiQueue) -> impl IntoElement {
+    let click_queue = Rc::clone(queue);
+    let a11y_queue = Rc::clone(queue);
+    div()
+        .id("delete-object")
+        .role(Role::Button)
+        .aria_label("删除选中的标注对象")
+        .accessibility_id("arcshot.overlay.delete")
+        .tooltip(|_, cx| cx.new(|_| TooltipView { label: "删除" }).into())
+        .px_2()
+        .py_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(rgb(0x7a1f1f))
+        .text_color(rgb(0xffffff))
+        .text_sm()
+        .hover(|style| style.bg(rgb(0x9a2a2a)))
+        .child("删除")
+        .on_click(move |_, _, _| {
+            click_queue
+                .borrow_mut()
+                .push(UiCommand::DeleteObject(ticket));
+        })
+        .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+            log::info!("a11y_action=arcshot.overlay.delete action=Click");
+            a11y_queue
+                .borrow_mut()
+                .push(UiCommand::DeleteObject(ticket));
+        })
+}
+
+struct TooltipView {
+    label: &'static str,
+}
+
+impl Render for TooltipView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgba(0x000000ee))
+            .text_color(rgb(0xffffff))
+            .text_sm()
+            .child(self.label)
+    }
+}
+
 impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ticket = self.ticket;
@@ -186,13 +515,16 @@ impl Render for CaptureView {
                 move |event, _, cx| {
                     // Read the live drag flag rather than the render-time snapshot,
                     // so a key right after release never sees a stale held state.
-                    let (busy, dragging) =
-                        entity.read_with(cx, |view, _| (view.busy, view.drag.is_some()));
+                    let context = entity.read_with(cx, |view, _| CaptureKeyContext {
+                        busy: view.busy,
+                        dragging: view.drag.is_some(),
+                        object_selected: view.selected.is_some(),
+                        tool: view.tool,
+                    });
                     let action = capture_key_action(
                         &event.keystroke.key,
                         key_modifiers(&event.keystroke.modifiers),
-                        busy,
-                        dragging,
+                        context,
                     );
                     match action {
                         Some(CaptureKeyAction::Cancel) => {
@@ -214,6 +546,20 @@ impl Render for CaptureView {
                             queue.borrow_mut().push(UiCommand::Redo(ticket));
                             cx.stop_propagation();
                         }
+                        Some(CaptureKeyAction::Deselect) => {
+                            queue.borrow_mut().push(UiCommand::DeselectSelected(ticket));
+                            cx.stop_propagation();
+                        }
+                        Some(CaptureKeyAction::SelectTool) => {
+                            queue
+                                .borrow_mut()
+                                .push(UiCommand::SelectTool(ticket, Tool::Select));
+                            cx.stop_propagation();
+                        }
+                        Some(CaptureKeyAction::DeleteObject) => {
+                            queue.borrow_mut().push(UiCommand::DeleteObject(ticket));
+                            cx.stop_propagation();
+                        }
                         None => {}
                     }
                 }
@@ -227,7 +573,19 @@ impl Render for CaptureView {
                         if !frozen || view.busy {
                             return;
                         }
-                        match capture_press_action(double, view.busy, view.selection, raw) {
+                        // Only the visible part of an object is interactive.
+                        let object = view
+                            .selection
+                            .filter(|selection| selection.contains(raw))
+                            .and_then(|_| arcshot_core::annotation_at(&view.annotations, raw));
+                        match capture_press_action(
+                            double,
+                            view.busy,
+                            view.tool,
+                            view.selection,
+                            object.is_some(),
+                            raw,
+                        ) {
                             // Core checks whether the point is actually inside
                             // the selection; the toolbar is not the background.
                             Some(CapturePressAction::FinishAt(point)) => {
@@ -236,14 +594,36 @@ impl Render for CaptureView {
                                     point: Some(point),
                                 });
                             }
-                            Some(CapturePressAction::Drag) => {
+                            Some(CapturePressAction::Create) => {
+                                // A new object starts unselected; the draft is
+                                // selected as soon as the first move lands.
+                                view.selected = None;
                                 let point = view.clamp(raw);
                                 view.drag = Some(DragState::Core);
                                 view.queue
                                     .borrow_mut()
-                                    .push(UiCommand::SelectionDragStarted { ticket, point });
+                                    .push(UiCommand::PointerPressed { ticket, point });
+                            }
+                            Some(CapturePressAction::ObjectDrag) => {
+                                // Mirror the picked layer immediately so keys
+                                // pressed before the next tick see the selection.
+                                view.selected = object;
+                                let point = view.clamp(raw);
+                                view.drag = Some(DragState::Core);
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::PointerPressed { ticket, point });
+                            }
+                            Some(CapturePressAction::Drag) => {
+                                view.selected = None;
+                                let point = view.clamp(raw);
+                                view.drag = Some(DragState::Core);
+                                view.queue
+                                    .borrow_mut()
+                                    .push(UiCommand::PointerPressed { ticket, point });
                             }
                             Some(CapturePressAction::Band) => {
+                                view.selected = None;
                                 let point = view.clamp(raw);
                                 view.drag = Some(DragState::Band {
                                     start: point,
@@ -272,7 +652,7 @@ impl Render for CaptureView {
                             Some(DragState::Core) => {
                                 view.queue
                                     .borrow_mut()
-                                    .push(UiCommand::SelectionDragUpdated { ticket, point });
+                                    .push(UiCommand::PointerMoved { ticket, point });
                             }
                             None => {}
                         }
@@ -304,10 +684,10 @@ impl Render for CaptureView {
                                 let point = view.clamp(end);
                                 view.queue
                                     .borrow_mut()
-                                    .push(UiCommand::SelectionDragUpdated { ticket, point });
+                                    .push(UiCommand::PointerMoved { ticket, point });
                                 view.queue
                                     .borrow_mut()
-                                    .push(UiCommand::SelectionDragEnded(ticket));
+                                    .push(UiCommand::PointerReleased(ticket));
                             }
                         }
                         cx.notify();
@@ -317,6 +697,24 @@ impl Render for CaptureView {
 
         if let Some(image) = image {
             root = root.child(image);
+        }
+
+        // Annotation pixels come only from the shared image rasterizer; the
+        // composed crop is shown in place of the base inside the selection.
+        // A new-selection band still shows the old document, so hide it then.
+        if let (Some(preview), Some(selection)) = (&self.preview, self.selection)
+            && preview.selection == selection
+            && !matches!(self.drag, Some(DragState::Band { .. }))
+        {
+            root = root.child(
+                img(Arc::clone(&preview.image))
+                    .absolute()
+                    .left(px(selection.x() as f32))
+                    .top(px(selection.y() as f32))
+                    .w(px(selection.width() as f32))
+                    .h(px(selection.height() as f32))
+                    .object_fit(gpui::ObjectFit::Fill),
+            );
         }
 
         if let Some((x, y, width, height)) = preview {
@@ -357,6 +755,24 @@ impl Render for CaptureView {
                     root = root.child(
                         region(x - 4.0, y - 4.0, 8.0, 8.0)
                             .bg(rgb(0x007aff))
+                            .border_1()
+                            .border_color(rgb(0xffffff)),
+                    );
+                }
+            }
+
+            // The selected object's own eight control points use its stroke
+            // colour, so object chrome is distinguishable from selection chrome.
+            if show_handles
+                && let Some(annotation) = self.selected.and_then(|i| self.annotations.get(i))
+            {
+                let [red, green, blue] = annotation.style().stroke().rgb();
+                let color = rgb(u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue));
+                for handle in RESIZE_HANDLES {
+                    let [x, y] = annotation.handle_center(handle).map(|value| value as f32);
+                    root = root.child(
+                        region(x - 4.0, y - 4.0, 8.0, 8.0)
+                            .bg(color)
                             .border_1()
                             .border_color(rgb(0xffffff)),
                     );
@@ -485,6 +901,42 @@ impl Render for CaptureView {
                         button
                     }),
             );
+        }
+
+        if frozen {
+            // The left vertical dock lists only tools that exist: no fake or
+            // disabled entries. Hover reveals that tool's options to its right.
+            let mut dock = div()
+                .id("tool-dock")
+                .role(Role::Group)
+                .aria_label("标注工具")
+                .absolute()
+                .left_2()
+                .top_16()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            dock = dock.child(self.tool_row(
+                Tool::Select,
+                "select-tool-row",
+                "arcshot.overlay.tool.select",
+                "选择",
+                "⌖",
+                cx,
+            ));
+            dock = dock.child(self.tool_row(
+                Tool::Rectangle,
+                "rectangle-tool-row",
+                "arcshot.overlay.tool.rectangle",
+                "矩形",
+                "▭",
+                cx,
+            ));
+            if self.selected.is_some() && !busy {
+                dock = dock.child(delete_button(ticket, &self.queue));
+            }
+            root = root.child(dock);
         }
 
         if let Some(error) = error {

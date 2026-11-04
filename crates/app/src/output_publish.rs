@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// Returns [`OutputFailure::ResourceLimit`] for the export budget and
 /// [`OutputFailure::Encode`] for any compose/encode failure.
 pub fn encode_document(frame: &CapturedFrame, job: OutputJob) -> Result<Vec<u8>, OutputFailure> {
-    arcshot_image::compose_crop(frame, job.crop())
+    arcshot_image::compose_document(frame, job.crop(), job.annotations())
         .and_then(|composed| arcshot_image::encode_png(&composed))
         .map_err(|error| match error {
             arcshot_image::ComposeError::ResourceLimit => OutputFailure::ResourceLimit,

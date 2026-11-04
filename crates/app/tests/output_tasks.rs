@@ -40,11 +40,14 @@ fn output_job() -> OutputJob {
         from: [10.0, 5.0],
         to: [40.0, 25.0],
     });
-    let CaptureEffect::ComposeOutput(job) = session.dispatch(CaptureAction::Finish { ticket })[0]
-    else {
-        panic!("missing output job");
-    };
-    job
+    match session
+        .dispatch(CaptureAction::Finish { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::ComposeOutput(job)) => job,
+        _ => panic!("missing output job"),
+    }
 }
 
 fn receive(tasks: &mut OutputTasks) -> (OutputJob, Result<Vec<u8>, OutputFailure>) {
@@ -61,9 +64,9 @@ fn receive(tasks: &mut OutputTasks) -> (OutputJob, Result<Vec<u8>, OutputFailure
 fn app_effect_15_injected_encode_result_is_delivered_once_with_its_job() {
     let job = output_job();
     let mut tasks = OutputTasks::default();
-    tasks.submit(job, || Ok(vec![1, 2, 3])).unwrap();
+    tasks.submit(job.clone(), || Ok(vec![1, 2, 3])).unwrap();
     assert!(tasks.busy());
-    assert_eq!(receive(&mut tasks), (job, Ok(vec![1, 2, 3])));
+    assert_eq!(receive(&mut tasks), (job.clone(), Ok(vec![1, 2, 3])));
     assert!(!tasks.busy());
     assert!(tasks.poll().is_none());
 }
@@ -73,12 +76,20 @@ fn app_effect_16_encode_panic_is_a_retryable_output_worker_failure() {
     let job = output_job();
     let mut tasks = OutputTasks::default();
     tasks
-        .submit(job, || panic!("injected encode worker unwind"))
+        .submit(job.clone(), || panic!("injected encode worker unwind"))
         .unwrap();
-    assert_eq!(receive(&mut tasks), (job, Err(OutputFailure::Worker)));
+    assert_eq!(
+        receive(&mut tasks),
+        (job.clone(), Err(OutputFailure::Worker))
+    );
     // Unlike an uncertain native request, a failed encode does not close the gate.
-    tasks.submit(job, || Err(OutputFailure::Encode)).unwrap();
-    assert_eq!(receive(&mut tasks), (job, Err(OutputFailure::Encode)));
+    tasks
+        .submit(job.clone(), || Err(OutputFailure::Encode))
+        .unwrap();
+    assert_eq!(
+        receive(&mut tasks),
+        (job.clone(), Err(OutputFailure::Encode))
+    );
 }
 
 #[test]
@@ -87,14 +98,14 @@ fn app_effect_17_second_output_job_is_rejected_while_one_is_in_flight() {
     let mut tasks = OutputTasks::default();
     let (release, wait) = std::sync::mpsc::channel();
     tasks
-        .submit(job, move || {
+        .submit(job.clone(), move || {
             let _ = wait.recv();
             Ok(vec![0])
         })
         .unwrap();
-    assert!(tasks.submit(job, || Ok(vec![1])).is_err());
+    assert!(tasks.submit(job.clone(), || Ok(vec![1])).is_err());
     release.send(()).unwrap();
-    assert_eq!(receive(&mut tasks), (job, Ok(vec![0])));
-    assert!(tasks.submit(job, || Ok(vec![1])).is_ok());
-    assert_eq!(receive(&mut tasks), (job, Ok(vec![1])));
+    assert_eq!(receive(&mut tasks), (job.clone(), Ok(vec![0])));
+    assert!(tasks.submit(job.clone(), || Ok(vec![1])).is_ok());
+    assert_eq!(receive(&mut tasks), (job.clone(), Ok(vec![1])));
 }

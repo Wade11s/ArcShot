@@ -49,27 +49,36 @@ fn editing() -> (CaptureSession, CaptureTicket) {
 }
 
 fn request_save(session: &mut CaptureSession, ticket: CaptureTicket) -> OutputJob {
-    let effects = session.dispatch(CaptureAction::Save { ticket });
-    let CaptureEffect::RequestSavePanel(job) = effects[0] else {
-        panic!("expected a native save panel request");
-    };
-    job
+    match session
+        .dispatch(CaptureAction::Save { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::RequestSavePanel(job)) => job,
+        _ => panic!("expected a native save panel request"),
+    }
 }
 
 fn exchange(
     session: &mut CaptureSession,
-    job: OutputJob,
+    job: &OutputJob,
     result: SavePanelResult,
 ) -> Vec<CaptureEffect> {
-    session.dispatch(CaptureAction::SavePanelResolved { job, result })
+    session.dispatch(CaptureAction::SavePanelResolved {
+        job: job.clone(),
+        result,
+    })
 }
 
 fn finish(session: &mut CaptureSession, ticket: CaptureTicket) -> OutputJob {
-    let effects = session.dispatch(CaptureAction::Finish { ticket });
-    let CaptureEffect::ComposeOutput(job) = effects[0] else {
-        panic!("expected the clipboard output job");
-    };
-    job
+    match session
+        .dispatch(CaptureAction::Finish { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::ComposeOutput(job)) => job,
+        _ => panic!("expected the clipboard output job"),
+    }
 }
 
 #[test]
@@ -83,7 +92,7 @@ fn core_session_20_open_save_panel_blocks_editing_finish_save_and_hotkey_start()
     assert!(session.output_busy());
     assert_eq!(session.phase(), CapturePhase::Frozen);
     // The panel phase has no encoded bytes yet, so there is nothing to publish.
-    assert!(!session.may_publish(job));
+    assert!(!session.may_publish(&job));
 
     let selection = session.document().unwrap().selection();
     assert_eq!(session.dispatch(CaptureAction::Finish { ticket }), vec![]);
@@ -114,12 +123,12 @@ fn core_session_21_cancelled_save_panel_returns_to_the_untouched_session_without
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(
-        exchange(&mut session, job, SavePanelResult::Cancelled),
+        exchange(&mut session, &job, SavePanelResult::Cancelled),
         vec![]
     );
     assert!(!session.output_busy());
     assert_eq!(session.phase(), CapturePhase::Frozen);
-    assert!(!session.may_publish(job));
+    assert!(!session.may_publish(&job));
     let document = session.document().unwrap();
     assert_eq!(document.version(), 1);
     assert_eq!(
@@ -129,7 +138,7 @@ fn core_session_21_cancelled_save_panel_returns_to_the_untouched_session_without
 
     // The closed panel cannot resolve twice, and a retry opens the same snapshot.
     assert_eq!(
-        exchange(&mut session, job, SavePanelResult::Cancelled),
+        exchange(&mut session, &job, SavePanelResult::Cancelled),
         vec![]
     );
     assert_eq!(request_save(&mut session, ticket), job);
@@ -140,7 +149,7 @@ fn core_session_22_failed_save_panel_reports_a_classified_error_and_keeps_the_do
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(
-        exchange(&mut session, job, SavePanelResult::Failed),
+        exchange(&mut session, &job, SavePanelResult::Failed),
         vec![CaptureEffect::ReportOutputFailure(OutputFailure::SavePanel)]
     );
     assert!(!session.output_busy());
@@ -170,11 +179,11 @@ fn app_effect_18_chosen_save_composes_one_save_job_and_ends_without_a_clipboard_
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(
-        exchange(&mut session, job, SavePanelResult::Chosen),
-        vec![CaptureEffect::ComposeOutput(job)]
+        exchange(&mut session, &job, SavePanelResult::Chosen),
+        vec![CaptureEffect::ComposeOutput(job.clone())]
     );
     assert!(session.output_busy());
-    assert!(session.may_publish(job));
+    assert!(session.may_publish(&job));
     assert_eq!(session.dispatch(CaptureAction::Start), vec![]);
 
     // Only the confirmed file write reports success; the session then ends.
@@ -202,10 +211,10 @@ fn app_effect_19_classified_save_failures_keep_the_document_for_the_same_version
     ] {
         let (mut session, ticket) = editing();
         let job = request_save(&mut session, ticket);
-        exchange(&mut session, job, SavePanelResult::Chosen);
+        exchange(&mut session, &job, SavePanelResult::Chosen);
         assert_eq!(
             session.dispatch(CaptureAction::OutputCompleted {
-                job,
+                job: job.clone(),
                 result: Err(failure)
             }),
             vec![CaptureEffect::ReportOutputFailure(failure)]
@@ -214,7 +223,7 @@ fn app_effect_19_classified_save_failures_keep_the_document_for_the_same_version
         assert!(!session.output_busy());
         assert!(session.frame().is_some());
         assert!(session.document().unwrap().selection().is_some());
-        assert!(!session.may_publish(job));
+        assert!(!session.may_publish(&job));
 
         let retry = request_save(&mut session, ticket);
         assert_eq!(retry.version(), job.version());
@@ -232,8 +241,11 @@ fn app_effect_20_stale_save_panel_results_and_late_writes_never_publish() {
         vec![CaptureEffect::DismissOverlay]
     );
     assert_eq!(session.phase(), CapturePhase::Resident);
-    assert_eq!(exchange(&mut session, job, SavePanelResult::Chosen), vec![]);
-    assert!(!session.may_publish(job));
+    assert_eq!(
+        exchange(&mut session, &job, SavePanelResult::Chosen),
+        vec![]
+    );
+    assert!(!session.may_publish(&job));
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
             job,
@@ -247,7 +259,7 @@ fn app_effect_20_stale_save_panel_results_and_late_writes_never_publish() {
     let clipboard = finish(&mut session, ticket);
     assert_eq!(clipboard.target(), OutputTarget::Clipboard);
     assert_eq!(
-        exchange(&mut session, clipboard, SavePanelResult::Chosen),
+        exchange(&mut session, &clipboard, SavePanelResult::Chosen),
         vec![]
     );
     assert!(session.output_busy());
@@ -256,10 +268,13 @@ fn app_effect_20_stale_save_panel_results_and_late_writes_never_publish() {
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(
-        exchange(&mut session, job, SavePanelResult::Chosen),
-        vec![CaptureEffect::ComposeOutput(job)]
+        exchange(&mut session, &job, SavePanelResult::Chosen),
+        vec![CaptureEffect::ComposeOutput(job.clone())]
     );
-    assert_eq!(exchange(&mut session, job, SavePanelResult::Chosen), vec![]);
+    assert_eq!(
+        exchange(&mut session, &job, SavePanelResult::Chosen),
+        vec![]
+    );
 }
 
 #[test]
@@ -271,7 +286,7 @@ fn app_effect_21_finish_and_save_share_one_snapshot_but_never_start_each_other()
     assert_eq!(session.dispatch(CaptureAction::Save { ticket }), vec![]);
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job: clipboard,
+            job: clipboard.clone(),
             result: Err(OutputFailure::Clipboard)
         }),
         vec![CaptureEffect::ReportOutputFailure(OutputFailure::Clipboard)]
@@ -284,9 +299,9 @@ fn app_effect_21_finish_and_save_share_one_snapshot_but_never_start_each_other()
     assert_eq!(save.crop(), clipboard.crop());
     assert_ne!(save.target(), clipboard.target());
     assert_ne!(save, clipboard);
-    assert!(!session.may_publish(clipboard));
+    assert!(!session.may_publish(&clipboard));
     assert_eq!(
-        exchange(&mut session, clipboard, SavePanelResult::Chosen),
+        exchange(&mut session, &clipboard, SavePanelResult::Chosen),
         vec![]
     );
     assert!(session.output_busy());

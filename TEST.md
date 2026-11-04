@@ -69,12 +69,14 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 ## 3. Rust 自动化接缝（随功能落地）
 
 下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；#22 已实现拖拽选区、Finish/双击/完成入口、
-2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏；#23 已实现显式
-Save PNG、保存对话框互斥、取消/失败恢复与同一快照的字节复用；#24 已实现选区移动、八向调整、
-重选、共享不可变底图的可撤销历史与八个可见控制点；#30 已实现“完成音效”偏好
-（默认开、本地记忆、关闭后成功静默但失败照常报错）与“登录时启动”（真实
-`SMAppService` 登录项、菜单打开读实际状态、切换失败重读并报错）。标注对象/工具、
-滚动截图、选项密度与完整标注/文字产品面仍未实现，状态仍为 **Not tested**。
+2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏；#23 已实现显式 Save PNG、
+保存对话框互斥、取消/失败恢复与同一快照的字节复用；#24 已实现选区移动、八向调整、
+重选、共享不可变底图的可撤销历史与八个可见控制点；#25 已实现 Rectangle 标注对象、
+左侧 Select/Rectangle 工具坞与悬停选项、对象命中/移动/八控制点翻转/删除/样式历史，
+以及预览与最终输出共用的像素合成；#30 已实现“完成音效”偏好（默认开、本地记忆、
+关闭后成功静默但失败照常报错）与“登录时启动”（真实 `SMAppService` 登录项、菜单
+打开读实际状态、切换失败重读并报错）。Line/Arrow/Text/Blur、滚动截图、选项密度与
+完整标注/文字产品面仍未实现，状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -137,6 +139,24 @@ Save PNG、保存对话框互斥、取消/失败恢复与同一快照的字节�
 | `scripts/check-startup.sh` | MAC-COLOR-OUTPUT-22-01：真实进程内编码 PNG、私有命名 pasteboard PNGf 写入/回读、AppKit 内存解码尺寸；脚本同时断言该行 | 用户剪贴板、非 ArcShot 应用粘贴、颜色真值 |
 | `crates/macos/tests/native_preflight.rs` | MAC-COLOR-OUTPUT-22-02：worker 线程访问剪贴板/音效时在 AppKit 副作用前拒绝 | 主线程真实写入与播放已由启动冒烟/实机覆盖 |
 
+### #25 的稳定自动化入口
+
+Rectangle 标注只覆盖已确认接缝：core 文档/会话动作、固定文档的像素真值合成、app 键位与
+指针路由，以及覆盖层工具坞/选项的真实 AX 激活。真实指针绘制、对象控制点拖动、选中后
+删除键与预览观感仍属 MAC-ANNOTATION，保持 **Not tested**：控制点与对象没有 AX 节点，
+`--headed` 坐标拖拽不能作为验收证据。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/objects.rs` | CORE-EDIT-13～24：工具内连续创建、选区内起始、越界保留/裁剪、零尺寸不入历史、最上层命中、对象拖动优先于选区、八控制点单边调整与越边翻转、空点取消对象选择但拖动仍移动选区、删除、样式选项与工具记忆、每会话默认重置、整次对象拖动一步、无变化不入历史、切工具/取消选择不入历史 | 真实指针、视觉控制点命中区域 |
+| `crates/core/tests/session_edit.rs` | CORE-SESSION-24：工具切换、PointerPressed/Moved/Released、样式、删除、撤销/重做共用同一文档与输出互斥栅栏 | 原生事件投递 |
+| `crates/image/tests/annotations.rs` | IMAGE-COMPOSE-05～11：默认红/3 点/无填充、2/3/5 点物理线宽、固定色板、20% 同色填充、选区边缘裁剪、创建顺序叠放、任意 crop 与完整合成一致、GPUI BGRA 预览字节 | 原生显示观感、大图压力 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-09～12：Esc 分层（对象→工具→会话）、拖动/输出期间忽略、Delete/Backspace 仅在有选中对象时生效、标注工具内双击不完成、对象命中优先于选区手势与双击 | 真实焦点与 IME |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-13～14：冻结覆盖层工具坞可寻址、AX 切换工具并观察 checked/toggled、悬停浮现选项、AX 改线宽与颜色且版本不变；MAC-E2E-12 仍由 AX 取消 | 选区绘制、对象创建/拖动/删除、预览像素 |
+
+`docs/validation/25-rectangle-annotation.md` 记录实测。窗口内工具坞选项依赖悬停（`hover --headed`
+仅作为前置，激活证据是 AX 与产品日志）；绘制矩形仍需要坐标拖拽，因此不进入 E2E 通过范围。
+
 ### #24 的稳定自动化入口
 
 选区移动/八向调整、重选与历史只覆盖 core 语义、文档/历史合同、app 输入路由与共享裁剪
@@ -174,6 +194,9 @@ Save PNG、保存对话框互斥、取消/失败恢复与同一快照的字节�
 
 实机步骤见 `docs/output.md`；实测记录见 `docs/validation/23-save-png.md`。
 
+实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
+`docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
+
 ### #30 的稳定自动化入口
 
 两个菜单偏好只覆盖已确认接缝：core 的成功音效开关语义、app 的注入式偏好/登录项
@@ -187,13 +210,10 @@ Save PNG、保存对话框互斥、取消/失败恢复与同一快照的字节�
 | `crates/app/tests/preferences.rs` | APP-EFFECT-27～32：默认开与每次切换持久化；登录项意图必须来自新的实际读取；Applied 后必须再读验证；失败重读并提示、可关闭重试；读取失败不盲改；RequiresApproval 不当作已启用 | 原生 ServiceManagement 注册结果与通知权限 |
 | `crates/macos/src/preferences.rs`（单元测试） | MAC-START-30-02：真实偏好 suite 域内“缺失=默认开”、写入/新实例读取/删除回默认 | 用户自身偏好域、跨进程 |
 | `scripts/check-startup.sh`（`--smoke-test`） | MAC-START-30-01：五个菜单 action 入队（含 `toggleCompletionSound:`/`toggleLaunchAtLogin:`）；两个偏好项 selector/状态与真实偏好和 `SMAppService` 状态一致；真实偏好域往返并还原；登录项状态只读 | 真实登录项切换、菜单人工点击 |
-| `scripts/e2e-agent-desktop.py` | MAC-E2E-01/13/14/15：菜单六项与 selector；完成音效经 AX 切换并写偏好；跨两个真实重启保留并还原偏好；登录项启动/菜单读取一致且从不写 | 登录项注册/注销、失败提示窗口（需真实拒绝） |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-01/15/16/17：菜单六项与 selector；完成音效经 AX 切换并写偏好；跨两个真实重启保留并还原偏好；登录项启动/菜单读取一致且从不写 | 登录项注册/注销、失败提示窗口（需真实拒绝） |
 
 实测记录见 `docs/validation/30-sound-login.md`。完成音效的关闭状态只证明
 “不产生音效副作用”，真实静音效果与系统音量属于实机观感项。
-
-实机步骤与安全/预算口径见 `docs/capture.md`；实测记录见
-`docs/validation/20-capture.md`。这不是 V1 其他子用例的替代。
 
 权限提示替换竞态的原生冒烟记录见上述验证报告：真实 GPUI Esc 先入队、替换提示后
 消费，旧 Esc 不关闭新提示，当前 Esc 正常关闭；该场景未纳入常驻自动化入口。
@@ -217,7 +237,7 @@ Save PNG、保存对话框互斥、取消/失败恢复与同一快照的字节�
 - 每轮 E2E 只允许一个 ArcShot 实例。`agent-desktop list-apps --app "ArcShot"`
   必须只返回被测 bundle：Debug 为 `dev.arcshot.app.debug` / `ArcShot Debug`，
   Release 为 `dev.arcshot.app` / `ArcShot`。多实例会让状态项与菜单引用含义不明。
-  MAC-E2E-14 的跨重启用例会在同一轮内按顺序重启两次，每次仍只有一个实例；
+  MAC-E2E-16 的跨重启用例会在同一轮内按顺序重启两次，每次仍只有一个实例；
   各次启动的 stderr 分别写入 `target/e2e-agent-desktop-<configuration>[-restart-<n>].log`。
 - E2E 串行：同一时间只有一个代理驱动桌面。菜单命令、热键投递与 `--headed` 按键
   都会改变前台状态，并行会互相污染证据。
@@ -286,13 +306,15 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
 | MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
 | MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区移动/调整/重选与撤销（控制点无 AX 节点，不能用 `--headed` 坐标）；选区/标注与保存（保存按钮只在有效选区时成为 `button arcshot.overlay.save`，选区尚无 AX 节点） |
-| MAC-E2E-13 | 读启动日志 `preferences_launch completion_sound=<初始值>`；分别 `find … --name "完成音效"` 后 headless `click` 两次 | 每次出现 `completion_sound enabled=<相反值或初始值> persisted=true`；初始值先被翻转再恢复，`defaults read <bundle-id> CompletionSoundEnabled` 与日志一致 | 真实音量/静音观感、通知（不请求通知权限） |
-| MAC-E2E-14 | 把完成音效切到与初始值相反的取值；点击 退出 ArcShot 后重启同一可执行文件；再切回初始值并重启 | 两次重启的 `preferences_launch completion_sound=` 分别等于重启前的相反值与初始值；结束时用户偏好已还原；每次只有一份实例 | 崩溃/强制退出后的写入时序、注销重启（登录项改动不在 E2E 内） |
-| MAC-E2E-15 | MAC-E2E-01 的 `snapshot --surface menu-bar-extras` 打开状态菜单后读日志 | 出现 `login_item_status state=… source=menu`，状态属于 Enabled/Disabled/RequiresApproval，且与启动读取 `source=launch` 一致；整段日志没有 `login_item_set `，即读取菜单从不注册/注销登录项 | 真实切换（注册/注销会改动系统登录项）、失败提示窗口、系统设置批准流程 |
+| MAC-E2E-13 | 冻结覆盖层 `snapshot --app` 后按 `arcshot.overlay.tool.*` 驱动 | `group "标注工具"` 含 Select（checked=true）与 Rectangle（checked=false）；AX 激活 Rectangle 后日志 `capture_edit action=SelectTool … tool=Rectangle` 且 checked 状态互换；无选中对象时不出现删除按钮 | 真实指针选择工具、工具图标观感 |
+| MAC-E2E-14 | MAC-E2E-13 后 `hover @<rectangle ref> --headed` 再 `snapshot` | 选项条按 `arcshot.overlay.option.rectangle.*` 可寻址；AX 激活 5 点线宽与蓝色后 `capture_edit action=RectangleOption … style=stroke=#007AFF width=5`，版本不变，选项 checked 状态更新 | 填充开关的像素、选中对象改样式（无对象可选中）、真实指针悬停手感 |
+| MAC-E2E-15 | 读启动日志 `preferences_launch completion_sound=<初始值>`；分别 `find … --name "完成音效"` 后 headless `click` 两次 | 每次出现 `completion_sound enabled=<相反值或初始值> persisted=true`；初始值先被翻转再恢复，`defaults read <bundle-id> CompletionSoundEnabled` 与日志一致 | 真实音量/静音观感、通知（不请求通知权限） |
+| MAC-E2E-16 | 把完成音效切到与初始值相反的取值；点击 退出 ArcShot 后重启同一可执行文件；再切回初始值并重启 | 两次重启的 `preferences_launch completion_sound=` 分别等于重启前的相反值与初始值；结束时用户偏好已还原；每次只有一份实例 | 崩溃/强制退出后的写入时序、注销重启（登录项改动不在 E2E 内） |
+| MAC-E2E-17 | MAC-E2E-01 的 `snapshot --surface menu-bar-extras` 打开状态菜单后读日志 | 出现 `login_item_status state=… source=menu`，状态属于 Enabled/Disabled/RequiresApproval，且与启动读取 `source=launch` 一致；整段日志没有 `login_item_set `，即读取菜单从不注册/注销登录项 | 真实切换（注册/注销会改动系统登录项）、失败提示窗口、系统设置批准流程 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
-`target/e2e-agent-desktop-<configuration>.log`（MAC-E2E-14 的两次重启另写
+`target/e2e-agent-desktop-<configuration>.log`（MAC-E2E-16 的两次重启另写
 `-restart-1/-2.log`，不清空前一份），然后逐条断言上表并打印
 `mac_e2e_XX=pass …`。失败即非零退出，不得改成“人工看一眼”。手工排查时可用同类
 单条命令（引用不得跨快照复用）：
@@ -340,11 +362,14 @@ agent-desktop press escape --headed
   `snapshot --app` 可见、可驱动。#23 的“保存”控件在有效选区且输出空闲时注册为
   `button arcshot.overlay.save`，但打开保存面板需要有效选区，而选区本身尚无 AX
   节点（需先完成拖拽）。因此 MAC-RECOVERY 的保存面板显示/取消/覆盖写仍为
-  **Not tested**，不能用 `--headed` 拖拽补足。**尚未**标注的是未来的产品面：区域选区与八个调整
-  控制点、标注工具、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，
-  但控制点不是 AX 节点，拖动与 `Cmd+Z` 也没有可驱动动作；这些产品面落地时必须沿用
-  §4.2 的约定，否则 MAC-REGION / MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 仍无法进入
-  E2E。
+  **Not tested**，不能用 `--headed` 拖拽补足。#25 另外标注了左侧工具坞
+  （`arcshot.overlay.tool.*`）、悬停矩形选项（`arcshot.overlay.option.rectangle.*`）与
+  有选中对象时的删除按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX
+  暴露选中态（`checked`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与
+  其控制点、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
+  不是 AX 节点；#25 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
+  的删除按钮，而选中对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，
+  否则 MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 
@@ -360,7 +385,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 
 | 稳定用例组 | 实机范围 | 本轮 `agent-desktop` 可行性 |
 | --- | --- | --- |
-| MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、两个偏好项与完成音效跨重启见 §4.3（MAC-E2E-01/13/14/15），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
+| MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、两个偏好项与完成音效跨重启见 §4.3（MAC-E2E-01/15/16/17），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；TCC 授权与设置返回属 §4.4 |
 | MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
 | MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 否：同 MAC-REGION（工具尚未实现） |
