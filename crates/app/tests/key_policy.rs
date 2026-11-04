@@ -480,3 +480,167 @@ fn app_key_12_object_hits_win_over_every_selection_gesture() {
         None
     );
 }
+
+fn press(
+    double_click: bool,
+    busy: bool,
+    tool: Tool,
+    selection: Option<Selection>,
+    object_hit: bool,
+    point: [f64; 2],
+) -> Option<CapturePressAction> {
+    capture_press_action(double_click, busy, tool, selection, object_hit, point)
+}
+
+#[test]
+fn app_key_13_line_and_arrow_tools_create_inside_and_never_finish_on_double_click() {
+    let selection = selection();
+    for tool in [Tool::Line, Tool::Arrow] {
+        // A press inside creates; a press outside starts a new selection band.
+        assert_eq!(
+            press(false, false, tool, Some(selection), false, [20.0, 10.0]),
+            Some(CapturePressAction::Create),
+            "{tool:?}"
+        );
+        assert_eq!(
+            press(false, false, tool, Some(selection), false, [5.0, 5.0]),
+            Some(CapturePressAction::Band),
+            "{tool:?}"
+        );
+        // A double-click never finishes while an annotation tool is active.
+        assert_eq!(
+            press(true, false, tool, Some(selection), false, [20.0, 10.0]),
+            Some(CapturePressAction::Create),
+            "{tool:?}"
+        );
+        assert_eq!(
+            press(true, false, tool, Some(selection), false, [5.0, 5.0]),
+            Some(CapturePressAction::Band),
+            "{tool:?}"
+        );
+        // An object hit is still a new object gesture, not an object drag.
+        assert_eq!(
+            press(false, false, tool, Some(selection), true, [20.0, 10.0]),
+            Some(CapturePressAction::Create),
+            "{tool:?}"
+        );
+        // Without a selection there is no creation area.
+        assert_eq!(
+            press(false, false, tool, None, false, [20.0, 10.0]),
+            Some(CapturePressAction::Band),
+            "{tool:?}"
+        );
+        // Output processing ignores the press.
+        assert_eq!(
+            press(false, true, tool, Some(selection), false, [20.0, 10.0]),
+            None,
+            "{tool:?}"
+        );
+        // Enter still finishes and Esc leaves the tool layer first.
+        let context = CaptureKeyContext {
+            tool,
+            ..Default::default()
+        };
+        assert_eq!(
+            capture_key_action("enter", KeyModifiers::default(), context),
+            Some(CaptureKeyAction::Finish),
+            "{tool:?}"
+        );
+        assert_eq!(
+            capture_key_action("escape", KeyModifiers::default(), context),
+            Some(CaptureKeyAction::SelectTool),
+            "{tool:?}"
+        );
+    }
+}
+
+#[test]
+fn app_key_14_escape_layers_line_and_arrow_objects_then_tools_then_session() {
+    for tool in [Tool::Line, Tool::Arrow] {
+        assert_eq!(
+            capture_key_action(
+                "escape",
+                KeyModifiers::default(),
+                with_object(context(false, false), tool)
+            ),
+            Some(CaptureKeyAction::Deselect),
+            "{tool:?}"
+        );
+        assert_eq!(
+            capture_key_action(
+                "escape",
+                KeyModifiers::default(),
+                CaptureKeyContext {
+                    tool,
+                    ..context(false, false)
+                }
+            ),
+            Some(CaptureKeyAction::SelectTool),
+            "{tool:?}"
+        );
+        assert_eq!(
+            capture_key_action(
+                "escape",
+                KeyModifiers::default(),
+                CaptureKeyContext {
+                    tool,
+                    dragging: true,
+                    ..Default::default()
+                }
+            ),
+            None,
+            "{tool:?}"
+        );
+        assert_eq!(
+            capture_key_action(
+                "escape",
+                KeyModifiers::default(),
+                CaptureKeyContext {
+                    tool,
+                    busy: true,
+                    ..Default::default()
+                }
+            ),
+            Some(CaptureKeyAction::Cancel),
+            "{tool:?}"
+        );
+        // Delete still needs a selected object even with a line tool active.
+        assert_eq!(
+            capture_key_action(
+                "backspace",
+                KeyModifiers::default(),
+                CaptureKeyContext {
+                    tool,
+                    ..Default::default()
+                }
+            ),
+            None,
+            "{tool:?}"
+        );
+    }
+}
+
+#[test]
+fn app_key_15_a_line_object_hit_is_an_object_gesture_only_with_the_select_tool() {
+    let selection = selection();
+    // The select tool routes a line body/endpoint hit to the core object drag.
+    assert_eq!(
+        press(
+            true,
+            false,
+            Tool::Select,
+            Some(selection),
+            true,
+            [20.0, 10.0]
+        ),
+        Some(CapturePressAction::ObjectDrag)
+    );
+    // An active line or arrow tool keeps creating above that same object.
+    for tool in [Tool::Line, Tool::Arrow] {
+        assert_eq!(
+            press(true, false, tool, Some(selection), true, [20.0, 10.0]),
+            Some(CapturePressAction::Create),
+            "{tool:?}"
+        );
+    }
+}

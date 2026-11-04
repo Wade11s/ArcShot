@@ -1,6 +1,7 @@
 //! Immutable capture document, logical region selection and physical output geometry.
 use crate::{
-    Annotation, CapturedFrame, RectangleOption, RectangleStyle, ScreenGeometry, Tool,
+    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, CapturedFrame, Endpoint, LineOption,
+    LineStyle, RectangleOption, RectangleStyle, ScreenGeometry, Segment, Tool,
     annotation::annotation_at, frame::MAX_EDGE, frame::MAX_PIXELS,
 };
 use std::{error::Error, fmt};
@@ -286,8 +287,18 @@ pub enum DragTarget {
     CreateObject,
     /// Dragging an object body moves that object only.
     MoveObject,
-    /// Dragging one object control point resizes that object; edges may flip.
+    /// Dragging one rectangle control point resizes that object; edges may flip.
     ResizeObject(ResizeHandle),
+    /// Dragging one line or arrow endpoint changes length and direction.
+    MoveEndpoint(Endpoint),
+}
+
+/// Resolves a press on an object to its own control point before its body.
+fn control_target(annotation: Annotation, point: [f64; 2]) -> Option<DragTarget> {
+    annotation
+        .resize_handle_at(point)
+        .map(DragTarget::ResizeObject)
+        .or_else(|| annotation.endpoint_at(point).map(DragTarget::MoveEndpoint))
 }
 
 /// A committed document change, kept as edit state so the base image is shared.
@@ -306,7 +317,7 @@ struct Drag {
     /// Object index for move/resize drags; the layer order does not change mid-drag.
     object: Option<usize>,
     /// Tool style captured at press so a creation keeps one appearance.
-    style: Option<RectangleStyle>,
+    style: Option<AnnotationStyle>,
 }
 
 /// The single immutable-base document shared by region and scroll output.
@@ -322,6 +333,10 @@ pub struct Document {
     annotations: Vec<Annotation>,
     /// Session-scoped appearance of the next rectangle, independent of history.
     rectangle_style: RectangleStyle,
+    /// Session-scoped appearance of the next line, independent of history.
+    line_style: LineStyle,
+    /// Session-scoped appearance of the next arrow, independent of history.
+    arrow_style: ArrowStyle,
     /// Session-scoped active pointer tool, independent of history.
     tool: Tool,
     /// Single selected object; history never promises to restore this state.
@@ -346,6 +361,12 @@ impl Document {
             selection: None,
             annotations: Vec::new(),
             rectangle_style: RectangleStyle::new(
+                crate::PaletteColor::Red,
+                crate::StrokeWidth::Three,
+                false,
+            ),
+            line_style: LineStyle::new(crate::PaletteColor::Red, crate::StrokeWidth::Three, false),
+            arrow_style: ArrowStyle::new(
                 crate::PaletteColor::Red,
                 crate::StrokeWidth::Three,
                 false,
@@ -396,6 +417,26 @@ impl Document {
     pub const fn rectangle_style(&self) -> RectangleStyle {
         self.rectangle_style
     }
+    /// Returns the session-scoped appearance used by the next line.
+    #[must_use]
+    pub const fn line_style(&self) -> LineStyle {
+        self.line_style
+    }
+    /// Returns the session-scoped appearance used by the next arrow.
+    #[must_use]
+    pub const fn arrow_style(&self) -> ArrowStyle {
+        self.arrow_style
+    }
+    /// Returns the session-scoped appearance of one annotation tool.
+    #[must_use]
+    pub const fn tool_style(&self, tool: Tool) -> Option<AnnotationStyle> {
+        match tool {
+            Tool::Select => None,
+            Tool::Rectangle => Some(AnnotationStyle::Rectangle(self.rectangle_style)),
+            Tool::Line => Some(AnnotationStyle::Line(self.line_style)),
+            Tool::Arrow => Some(AnnotationStyle::Arrow(self.arrow_style)),
+        }
+    }
 
     /// Switches the active pointer tool; this is interaction state, not history.
     ///
@@ -418,8 +459,8 @@ impl Document {
     /// Applies one rectangle option to the tool memory and, when a rectangle
     /// object is selected, to that object as one undoable step.
     ///
-    /// Other objects are never touched and the tool is never switched. A value
-    /// that does not change the selected object records no history entry.
+    /// Other object types are never touched and the tool is never switched. A
+    /// value that does not change the selected object records no history entry.
     ///
     /// # Errors
     /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
@@ -431,6 +472,44 @@ impl Document {
             return Ok(false);
         }
         self.rectangle_style = self.rectangle_style.with_option(option);
+        self.apply_selected_option(|annotation| annotation.with_rectangle_option(option))
+    }
+
+    /// Applies one line option to the tool memory and, when a line object is
+    /// selected, to that object as one undoable step.
+    ///
+    /// Other object types are never touched and the tool is never switched.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn apply_line_option(&mut self, option: LineOption) -> Result<bool, DocumentError> {
+        if self.drag.is_some() {
+            return Ok(false);
+        }
+        self.line_style = self.line_style.with_option(option);
+        self.apply_selected_option(|annotation| annotation.with_line_option(option))
+    }
+
+    /// Applies one arrow option to the tool memory and, when an arrow object is
+    /// selected, to that object as one undoable step.
+    ///
+    /// Other object types are never touched and the tool is never switched.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn apply_arrow_option(&mut self, option: ArrowOption) -> Result<bool, DocumentError> {
+        if self.drag.is_some() {
+            return Ok(false);
+        }
+        self.arrow_style = self.arrow_style.with_option(option);
+        self.apply_selected_option(|annotation| annotation.with_arrow_option(option))
+    }
+
+    /// Applies an option edit to the selected object when the tool type matches.
+    fn apply_selected_option(
+        &mut self,
+        update: impl FnOnce(Annotation) -> Option<Annotation>,
+    ) -> Result<bool, DocumentError> {
         let Some(index) = self.selected else {
             return Ok(false);
         };
@@ -438,7 +517,9 @@ impl Document {
             self.selected = None;
             return Ok(false);
         };
-        let updated = annotation.with_option(option);
+        let Some(updated) = update(annotation) else {
+            return Ok(false);
+        };
         if updated == annotation {
             return Ok(false);
         }
@@ -472,22 +553,22 @@ impl Document {
         Ok(true)
     }
 
-    /// Adds one annotation above the existing layers as a single undoable step.
+    /// Adds one rectangle above the existing layers as a single undoable step.
     ///
     /// Retained bounds may leave the selection; clipping happens per preview or
-    /// output frame via [`Annotation::visible_bounds`].
+    /// output frame via [`Annotation::visible_rectangle`].
     ///
     /// # Errors
     /// Returns [`DocumentError::NoSelection`] without a single active selection and
     /// [`DocumentError::VersionExhausted`] when the history version cannot advance.
-    pub fn add_annotation(&mut self, bounds: Selection) -> Result<(), DocumentError> {
+    pub fn add_rectangle(&mut self, bounds: Selection) -> Result<(), DocumentError> {
         if self.selection.is_none() {
             return Err(DocumentError::NoSelection);
         }
         let version = self.next_version()?;
         let previous = self.edit_state();
         self.annotations
-            .push(Annotation::new(bounds, self.rectangle_style));
+            .push(Annotation::rectangle(bounds, self.rectangle_style));
         self.commit(previous, version);
         Ok(())
     }
@@ -520,18 +601,18 @@ impl Document {
     /// Starts the drag the active tool performs at a display-local point.
     ///
     /// With the select tool, the topmost visible object wins over the selection
-    /// and its body/control points resolve to an object move/resize. Empty space
-    /// clears the object selection but still starts a selection move. With the
-    /// rectangle tool, the press must start inside the valid selection and
-    /// creates a new object; a press outside starts no core drag so the overlay
-    /// can begin a new selection band.
+    /// and its body/control points resolve to an object move/resize/endpoint edit.
+    /// Empty space clears the object selection but still starts a selection move.
+    /// With an annotation tool (Rectangle, Line, Arrow), the press must start
+    /// inside the valid selection and creates a new object; a press outside
+    /// starts no core drag so the overlay can begin a new selection band.
     pub fn begin_pointer(&mut self, point: [f64; 2]) -> Option<DragTarget> {
         if self.drag.is_some() {
             return None;
         }
         let selection = self.selection?;
         let inside = selection.contains(point);
-        if self.tool == Tool::Rectangle {
+        if self.tool.is_annotation() {
             self.selected = None;
             if !inside {
                 return None;
@@ -542,7 +623,7 @@ impl Document {
                 start: point,
                 baseline: self.edit_state(),
                 object: None,
-                style: Some(self.rectangle_style),
+                style: self.tool_style(self.tool),
             });
             return Some(target);
         }
@@ -550,23 +631,20 @@ impl Document {
         // object's body would otherwise win the hit test.
         if let Some(index) = self.selected
             && let Some(annotation) = self.annotations.get(index)
-            && let Some(handle) = annotation.resize_handle_at(point)
+            && let Some(target) = control_target(*annotation, point)
         {
             self.drag = Some(Drag {
-                target: DragTarget::ResizeObject(handle),
+                target,
                 start: point,
                 baseline: self.edit_state(),
                 object: Some(index),
                 style: None,
             });
-            return Some(DragTarget::ResizeObject(handle));
+            return Some(target);
         }
         if inside && let Some(index) = annotation_at(&self.annotations, point) {
             let annotation = self.annotations[index];
-            let target = match annotation.resize_handle_at(point) {
-                Some(handle) => DragTarget::ResizeObject(handle),
-                None => DragTarget::MoveObject,
-            };
+            let target = control_target(annotation, point).unwrap_or(DragTarget::MoveObject);
             self.selected = Some(index);
             self.drag = Some(Drag {
                 target,
@@ -607,20 +685,31 @@ impl Document {
         }
         match drag.target {
             DragTarget::CreateObject => {
-                // The draft is the last layer; a zero extent removes it again so
-                // a release without a real rectangle records no history entry.
-                let style = drag.style.unwrap_or_default();
-                match Selection::from_drag(drag.start, point) {
-                    Ok(bounds) => {
-                        let mut annotations = drag.baseline.annotations.clone();
-                        annotations.push(Annotation::new(bounds, style));
-                        self.selected = Some(annotations.len() - 1);
-                        self.annotations = annotations;
-                    }
-                    Err(_) => {
-                        self.annotations = drag.baseline.annotations.clone();
-                        self.selected = None;
-                    }
+                // The draft is the last layer; a zero extent or zero-length
+                // stroke removes it again so a release without a real object
+                // records no history entry.
+                let Some(style) = drag.style else {
+                    return;
+                };
+                let draft = match style {
+                    AnnotationStyle::Rectangle(style) => Selection::from_drag(drag.start, point)
+                        .ok()
+                        .map(|bounds| Annotation::rectangle(bounds, style)),
+                    AnnotationStyle::Line(style) => Segment::from_drag(drag.start, point)
+                        .ok()
+                        .map(|segment| Annotation::line(segment, style)),
+                    AnnotationStyle::Arrow(style) => Segment::from_drag(drag.start, point)
+                        .ok()
+                        .map(|segment| Annotation::arrow(segment, style)),
+                };
+                if let Some(draft) = draft {
+                    let mut annotations = drag.baseline.annotations.clone();
+                    annotations.push(draft);
+                    self.selected = Some(annotations.len() - 1);
+                    self.annotations = annotations;
+                } else {
+                    self.annotations = drag.baseline.annotations.clone();
+                    self.selected = None;
                 }
                 return;
             }
@@ -649,7 +738,9 @@ impl Document {
                 let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
                     return;
                 };
-                let bounds = annotation.bounds();
+                let Some(bounds) = annotation.shape().rectangle_bounds() else {
+                    return;
+                };
                 let (mut left, mut right) = (bounds.x(), bounds.x() + bounds.width());
                 let (mut top, mut bottom) = (bounds.y(), bounds.y() + bounds.height());
                 match handle {
@@ -683,8 +774,27 @@ impl Document {
                 else {
                     return;
                 };
+                let Some(updated) = annotation.with_rectangle_bounds(resized) else {
+                    return;
+                };
                 let mut annotations = drag.baseline.annotations.clone();
-                annotations[index] = Annotation::new(resized, annotation.style());
+                annotations[index] = updated;
+                self.annotations = annotations;
+                self.selected = Some(index);
+                return;
+            }
+            DragTarget::MoveEndpoint(endpoint) => {
+                let Some(index) = drag.object else {
+                    return;
+                };
+                let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
+                    return;
+                };
+                let Some(updated) = annotation.with_endpoint(endpoint, point) else {
+                    return;
+                };
+                let mut annotations = drag.baseline.annotations.clone();
+                annotations[index] = updated;
                 self.annotations = annotations;
                 self.selected = Some(index);
                 return;
@@ -778,7 +888,10 @@ impl Document {
                 };
                 (resized, drag.baseline.annotations.clone())
             }
-            DragTarget::CreateObject | DragTarget::MoveObject | DragTarget::ResizeObject(_) => {
+            DragTarget::CreateObject
+            | DragTarget::MoveObject
+            | DragTarget::ResizeObject(_)
+            | DragTarget::MoveEndpoint(_) => {
                 return;
             }
         };

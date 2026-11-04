@@ -73,9 +73,10 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 保存对话框互斥、取消/失败恢复与同一快照的字节复用；#24 已实现选区移动、八向调整、
 重选、共享不可变底图的可撤销历史与八个可见控制点；#25 已实现 Rectangle 标注对象、
 左侧 Select/Rectangle 工具坞与悬停选项、对象命中/移动/八控制点翻转/删除/样式历史，
-以及预览与最终输出共用的像素合成；#30 已实现“完成音效”偏好（默认开、本地记忆、
+以及预览与最终输出共用的像素合成；#26 已实现 Line 的 Solid/Dash、Arrow 的 Flat/Inward、
+两端点编辑与像素合成；#30 已实现“完成音效”偏好（默认开、本地记忆、
 关闭后成功静默但失败照常报错）与“登录时启动”（真实 `SMAppService` 登录项、菜单
-打开读实际状态、切换失败重读并报错）。Line/Arrow/Text/Blur、滚动截图、选项密度与
+打开读实际状态、切换失败重读并报错）。Text/Blur、滚动截图、选项密度与
 完整标注/文字产品面仍未实现，状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
@@ -156,6 +157,24 @@ Rectangle 标注只覆盖已确认接缝：core 文档/会话动作、固定文�
 
 `docs/validation/25-rectangle-annotation.md` 记录实测。窗口内工具坞选项依赖悬停（`hover --headed`
 仅作为前置，激活证据是 AX 与产品日志）；绘制矩形仍需要坐标拖拽，因此不进入 E2E 通过范围。
+
+### #26 的稳定自动化入口
+
+Line / Arrow 只覆盖已确认接缝：core 的创建/命中/端点/样式语义，固定文档的像素真值合成，
+app 键位路由，以及覆盖层四个工具与各自悬停选项的真实 AX 激活。真实指针绘制、端点拖动、
+对象命中与虚线/箭头观感仍属 MAC-ANNOTATION，保持 **Not tested**：对象与端点没有 AX 节点，
+`--headed` 坐标拖拽不能作为验收证据。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/lines.rs` | CORE-EDIT-25～31：Line/Arrow 工具创建与方向、零长度新建拒绝、水平/垂直线有效、最上层命中与 2 点细线容差、端点改长度/方向且可重合不删除、样式矩阵（同类型才改对象）、按下时样式快照、每会话默认、选区移动携带端点/调整不缩放 | 真实指针、端点控制点命中区域 |
+| `crates/core/tests/session_edit.rs` | CORE-SESSION-26：LineOption/ArrowOption 经权威会话修改选中同类对象与工具记忆、输出在途时忽略、版本栅栏一致 | 原生事件投递 |
+| `crates/image/tests/lines.rs` | IMAGE-COMPOSE-12～18：2/3/5 点实线物理线宽、2/3/5 点虚线间距随线宽缩放、Flat 等粗线身/平尾/实心三角头、Inward 尖细尾渐宽/凹后缘（三带横截面）且每种线宽都可区分、裁剪、任意 crop 一致、固定色板 | 原生显示观感、大图压力 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-13～15：Line/Arrow 工具内双击不完成、区内创建/区外重选、对象命中仍创建、Esc 分层与输出期取消、选择工具下对象命中优先 | 真实焦点与 IME |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-18～21：四个工具可寻址且 checked 互换；悬停 Line/Arrow 出现各自选项；AX 改虚线/线宽/颜色与内凹箭头后 `capture_edit` 诊断与 checked 更新；切回 Rectangle 仍保留自己的样式记忆 | 选区绘制、对象创建/端点拖动、预览像素 |
+
+`docs/validation/26-line-arrow.md` 记录实测。与 #25 一样，窗口内选项依赖悬停作为浮现前置，
+激活证据是 AX 行与产品诊断行；对象绘制与端点拖拽仍不进入 E2E 通过范围。
 
 ### #24 的稳定自动化入口
 
@@ -280,7 +299,10 @@ E2E 的观察合同因此是**双通道**：
    --surface focused` 对它返回 `WINDOW_NOT_FOUND`）；带标题窗口用
    `snapshot --surface focused` 的 `app` 等于被测显示名。headless `press --app` 在
    无焦点 AX 元素时必然 `ACTION_FAILED`；`--headed` 坐标点击不属于稳定断言，不能用
-   于验收。这个前置只吸收焦点竞态，不放宽对产品行为的断言。
+   于验收。这个前置只吸收焦点竞态，不放宽对产品行为的断言。同一按键在焦点竞态下
+   最多重投 4 次，每次都重新确认前置（冻结层重新等 `app_active surface=frozen`，
+   带标题窗口重新读 `snapshot --surface focused`）；只有产品自己的诊断行出现才算送达，
+   未按到仍判失败，断言本身不放宽。
 5. **AX 语义**：`AXPress` **不会**触发 `on_click`，两条路径都必须显式注册
    `on_a11y_action(AccessibleAction::Click, …)`，且两条路径入同一个 `UiQueue`；每次
    AX 激活另写一行 `a11y_action=<surface>.<control> action=Click`，E2E 以该行证明
@@ -315,6 +337,10 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-15 | 读启动日志 `preferences_launch completion_sound=<初始值>`；分别 `find … --name "完成音效"` 后 headless `click` 两次 | 每次出现 `completion_sound enabled=<相反值或初始值> persisted=true`；初始值先被翻转再恢复 | 真实音量/静音观感、通知（不请求通知权限）；偏好域取值另由人工 `defaults read` 交叉核对 |
 | MAC-E2E-16 | 把完成音效切到与初始值相反的取值；点击 退出 ArcShot 后重启同一可执行文件；再切回初始值并重启 | 两次重启的 `preferences_launch completion_sound=` 分别等于重启前的相反值与初始值；结束时用户偏好已还原；每次只有一份实例 | 崩溃/强制退出后的写入时序、注销重启（登录项改动不在 E2E 内） |
 | MAC-E2E-17 | MAC-E2E-01 的 `snapshot --surface menu-bar-extras` 打开状态菜单后读日志 | 出现 `login_item_status state=… source=menu`，状态属于 Enabled/Disabled/RequiresApproval，且与启动读取 `source=launch` 一致；整段日志没有 `login_item_set `，即读取菜单从不注册/注销登录项 | 真实切换（注册/注销会改动系统登录项）、失败提示窗口、系统设置批准流程 |
+| MAC-E2E-18 | `snapshot --app` 后 AX 依次激活 `arcshot.overlay.tool.line` 与 `.arrow` | 四个工具均可寻址；每次激活出现对应 `a11y_action=`、`capture_edit action=SelectTool … tool=Line/Arrow`，checked 仅在激活项为 true | 真实指针选择工具、图标观感 |
+| MAC-E2E-19 | 悬停 Line 工具后 AX 激活虚线、2 点线宽与绿色 | 选项条按 `arcshot.overlay.option.line.*` 可寻址；日志依次出现 `capture_edit action=LineOption … dash=true`、`width=2`、`stroke=#34C759`，checked 状态更新且版本不变 | 虚线像素、选中线改样式（无对象可选中） |
+| MAC-E2E-20 | 悬停 Arrow 工具后 AX 激活内凹、5 点线宽与橙色 | 选项条按 `arcshot.overlay.option.arrow.*` 可寻址；日志依次出现 `capture_edit action=ArrowOption … inward=true`、`width=5`、`stroke=#FF9500`，checked 状态更新且版本不变 | 箭头像素、选中箭头改样式 |
+| MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -370,11 +396,12 @@ agent-desktop press escape --headed
   `snapshot --app` 可见、可驱动。#23 的“保存”控件在有效选区且输出空闲时注册为
   `button arcshot.overlay.save`，但打开保存面板需要有效选区，而选区本身尚无 AX
   节点（需先完成拖拽）。因此 MAC-RECOVERY 的保存面板显示/取消/覆盖写仍为
-  **Not tested**，不能用 `--headed` 拖拽补足。#25 另外标注了左侧工具坞
-  （`arcshot.overlay.tool.*`）、悬停矩形选项（`arcshot.overlay.option.rectangle.*`）与
-  有选中对象时的删除按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX
-  暴露选中态（`checked`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与
-  其控制点、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
+  **Not tested**，不能用 `--headed` 拖拽补足。#25/#26 另外标注了左侧工具坞
+  （`arcshot.overlay.tool.*`）、矩形/直线/箭头各自的悬停选项
+  （`arcshot.overlay.option.rectangle.*`、`.line.*`、`.arrow.*`）与有选中对象时的删除
+  按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX 暴露选中态
+  （`checked`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
+  （含线/箭头的两个端点）、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
   不是 AX 节点；#25 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
   的删除按钮，而选中对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，
   否则 MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。
@@ -396,7 +423,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、两个偏好项与完成音效跨重启见 §4.3（MAC-E2E-01/15/16/17），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；TCC 授权与设置返回属 §4.4 |
 | MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
-| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 否：同 MAC-REGION（工具尚未实现） |
+| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分：四个工具与矩形/直线/箭头样式选项可 AX 驱动；绘制、对象命中与端点拖动仍无 AX 节点 |
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层尚未实现，落地时须补 AX 标注 |
