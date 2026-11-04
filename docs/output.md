@@ -2,16 +2,19 @@
 
 本切片在冻结内屏上建立唯一选区，并以 Enter、选择态空白双击或右上“完成”复制
 PNG，或以右上“保存”显式写入 PNG 文件。它落地统一文档、2x 坐标转换、共享
-合成/编码入口、固定快照、版本栅栏与尺寸/内存预算。标注工具、选区移动/调整/
-重选与滚动截图仍属后续票据，行为保持 Not tested。
+合成/编码入口、固定快照、版本栅栏与尺寸/内存预算；#24 又落地了选区移动、八向
+调整、重选与可撤销历史。标注对象/工具、文字编辑与滚动截图仍属后续票据，行为
+保持 Not tested。
 
 自动化与常驻原生冒烟的稳定入口见 `TEST.md`；实机证据见
 `docs/validation/22-region-output.md` 与 `docs/validation/23-save-png.md`。
 
 ## 文档与坐标
 
-- core 的 `Document` 持有不可变 `CapturedFrame`、唯一 `Option<Selection>` 与
-  `version`。选区变化才递增版本；相同矩形不是变化；无效矩形不替换旧选区。
+- core 的 `Document` 持有不可变 `CapturedFrame`、唯一 `Option<Selection>`、按
+  z 轴层叠的标注与撤销/重做历史。每个已提交的编辑步骤（重选、一次拖动、一个
+  标注）恰好递增一次 `version`；拖动中的实时预览不改版本，相同矩形且无标注
+  的重选不是变化；无效矩形不替换旧选区。
 - `Selection` 使用 display-local 逻辑点。`Selection::pixel_rect` 直接从逻辑坐标
   乘以 2x scale 并对每条边取整一次；不接受来自视图缩放或位置的值，避免重复
   缩放/取整。结果要求非空、位于冻结屏内、任一边 ≤16,384 且 ≤24,000,000 物理
@@ -28,13 +31,16 @@ PNG，或以右上“保存”显式写入 PNG 文件。它落地统一文档、
 - “完成”与“保存”入口位于右上；Esc 取消会话，不复制、不保存。输出处理期间
   视图禁用拖动、重复完成与保存，core 同时忽略 Finish/Save/Start，迟到结果必须
   通过版本栅栏。
-- “保存”只在存在有效选区且输出互斥空闲时可用；保存对话框打开期间与输出处理
-  期间，编辑、重复完成、重复保存与截图快捷键都被忽略。
+- 按下落在选区内开始整块移动，落在八个控制点上按该角/边调整；按下落在选区外
+  是新的框选。一次拖动只在释放时产生一个历史步骤，否则不入历史；`Cmd+Z` /
+  `Cmd+Shift+Z` 撤销/重做，也都递增版本，因此旧输出快照同样被栅栏拦住。
+- “保存”只在存在有效选区且单一输出槽位空闲时可用；保存对话框打开期间与输出处理
+  期间，编辑（拖动、重选、撤销/重做）、重复完成、重复保存与截图快捷键都被忽略。
 
 ## 输出管线
 
 1. 冻结成功后 core 保留 `Document`；`Finish` 需要当前 ticket、有效选区、
-   `output_mutex` 空闲。
+   单一的 `Panel`/`Encoding` 输出槽位空闲。
 2. core 只产生 `OutputJob { ticket, version, crop }`，app 在启动 worker 前克隆
    `CapturedFrame`（共享字节，不复制底图）。同一文档最多一个在途合成/编码。
 3. `arcshot-image::compose_crop` 按物理矩形复制所选像素、去掉行 padding、BGRA
@@ -54,8 +60,9 @@ PNG，或以右上“保存”显式写入 PNG 文件。它落地统一文档、
    而不是另建输出路线），再固定 ticket、文档 `version` 与物理 `crop` 快照。
 2. `OutputJob` 携带 `OutputTarget`：`Clipboard`（完成）或 `SaveFile`（保存）。
    core 的输出状态机只有一个槽位：`Panel(job)`（保存对话框打开，尚无编码字节）
-   或 `Encoding(job)`（固定快照合成/编码中）。`Finish`、`Save`、`SelectRegion`
-   在槽位占用时都不产生效果，`Start`（菜单与全局快捷键共用的入口）同样被忽略。
+   或 `Encoding(job)`（固定快照合成/编码中）。`Finish`、`Save`、`SelectRegion`、
+   拖动与撤销/重做（经 `editable`）在槽位占用时都不产生效果，`Start`（菜单与
+   全局快捷键共用的入口）同样被忽略。
 3. 保存路径先请求原生 `NSSavePanel`（`CaptureEffect::RequestSavePanel`）；面板由
    `crates/macos` 的安全适配器以 `beginWithCompletionHandler` 非阻塞显示，完成
    回调只写入一个主线程结果槽，由 app 的下一次 tick 取走，因此没有嵌套模态

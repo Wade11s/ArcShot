@@ -69,10 +69,10 @@ save_file_smoke=pass bytes=87 roundtrip=true rejected_destination=true invalid_b
 | ID | 前置/步骤 | 预期 | 实际 | 结果 |
 | --- | --- | --- | --- | --- |
 | CORE-SESSION-06 | 冻结并建立选区 → Save 打开面板 → 菜单/热键 Start | 面板期间忽略 Start；取消后面板释放，Start 正常重启 | 无 Start 效果，相位保持 Frozen；取消后 DismissOverlay+CheckPermission | Pass |
-| CORE-SESSION-14 | 保存面板打开（2x 选区 (10,5)-(40,25)） | 单一 SaveFile job（version 1、crop (20,10) 60×40）；Finish/Save/FinishAt/SelectRegion/Start 全部无效，面板期不可发布 | 全部返回空效果，选区/版本不变，`may_publish=false` | Pass |
-| CORE-SESSION-15 | 保存面板取消 → 重复取消 → 再次 Save | 取消非错误且无效果；文档/版本/选区不变；重试得到同一快照 job | 空效果、Frozen、version 1；重试 job 相等；重复取消被拒绝 | Pass |
-| CORE-SESSION-16 | 保存面板失败 | 报告 SavePanel 分类错误，释放互斥，保留文档，可同版本重试 | `ReportOutputFailure(SavePanel)`，版本与 crop 保持 | Pass |
-| CORE-SESSION-17 | 无选区 Save、取消会话后旧 ticket Save | 均不打开面板、不占用互斥 | 空效果，`output_busy=false`，文档已释放 | Pass |
+| CORE-SESSION-20 | 保存面板打开（2x 选区 (10,5)-(40,25)） | 单一 SaveFile job（version 1、crop (20,10) 60×40）；Finish/Save/FinishAt/SelectRegion/Start 全部无效，面板期不可发布 | 全部返回空效果，选区/版本不变，`may_publish=false` | Pass |
+| CORE-SESSION-21 | 保存面板取消 → 重复取消 → 再次 Save | 取消非错误且无效果；文档/版本/选区不变；重试得到同一快照 job | 空效果、Frozen、version 1；重试 job 相等；重复取消被拒绝 | Pass |
+| CORE-SESSION-22 | 保存面板失败 | 报告 SavePanel 分类错误，释放互斥，保留文档，可同版本重试 | `ReportOutputFailure(SavePanel)`，版本与 crop 保持 | Pass |
+| CORE-SESSION-23 | 无选区 Save、取消会话后旧 ticket Save | 均不打开面板、不占用互斥 | 空效果，`output_busy=false`，文档已释放 | Pass |
 | APP-EFFECT-18 | 面板选定 → 合成完成 → 写文件成功 | SaveFile job 合成；仅确认写入后才结束会话并播放完成音效 | `ComposeOutput(job)`；`DismissOverlay + PlayCompletionSound`，转 Resident | Pass |
 | APP-EFFECT-19 | 写文件失败 / 超预算 / 编码失败 | 分类错误且保留文档、可同版本重试 | 三类均 `ReportOutputFailure`，Frozen，重试 job 版本/crop 相同 | Pass |
 | APP-EFFECT-20 | 取消后迟到面板结果与写入；剪贴板 job 的面板结果；同一面板重复结果 | 一律不合成、不发布、不结束会话 | 全部空效果；`may_publish=false`；第二次面板结果被拒 | Pass |

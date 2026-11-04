@@ -73,7 +73,7 @@ fn finish(session: &mut CaptureSession, ticket: CaptureTicket) -> OutputJob {
 }
 
 #[test]
-fn core_session_14_open_save_panel_blocks_editing_finish_save_and_hotkey_start() {
+fn core_session_20_open_save_panel_blocks_editing_finish_save_and_hotkey_start() {
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(job.target(), OutputTarget::SaveFile);
@@ -110,7 +110,7 @@ fn core_session_14_open_save_panel_blocks_editing_finish_save_and_hotkey_start()
 }
 
 #[test]
-fn core_session_15_cancelled_save_panel_returns_to_the_untouched_session_without_error() {
+fn core_session_21_cancelled_save_panel_returns_to_the_untouched_session_without_error() {
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(
@@ -136,7 +136,7 @@ fn core_session_15_cancelled_save_panel_returns_to_the_untouched_session_without
 }
 
 #[test]
-fn core_session_16_failed_save_panel_reports_a_classified_error_and_keeps_the_document() {
+fn core_session_22_failed_save_panel_reports_a_classified_error_and_keeps_the_document() {
     let (mut session, ticket) = editing();
     let job = request_save(&mut session, ticket);
     assert_eq!(
@@ -154,7 +154,7 @@ fn core_session_16_failed_save_panel_reports_a_classified_error_and_keeps_the_do
 }
 
 #[test]
-fn core_session_17_save_requires_a_frozen_selection_and_the_current_ticket() {
+fn core_session_23_save_requires_a_frozen_selection_and_the_current_ticket() {
     let (mut session, ticket) = frozen();
     assert_eq!(session.dispatch(CaptureAction::Save { ticket }), vec![]);
     assert!(!session.output_busy());

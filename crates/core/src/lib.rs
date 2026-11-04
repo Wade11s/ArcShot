@@ -5,7 +5,10 @@ mod frame;
 mod hotkey;
 mod session;
 
-pub use document::{Document, DocumentError, MAX_PNG_BYTES, PixelRect, Selection};
+pub use document::{
+    Annotation, Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle,
+    Selection,
+};
 pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry};
 pub use hotkey::Hotkey;
 pub use session::{

@@ -56,6 +56,35 @@ pub enum CaptureAction {
         /// Drag end in display-local logical points.
         to: [f64; 2],
     },
+    /// Starts one selection drag at a display-local point.
+    SelectionDragStarted {
+        /// Attempt whose overlay produced the press.
+        ticket: CaptureTicket,
+        /// Press point in display-local logical points.
+        point: [f64; 2],
+    },
+    /// Updates the live preview of the active selection drag.
+    SelectionDragUpdated {
+        /// Attempt whose overlay produced the move.
+        ticket: CaptureTicket,
+        /// Current pointer position in display-local logical points.
+        point: [f64; 2],
+    },
+    /// Ends the active drag; changed state enters history as exactly one step.
+    SelectionDragEnded {
+        /// Attempt whose overlay produced the release.
+        ticket: CaptureTicket,
+    },
+    /// Undoes the most recent committed document edit.
+    Undo {
+        /// Attempt whose overlay produced the shortcut.
+        ticket: CaptureTicket,
+    },
+    /// Reapplies the most recently undone document edit.
+    Redo {
+        /// Attempt whose overlay produced the shortcut.
+        ticket: CaptureTicket,
+    },
     /// Finishes through Enter or the toolbar button when a valid selection exists.
     Finish {
         /// Attempt whose overlay produced the action.
@@ -262,7 +291,8 @@ enum State {
     },
     Frozen {
         ticket: CaptureTicket,
-        document: Document,
+        /// Boxed so the session state enum stays small next to the edit history.
+        document: Box<Document>,
     },
     Relaunch,
 }
@@ -323,7 +353,7 @@ impl CaptureSession {
     #[must_use]
     pub fn document(&self) -> Option<&Document> {
         match &self.state {
-            State::Frozen { document, .. } => Some(document),
+            State::Frozen { document, .. } => Some(document.as_ref()),
             _ => None,
         }
     }
@@ -352,6 +382,20 @@ impl CaptureSession {
     #[must_use]
     pub fn may_capture(&self, ticket: CaptureTicket) -> bool {
         matches!(self.state,State::Preparing(current) if current==ticket)
+    }
+
+    /// Borrows the frozen document for an edit, ignoring output-busy and stale tickets.
+    fn editable(&mut self, ticket: CaptureTicket) -> Option<&mut Document> {
+        if self.output.is_some() {
+            return None;
+        }
+        match &mut self.state {
+            State::Frozen {
+                ticket: current,
+                document,
+            } if *current == ticket => Some(document),
+            _ => None,
+        }
     }
 
     /// Applies a semantic action and returns explicit effects for the app coordinator.
@@ -423,8 +467,38 @@ impl CaptureSession {
                 let Ok(selection) = Selection::from_drag(from, to) else {
                     return vec![];
                 };
-                // An out-of-bounds or over-budget drag leaves the prior selection.
+                // An out-of-bounds or over-budget drag leaves the prior document.
                 let _ = document.select(selection);
+                vec![]
+            }
+            CaptureAction::SelectionDragStarted { ticket, point } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.begin_drag(point);
+                }
+                vec![]
+            }
+            CaptureAction::SelectionDragUpdated { ticket, point } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.update_drag(point);
+                }
+                vec![]
+            }
+            CaptureAction::SelectionDragEnded { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.end_drag();
+                }
+                vec![]
+            }
+            CaptureAction::Undo { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.undo();
+                }
+                vec![]
+            }
+            CaptureAction::Redo { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.redo();
+                }
                 vec![]
             }
             CaptureAction::Finish { ticket } => {
@@ -609,7 +683,7 @@ impl CaptureSession {
             Ok(frame) => {
                 self.state = State::Frozen {
                     ticket,
-                    document: Document::new(frame),
+                    document: Box::new(Document::new(frame)),
                 };
                 vec![CaptureEffect::PresentFrozen(ticket)]
             }
