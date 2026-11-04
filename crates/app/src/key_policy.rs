@@ -102,9 +102,10 @@ pub fn capture_key_action(
 
 /// Routes one primary-button press; the core still validates the exact target.
 ///
-/// With the rectangle tool active a press inside the selection always starts a
-/// new object and a double-click never finishes. With the select tool, an object
-/// body or control point wins over every selection gesture and over Finish.
+/// With any annotation tool active (Rectangle, Line, Arrow) a press inside the
+/// selection always starts a new object and a double-click never finishes. With
+/// the select tool, an object body or control point wins over every selection
+/// gesture and over Finish.
 #[must_use]
 pub fn capture_press_action(
     double_click: bool,
@@ -118,7 +119,7 @@ pub fn capture_press_action(
         return None;
     }
     let inside = selection.is_some_and(|selection| selection.contains(point));
-    if tool == Tool::Rectangle {
+    if tool.is_annotation() {
         return Some(if inside {
             CapturePressAction::Create
         } else {

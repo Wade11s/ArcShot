@@ -4,8 +4,9 @@ use arcshot_app::{
     PermissionNotice, capture_key_action, capture_press_action,
 };
 use arcshot_core::{
-    Annotation, CaptureTicket, Hotkey, PaletteColor, RectangleOption, RectangleStyle, ResizeHandle,
-    ScreenGeometry, Selection, StrokeWidth, Tool,
+    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, CaptureTicket, Endpoint, Hotkey,
+    LineOption, LineStyle, PaletteColor, RectangleOption, RectangleStyle, ResizeHandle,
+    ScreenGeometry, Selection, Shape, StrokeWidth, Tool,
 };
 use gpui::{
     AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Toggled, Window, WindowId,
@@ -54,6 +55,10 @@ pub(crate) enum UiCommand {
     SelectTool(CaptureTicket, Tool),
     /// One rectangle option from the hover strip.
     RectangleOption(CaptureTicket, RectangleOption),
+    /// One line option from the hover strip.
+    LineOption(CaptureTicket, LineOption),
+    /// One arrow option from the hover strip.
+    ArrowOption(CaptureTicket, ArrowOption),
     /// Delete the single selected object.
     DeleteObject(CaptureTicket),
     /// Esc layer one: clear the selected object.
@@ -97,6 +102,10 @@ pub(crate) struct CaptureView {
     pub(crate) annotations: Vec<Annotation>,
     /// Mirror of the session-scoped rectangle tool style.
     pub(crate) rectangle_style: RectangleStyle,
+    /// Mirror of the session-scoped line tool style.
+    pub(crate) line_style: LineStyle,
+    /// Mirror of the session-scoped arrow tool style.
+    pub(crate) arrow_style: ArrowStyle,
     /// Composed selection pixels; the overlay draws only interaction chrome on top.
     pub(crate) preview: Option<OverlayPreview>,
     /// Hovered tool row, including its option strip, for the hover-only options.
@@ -166,11 +175,19 @@ impl CaptureView {
 }
 
 impl CaptureView {
-    /// The style the option strip reflects: the selected rectangle, else the tool memory.
-    fn effective_style(&self) -> RectangleStyle {
+    /// The style the option strip reflects: a selected object of the same tool,
+    /// else that tool's session memory.
+    fn effective_style(&self, tool: Tool) -> AnnotationStyle {
+        let memory = match tool {
+            Tool::Rectangle | Tool::Select => AnnotationStyle::Rectangle(self.rectangle_style),
+            Tool::Line => AnnotationStyle::Line(self.line_style),
+            Tool::Arrow => AnnotationStyle::Arrow(self.arrow_style),
+        };
         self.selected
             .and_then(|index| self.annotations.get(index))
-            .map_or(self.rectangle_style, |annotation| annotation.style())
+            .map(|annotation| annotation.style())
+            .filter(|style| style.tool() == tool)
+            .unwrap_or(memory)
     }
 
     /// One dock row: the tool button plus, while hovered, its option strip.
@@ -215,20 +232,27 @@ impl CaptureView {
             self.tool == tool,
             &queue,
         ));
-        if self.hovered_tool == Some(tool) && tool == Tool::Rectangle {
-            row = row.child(self.option_strip(cx));
+        if self.hovered_tool == Some(tool) && tool.is_annotation() {
+            row = row.child(self.option_strip(tool));
         }
         row
     }
 
-    fn option_strip(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    /// The hover strip for one annotation tool. Width and palette are shared;
+    /// rectangle adds fill, line adds dash and arrow adds the inward head.
+    fn option_strip(&self, tool: Tool) -> impl IntoElement {
         let ticket = self.ticket;
         let queue = Rc::clone(&self.queue);
-        let style = self.effective_style();
+        let style = self.effective_style(tool);
+        let (strip_id, strip_label) = match tool {
+            Tool::Line => ("line-options", "直线选项"),
+            Tool::Arrow => ("arrow-options", "箭头选项"),
+            Tool::Rectangle | Tool::Select => ("rectangle-options", "矩形选项"),
+        };
         let mut strip = div()
-            .id("rectangle-options")
+            .id(strip_id)
             .role(Role::Group)
-            .aria_label("矩形选项")
+            .aria_label(strip_label)
             .flex()
             .flex_row()
             .items_center()
@@ -239,58 +263,109 @@ impl CaptureView {
             .rounded_lg()
             .bg(rgba(0x20242bee));
         for width in StrokeWidth::ALL {
-            let id = match width {
-                StrokeWidth::Two => "arcshot.overlay.option.rectangle.width.2",
-                StrokeWidth::Three => "arcshot.overlay.option.rectangle.width.3",
-                StrokeWidth::Five => "arcshot.overlay.option.rectangle.width.5",
-            };
-            let label = match width {
-                StrokeWidth::Two => "线宽 2 点",
-                StrokeWidth::Three => "线宽 3 点",
-                StrokeWidth::Five => "线宽 5 点",
+            let command = match tool {
+                Tool::Line => UiCommand::LineOption(ticket, LineOption::Width(width)),
+                Tool::Arrow => UiCommand::ArrowOption(ticket, ArrowOption::Width(width)),
+                Tool::Rectangle | Tool::Select => {
+                    UiCommand::RectangleOption(ticket, RectangleOption::Width(width))
+                }
             };
             strip = strip.child(option_button(
-                id,
-                label,
+                option_id(tool, &format!("width.{}", width.label())),
+                width_label(width),
                 width.label(),
                 style.width() == width,
                 None,
-                UiCommand::RectangleOption(ticket, RectangleOption::Width(width)),
+                command,
                 &queue,
             ));
         }
         for color in PaletteColor::ALL {
+            let command = match tool {
+                Tool::Line => UiCommand::LineOption(ticket, LineOption::Stroke(color)),
+                Tool::Arrow => UiCommand::ArrowOption(ticket, ArrowOption::Stroke(color)),
+                Tool::Rectangle | Tool::Select => {
+                    UiCommand::RectangleOption(ticket, RectangleOption::Stroke(color))
+                }
+            };
             strip = strip.child(option_button(
-                color_id(color),
+                option_id(tool, &format!("color.{}", color_name(color))),
                 color_label(color),
                 "",
                 style.stroke() == color,
                 Some(color.rgb()),
-                UiCommand::RectangleOption(ticket, RectangleOption::Stroke(color)),
+                command,
                 &queue,
             ));
         }
-        strip.child(option_button(
-            "arcshot.overlay.option.rectangle.fill",
-            "20% 同色填充",
-            "▨",
-            style.fill(),
-            None,
-            UiCommand::RectangleOption(ticket, RectangleOption::Fill(!style.fill())),
-            &queue,
-        ))
+        match tool {
+            Tool::Line => {
+                let dash = style.line().is_some_and(LineStyle::dash);
+                strip.child(option_button(
+                    option_id(tool, "dash"),
+                    "虚线",
+                    "╌",
+                    dash,
+                    None,
+                    UiCommand::LineOption(ticket, LineOption::Dash(!dash)),
+                    &queue,
+                ))
+            }
+            Tool::Arrow => {
+                let inward = style.arrow().is_some_and(ArrowStyle::inward);
+                strip.child(option_button(
+                    option_id(tool, "inward"),
+                    "内凹箭头",
+                    "↯",
+                    inward,
+                    None,
+                    UiCommand::ArrowOption(ticket, ArrowOption::Inward(!inward)),
+                    &queue,
+                ))
+            }
+            Tool::Rectangle | Tool::Select => {
+                let fill = style.rectangle().is_some_and(RectangleStyle::fill);
+                strip.child(option_button(
+                    option_id(tool, "fill"),
+                    "20% 同色填充",
+                    "▨",
+                    fill,
+                    None,
+                    UiCommand::RectangleOption(ticket, RectangleOption::Fill(!fill)),
+                    &queue,
+                ))
+            }
+        }
     }
 }
 
-const fn color_id(color: PaletteColor) -> &'static str {
+/// Stable option identifier shared by AX and the pointer path.
+fn option_id(tool: Tool, option: &str) -> String {
+    let tool = match tool {
+        Tool::Line => "line",
+        Tool::Arrow => "arrow",
+        Tool::Rectangle | Tool::Select => "rectangle",
+    };
+    format!("arcshot.overlay.option.{tool}.{option}")
+}
+
+const fn width_label(width: StrokeWidth) -> &'static str {
+    match width {
+        StrokeWidth::Two => "线宽 2 点",
+        StrokeWidth::Three => "线宽 3 点",
+        StrokeWidth::Five => "线宽 5 点",
+    }
+}
+
+const fn color_name(color: PaletteColor) -> &'static str {
     match color {
-        PaletteColor::Red => "arcshot.overlay.option.rectangle.color.red",
-        PaletteColor::Orange => "arcshot.overlay.option.rectangle.color.orange",
-        PaletteColor::Yellow => "arcshot.overlay.option.rectangle.color.yellow",
-        PaletteColor::Green => "arcshot.overlay.option.rectangle.color.green",
-        PaletteColor::Blue => "arcshot.overlay.option.rectangle.color.blue",
-        PaletteColor::White => "arcshot.overlay.option.rectangle.color.white",
-        PaletteColor::Black => "arcshot.overlay.option.rectangle.color.black",
+        PaletteColor::Red => "red",
+        PaletteColor::Orange => "orange",
+        PaletteColor::Yellow => "yellow",
+        PaletteColor::Green => "green",
+        PaletteColor::Blue => "blue",
+        PaletteColor::White => "white",
+        PaletteColor::Black => "black",
     }
 }
 
@@ -312,7 +387,7 @@ fn rgb_u32([red, green, blue]: [u8; 3]) -> u32 {
 
 #[allow(clippy::too_many_arguments)]
 fn option_button(
-    id: &'static str,
+    id: String,
     label: &'static str,
     glyph: &'static str,
     selected: bool,
@@ -322,12 +397,13 @@ fn option_button(
 ) -> impl IntoElement {
     let click_queue = Rc::clone(queue);
     let a11y_queue = Rc::clone(queue);
+    let a11y_id = id.clone();
     let background = match swatch {
         Some(channels) => rgb(rgb_u32(channels)),
         None => rgba(0x2a2f3add),
     };
     div()
-        .id(id)
+        .id(id.clone())
         .role(Role::Button)
         .aria_label(label)
         .aria_selected(selected)
@@ -357,7 +433,7 @@ fn option_button(
         .child(glyph)
         .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
         .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
-            log::info!("a11y_action={id} action=Click");
+            log::info!("a11y_action={a11y_id} action=Click");
             a11y_queue.borrow_mut().push(command);
         })
 }
@@ -768,8 +844,18 @@ impl Render for CaptureView {
             {
                 let [red, green, blue] = annotation.style().stroke().rgb();
                 let color = rgb(u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue));
-                for handle in RESIZE_HANDLES {
-                    let [x, y] = annotation.handle_center(handle).map(|value| value as f32);
+                let centers: Vec<[f64; 2]> = match annotation.shape() {
+                    Shape::Rectangle(_) => RESIZE_HANDLES
+                        .into_iter()
+                        .filter_map(|handle| annotation.handle_center(handle))
+                        .collect(),
+                    Shape::Line(segment) => [Endpoint::Start, Endpoint::End]
+                        .into_iter()
+                        .map(|endpoint| segment.endpoint_center(endpoint))
+                        .collect(),
+                };
+                for [x, y] in centers {
+                    let [x, y] = [x as f32, y as f32];
                     root = root.child(
                         region(x - 4.0, y - 4.0, 8.0, 8.0)
                             .bg(color)
@@ -931,6 +1017,22 @@ impl Render for CaptureView {
                 "arcshot.overlay.tool.rectangle",
                 "矩形",
                 "▭",
+                cx,
+            ));
+            dock = dock.child(self.tool_row(
+                Tool::Line,
+                "line-tool-row",
+                "arcshot.overlay.tool.line",
+                "直线",
+                "╱",
+                cx,
+            ));
+            dock = dock.child(self.tool_row(
+                Tool::Arrow,
+                "arrow-tool-row",
+                "arcshot.overlay.tool.arrow",
+                "箭头",
+                "➤",
                 cx,
             ));
             if self.selected.is_some() && !busy {

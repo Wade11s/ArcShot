@@ -26,10 +26,10 @@ fn annotated() -> Document {
     let mut document = Document::new(frame());
     document.select(selection(10.0, 5.0, 30.0, 20.0)).unwrap();
     document
-        .add_annotation(selection(12.0, 7.0, 4.0, 4.0))
+        .add_rectangle(selection(12.0, 7.0, 4.0, 4.0))
         .unwrap();
     document
-        .add_annotation(selection(20.0, 10.0, 8.0, 6.0))
+        .add_rectangle(selection(20.0, 10.0, 8.0, 6.0))
         .unwrap();
     document
 }
@@ -39,7 +39,7 @@ fn bounds(document: &Document) -> Vec<(f64, f64, f64, f64)> {
         .annotations()
         .iter()
         .map(|annotation| {
-            let bounds = annotation.bounds();
+            let bounds = annotation.shape().rectangle_bounds().unwrap();
             (bounds.x(), bounds.y(), bounds.width(), bounds.height())
         })
         .collect()
@@ -187,7 +187,7 @@ fn core_edit_05_all_eight_handles_move_only_their_own_edges() {
     for (handle, target, expected) in cases {
         let mut document = Document::new(frame());
         document.select(base).unwrap();
-        document.add_annotation(annotation).unwrap();
+        document.add_rectangle(annotation).unwrap();
         assert_eq!(
             document.begin_drag(base.handle_center(handle)),
             Some(DragTarget::Resize(handle)),
@@ -200,7 +200,10 @@ fn core_edit_05_all_eight_handles_move_only_their_own_edges() {
             expected,
             "{handle:?}"
         );
-        let kept = document.annotations()[0].bounds();
+        let kept = document.annotations()[0]
+            .shape()
+            .rectangle_bounds()
+            .unwrap();
         assert_eq!(
             (kept.x(), kept.y(), kept.width(), kept.height()),
             (25.0, 15.0, 5.0, 5.0),
@@ -257,12 +260,12 @@ fn core_edit_08_out_of_bounds_annotations_are_retained_and_clipped_then_reappear
     let mut document = Document::new(frame());
     document.select(selection(10.0, 10.0, 20.0, 20.0)).unwrap();
     document
-        .add_annotation(selection(25.0, 25.0, 10.0, 10.0))
+        .add_rectangle(selection(25.0, 25.0, 10.0, 10.0))
         .unwrap();
     let annotation = document.annotations()[0];
     let initial = document.selection().unwrap();
     assert_eq!(
-        annotation.visible_bounds(initial),
+        annotation.visible_rectangle(initial),
         Some(selection(25.0, 25.0, 5.0, 5.0))
     );
 
@@ -271,9 +274,12 @@ fn core_edit_08_out_of_bounds_annotations_are_retained_and_clipped_then_reappear
     document.update_drag([35.0, 35.0]);
     document.end_drag().unwrap();
     let larger = document.selection().unwrap();
-    assert_eq!(annotation.bounds(), selection(25.0, 25.0, 10.0, 10.0));
     assert_eq!(
-        annotation.visible_bounds(larger),
+        annotation.shape().rectangle_bounds().unwrap(),
+        selection(25.0, 25.0, 10.0, 10.0)
+    );
+    assert_eq!(
+        annotation.visible_rectangle(larger),
         Some(selection(25.0, 25.0, 10.0, 10.0))
     );
 
@@ -283,9 +289,12 @@ fn core_edit_08_out_of_bounds_annotations_are_retained_and_clipped_then_reappear
     document.end_drag().unwrap();
     let smaller = document.selection().unwrap();
     assert_eq!(smaller, selection(10.0, 10.0, 10.0, 10.0));
-    assert_eq!(document.annotations()[0].visible_bounds(smaller), None);
+    assert_eq!(document.annotations()[0].visible_rectangle(smaller), None);
     assert_eq!(
-        document.annotations()[0].bounds(),
+        document.annotations()[0]
+            .shape()
+            .rectangle_bounds()
+            .unwrap(),
         selection(25.0, 25.0, 10.0, 10.0)
     );
 }
@@ -331,7 +340,7 @@ fn core_edit_11_edits_and_history_share_the_immutable_base_image() {
         let x = 20.0 + f64::from(step);
         document.select(selection(x, 5.0, 30.0, 20.0)).unwrap();
         document
-            .add_annotation(selection(x + 2.0, 7.0, 4.0, 4.0))
+            .add_rectangle(selection(x + 2.0, 7.0, 4.0, 4.0))
             .unwrap();
         document.undo().unwrap();
         document.redo().unwrap();

@@ -10,9 +10,9 @@ use arcshot_app::{
     PreferencesFlow, PreferencesNotice, encode_document,
 };
 use arcshot_core::{
-    Annotation, CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession,
-    CaptureTicket, CapturedFrame, Document, FrameError, OutputFailure, OutputJob, PixelRect,
-    RectangleStyle, SavePanelResult, ScreenGeometry, Tool,
+    Annotation, AnnotationStyle, ArrowStyle, CaptureAction, CaptureEffect, CaptureFailure,
+    CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, Document, FrameError, LineStyle,
+    OutputFailure, OutputJob, PixelRect, RectangleStyle, SavePanelResult, ScreenGeometry, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -209,6 +209,12 @@ impl Coordinator {
                 }
                 UiCommand::RectangleOption(ticket, option) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::RectangleOption { ticket, option }, cx);
+                }
+                UiCommand::LineOption(ticket, option) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::LineOption { ticket, option }, cx);
+                }
+                UiCommand::ArrowOption(ticket, option) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::ArrowOption { ticket, option }, cx);
                 }
                 UiCommand::DeleteObject(ticket) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::DeleteSelected { ticket }, cx);
@@ -609,6 +615,7 @@ impl Coordinator {
     /// observe session state without reading GPUI windows or pixels.
     fn dispatch(&mut self, action: CaptureAction) -> VecDeque<CaptureEffect> {
         let name = action_name(&action);
+        let option_tool = action_style_tool(&action);
         let edits = matches!(
             action,
             CaptureAction::Undo { .. }
@@ -618,6 +625,8 @@ impl Coordinator {
                 | CaptureAction::SelectRegion { .. }
                 | CaptureAction::SelectTool { .. }
                 | CaptureAction::RectangleOption { .. }
+                | CaptureAction::LineOption { .. }
+                | CaptureAction::ArrowOption { .. }
                 | CaptureAction::DeleteSelected { .. }
                 | CaptureAction::DeselectSelected { .. }
         );
@@ -633,10 +642,10 @@ impl Coordinator {
             let style = document
                 .selected_index()
                 .and_then(|index| document.annotations().get(index))
-                .map_or_else(
-                    || document.rectangle_style(),
-                    |annotation| annotation.style(),
-                );
+                .map(|annotation| annotation.style())
+                .or_else(|| option_tool.and_then(|tool| document.tool_style(tool)))
+                .or_else(|| document.tool_style(document.tool()))
+                .map_or_else(|| "none".to_owned(), format_style);
             log::info!(
                 "capture_edit action={name} version={} annotations={} selection={:?} tool={:?} selected={:?} style={}",
                 document.version(),
@@ -649,7 +658,7 @@ impl Coordinator {
                 ]),
                 document.tool(),
                 document.selected_index(),
-                format_style(style)
+                style
             );
         }
         effects
@@ -971,6 +980,8 @@ impl Coordinator {
             document.map_or_else(Vec::new, |document| document.annotations().to_vec());
         let rectangle_style =
             document.map_or_else(RectangleStyle::default, Document::rectangle_style);
+        let line_style = document.map_or_else(LineStyle::default, Document::line_style);
+        let arrow_style = document.map_or_else(ArrowStyle::default, Document::arrow_style);
         let busy = self.session.output_busy();
         let error = self.overlay_error.take();
         let updated = handle.update(cx, |view, _, cx| {
@@ -979,6 +990,8 @@ impl Coordinator {
             view.selected = selected;
             view.annotations = annotations;
             view.rectangle_style = rectangle_style;
+            view.line_style = line_style;
+            view.arrow_style = arrow_style;
             view.busy = busy;
             view.error = error;
             cx.notify();
@@ -1170,6 +1183,8 @@ impl Coordinator {
                     selected: None,
                     annotations: Vec::new(),
                     rectangle_style: RectangleStyle::default(),
+                    line_style: LineStyle::default(),
+                    arrow_style: ArrowStyle::default(),
                     preview: None,
                     hovered_tool: None,
                     focus: focus.clone(),
@@ -1236,6 +1251,8 @@ impl Coordinator {
                     selected: None,
                     annotations: Vec::new(),
                     rectangle_style: RectangleStyle::default(),
+                    line_style: LineStyle::default(),
+                    arrow_style: ArrowStyle::default(),
                     preview: None,
                     hovered_tool: None,
                     focus: focus.clone(),
@@ -1362,13 +1379,27 @@ fn preferences_notice_text(notice: PreferencesNotice) -> String {
     }
 }
 
-fn format_style(style: RectangleStyle) -> String {
-    format!(
-        "stroke={} width={} fill={}",
-        style.stroke().hex(),
-        style.width().label(),
-        style.fill()
-    )
+fn format_style(style: AnnotationStyle) -> String {
+    match style {
+        AnnotationStyle::Rectangle(style) => format!(
+            "stroke={} width={} fill={}",
+            style.stroke().hex(),
+            style.width().label(),
+            style.fill()
+        ),
+        AnnotationStyle::Line(style) => format!(
+            "stroke={} width={} dash={}",
+            style.stroke().hex(),
+            style.width().label(),
+            style.dash()
+        ),
+        AnnotationStyle::Arrow(style) => format!(
+            "stroke={} width={} inward={}",
+            style.stroke().hex(),
+            style.width().label(),
+            style.inward()
+        ),
+    }
 }
 
 fn classify_native_failure(error: &native::CaptureError) -> CaptureFailure {
@@ -1391,6 +1422,17 @@ fn geometry(display: DisplaySnapshot) -> Result<ScreenGeometry, FrameError> {
     )
 }
 
+/// The tool whose style an option action changes, if any.
+const fn action_style_tool(action: &CaptureAction) -> Option<Tool> {
+    match action {
+        CaptureAction::RectangleOption { .. } => Some(Tool::Rectangle),
+        CaptureAction::LineOption { .. } => Some(Tool::Line),
+        CaptureAction::ArrowOption { .. } => Some(Tool::Arrow),
+        CaptureAction::SelectTool { tool, .. } => Some(*tool),
+        _ => None,
+    }
+}
+
 /// Diagnostic label for one semantic action; frame payloads are never printed.
 const fn action_name(action: &CaptureAction) -> &'static str {
     match action {
@@ -1408,6 +1450,8 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::PointerReleased { .. } => "PointerReleased",
         CaptureAction::SelectTool { .. } => "SelectTool",
         CaptureAction::RectangleOption { .. } => "RectangleOption",
+        CaptureAction::LineOption { .. } => "LineOption",
+        CaptureAction::ArrowOption { .. } => "ArrowOption",
         CaptureAction::DeleteSelected { .. } => "DeleteSelected",
         CaptureAction::DeselectSelected { .. } => "DeselectSelected",
         CaptureAction::Undo { .. } => "Undo",

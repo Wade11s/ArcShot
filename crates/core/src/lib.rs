@@ -7,7 +7,9 @@ mod hotkey;
 mod session;
 
 pub use annotation::{
-    Annotation, PaletteColor, RectangleOption, RectangleStyle, StrokeWidth, Tool, annotation_at,
+    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, Endpoint, LineOption, LineStyle,
+    PaletteColor, RectangleOption, RectangleStyle, Segment, Shape, StrokeWidth, Tool,
+    annotation_at,
 };
 pub use document::{
     Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle, Selection,

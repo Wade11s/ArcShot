@@ -143,6 +143,12 @@ def count_log(path: pathlib.Path, needle: str) -> int:
     return sum(1 for line in read_log(path) if needle in line)
 
 
+def wait_log_line(path: pathlib.Path, needle: str, timeout: float, *, after: int = 0) -> str:
+    """Returns the first matching log line at or after an index."""
+    index = wait_log(path, needle, timeout, after=after)
+    return read_log(path)[index]
+
+
 def find_ref(app: str, name: str) -> str:
     data = agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem", "--name", name)
     matches = data.get("matches", [])
@@ -355,6 +361,31 @@ def hotkey_combo(display: str) -> str:
     return "+".join([*parts, key])
 
 
+def press_until(
+    app: str, combo: str, *, headed: bool, observe, gate=None, attempts: int = 4
+) -> None:
+    """Delivers one key until the product observes it, re-gating focus each try.
+
+    Focus can shift between the frontmost check and the physical delivery; every
+    attempt re-confirms focus (the frontmost application, or a caller-supplied
+    product gate such as `app_active surface=frozen`) before pressing. The product
+    assertion is unchanged: `observe` must still see the real effect, so a key
+    that never reaches the product still fails the case instead of being assumed.
+    """
+    for _ in range(attempts):
+        if gate is not None:
+            gate()
+        else:
+            wait_frontmost(app, 5.0)
+        press(combo, headed=headed)
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if observe():
+                return
+            time.sleep(POLL)
+    fail(f"press {combo!r} did not reach the product after {attempts} deliveries")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ArcShot agent-desktop end-to-end check")
     parser.add_argument("--release", action="store_true")
@@ -471,8 +502,19 @@ def main() -> int:
         note("mac_e2e_03=pass menu_start=frozen own_windows=0")
 
         # MAC-E2E-05a/05b: Escape reaches the app and the session leaves Frozen.
-        press("escape", headed=True)
-        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        # The borderless overlay is not enumerated by `snapshot --surface focused`,
+        # so each delivery re-gates on the product's own activation line.
+        press_until(
+            app,
+            "escape",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "from=Frozen to=Resident action=CancelAttempt" in line
+                for line in read_log(log)[log_mark:]
+            ),
+        )
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=log_mark)
         if windows(app):
             fail(f"cancelled session left own windows: {windows(app)}")
         note("mac_e2e_05a=pass escape_delivery=headed own_windows=0")
@@ -498,7 +540,16 @@ def main() -> int:
         wait_frozen_active(log, log_mark)
         wait_log(log, "to=Frozen action=Completed", 15.0, after=log_mark)
         note(f"mac_e2e_04=pass hotkey={config} negative_control=no_capture")
-        press("escape", headed=True)
+        press_until(
+            app,
+            "escape",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "from=Frozen to=Resident action=CancelAttempt" in line
+                for line in read_log(log)[log_mark:]
+            ),
+        )
         wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=log_mark)
 
         # MAC-E2E-07: the permission notice appears and Escape closes it.
@@ -508,8 +559,7 @@ def main() -> int:
             fail(f"permission notice is not focused, refusing headed key delivery: {notice}")
         wait_frontmost(app, 5.0)
         size = notice.get("bounds", {})
-        press("escape", headed=True)
-        wait_windows(app, 0, 10.0)
+        press_until(app, "escape", headed=True, observe=lambda: not windows(app))
         note(f"mac_e2e_07=pass notice_size={size['width']}x{size['height']} escape_closed=true")
 
         # MAC-E2E-10: the notice is readable and drivable through AX alone.
@@ -594,8 +644,12 @@ def main() -> int:
             if "hotkey_launch config=" in line
         )
         temporary = "⌃⌥9" if original != "⌃⌥9" else "⌃⌥8"
-        press(hotkey_combo(temporary), headed=False)
-        wait_log(log, f"candidate={temporary}", 10.0)
+        press_until(
+            app,
+            hotkey_combo(temporary),
+            headed=True,
+            observe=lambda: any(f"candidate={temporary}" in line for line in read_log(log)),
+        )
         save = wait_node(
             app,
             lambda tree: (find_nodes(tree, native_id="arcshot.hotkey.save", require_ref=True) or [None])[0],
@@ -614,9 +668,12 @@ def main() -> int:
         recorder = find_nodes(root, native_id="arcshot.hotkey.recorder", require_ref=True)[0]
         agent("click", recorder["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
-        wait_frontmost(app, 5.0)
-        press(hotkey_combo(original), headed=False)
-        wait_log(log, f"candidate={original}", 10.0)
+        press_until(
+            app,
+            hotkey_combo(original),
+            headed=True,
+            observe=lambda: any(f"candidate={original}" in line for line in read_log(log)),
+        )
         save = wait_node(
             app,
             lambda tree: (find_nodes(tree, native_id="arcshot.hotkey.save", require_ref=True) or [None])[0],
@@ -719,6 +776,174 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.rectangle.color.red", False, 10.0)
         note("mac_e2e_14=pass hover_options=ax style=#007AFF width=5 version_unchanged")
 
+        # MAC-E2E-18: the two line-class tools are addressable and mutually
+        # exclusive with the existing Select/Rectangle checked states.
+        line_tool = wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
+        arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", False, 10.0)
+        if not line_tool.get("ref_id") or not arrow_tool.get("ref_id"):
+            fail("line/arrow tool buttons are not addressable")
+        mark = len(read_log(log))
+        agent("click", line_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.line action=Click", 10.0, after=mark)
+        line = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+        if "tool=Line" not in line:
+            fail(f"line tool diagnostic was {line!r}")
+        wait_tool_state(app, "arcshot.overlay.tool.line", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.rectangle", False, 10.0)
+        arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", False, 10.0)
+        mark = len(read_log(log))
+        agent("click", arrow_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.arrow action=Click", 10.0, after=mark)
+        arrow = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+        if "tool=Arrow" not in arrow:
+            fail(f"arrow tool diagnostic was {arrow!r}")
+        wait_tool_state(app, "arcshot.overlay.tool.arrow", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
+        note("mac_e2e_18=pass tool_dock=ax tools=Line,Arrow selected_state=toggled")
+
+        # MAC-E2E-19: hovering Line exposes its options; AX toggles the dash and
+        # changes width/colour, all as tool memory without a document version.
+        line_tool = wait_tool_state(app, "arcshot.overlay.tool.line", False, 10.0)
+        hover(line_tool["ref_id"])
+        dash = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.line.dash",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not dash.get("ref_id"):
+            fail("hovered line options are not addressable")
+        if checked_state(dash):
+            fail("a new line session must default to solid")
+        mark = len(read_log(log))
+        agent("click", dash["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.line.dash action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=LineOption", 10.0, after=mark)
+        if "dash=true" not in edit or "width=3" not in edit:
+            fail(f"line dash diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.line.dash", True, 10.0)
+        width_two = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.line.width.2",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", width_two["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.line.width.2 action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=LineOption", 10.0, after=mark)
+        if "width=2" not in edit or "dash=true" not in edit:
+            fail(f"line width diagnostic was {edit!r}")
+        green = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.line.color.green",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", green["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.line.color.green action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=LineOption", 10.0, after=mark)
+        if "stroke=#34C759 width=2 dash=true" not in edit:
+            fail(f"line colour diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.line.dash", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.line.width.2", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.line.color.green", True, 10.0)
+        note("mac_e2e_19=pass hover_options=ax line_style=#34C759/2/dash version_unchanged")
+
+        # MAC-E2E-20: the arrow options toggle Inward and change width/colour.
+        arrow_tool = wait_tool_state(app, "arcshot.overlay.tool.arrow", True, 10.0)
+        hover(arrow_tool["ref_id"])
+        inward = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.arrow.inward",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not inward.get("ref_id"):
+            fail("hovered arrow options are not addressable")
+        if checked_state(inward):
+            fail("a new arrow session must default to flat")
+        mark = len(read_log(log))
+        agent("click", inward["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.arrow.inward action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=ArrowOption", 10.0, after=mark)
+        if "inward=true" not in edit or "width=3" not in edit:
+            fail(f"arrow inward diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.arrow.inward", True, 10.0)
+        width_five = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.arrow.width.5",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", width_five["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.arrow.width.5 action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=ArrowOption", 10.0, after=mark)
+        if "width=5" not in edit or "inward=true" not in edit:
+            fail(f"arrow width diagnostic was {edit!r}")
+        orange = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.arrow.color.orange",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", orange["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.arrow.color.orange action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=ArrowOption", 10.0, after=mark)
+        if "stroke=#FF9500 width=5 inward=true" not in edit:
+            fail(f"arrow colour diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.arrow.inward", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.arrow.width.5", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.arrow.color.orange", True, 10.0)
+        note("mac_e2e_20=pass hover_options=ax arrow_style=#FF9500/5/inward version_unchanged")
+
+        # MAC-E2E-21: rectangle keeps its own style memory after the other tools
+        # changed theirs.
+        rectangle_tool = wait_tool_state(app, "arcshot.overlay.tool.rectangle", False, 10.0)
+        hover(rectangle_tool["ref_id"])
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.width.5", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.color.blue", True, 10.0)
+        note("mac_e2e_21=pass tool_memory=independent rectangle=#007AFF/5")
+
         root = wait_node(
             app,
             lambda tree: (
@@ -789,7 +1014,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=17")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=21")
     return 0
 
 

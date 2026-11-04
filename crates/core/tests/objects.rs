@@ -39,7 +39,7 @@ fn draw(document: &mut Document, from: [f64; 2], to: [f64; 2]) {
 }
 
 fn bounds(annotation: arcshot_core::Annotation) -> (f64, f64, f64, f64) {
-    let bounds = annotation.bounds();
+    let bounds = annotation.shape().rectangle_bounds().unwrap();
     (bounds.x(), bounds.y(), bounds.width(), bounds.height())
 }
 
@@ -65,7 +65,10 @@ fn core_edit_13_the_rectangle_tool_creates_one_selected_object_per_gesture() {
     assert_eq!(document.version(), version + 1);
     assert_eq!(document.annotations().len(), 1);
     assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 10.0, 10.0));
-    assert_eq!(document.annotations()[0].style(), RectangleStyle::default());
+    assert_eq!(
+        document.annotations()[0].style().rectangle(),
+        Some(RectangleStyle::default())
+    );
     // Auto-selected, and the tool stays active for the next gesture.
     assert_eq!(document.selected_index(), Some(0));
     assert_eq!(document.tool(), Tool::Rectangle);
@@ -123,7 +126,7 @@ fn core_edit_15_creation_starts_inside_the_selection_but_may_extend_outside() {
     // Retained data leaves the selection; preview and output clip it.
     let active = document.selection().unwrap();
     assert_eq!(
-        created.visible_bounds(active),
+        created.visible_rectangle(active),
         Some(selection(12.0, 8.0, 28.0, 17.0))
     );
 }
@@ -178,7 +181,10 @@ fn core_edit_17_object_handles_resize_one_edge_and_may_flip_across_the_opposite_
         let mut document = selected();
         draw(&mut document, [base.x(), base.y()], [30.0, 15.0]);
         document.set_tool(Tool::Select);
-        let object = document.annotations()[0].bounds();
+        let object = document.annotations()[0]
+            .shape()
+            .rectangle_bounds()
+            .unwrap();
         assert_eq!(
             document.begin_pointer(object.handle_center(handle)),
             Some(DragTarget::ResizeObject(handle)),
@@ -194,7 +200,10 @@ fn core_edit_17_object_handles_resize_one_edge_and_may_flip_across_the_opposite_
     draw(&mut document, [20.0, 10.0], [30.0, 15.0]);
     document.set_tool(Tool::Select);
     let version = document.version();
-    let object = document.annotations()[0].bounds();
+    let object = document.annotations()[0]
+        .shape()
+        .rectangle_bounds()
+        .unwrap();
     assert_eq!(
         document.begin_pointer(object.handle_center(ResizeHandle::TopLeft)),
         Some(DragTarget::ResizeObject(ResizeHandle::TopLeft))
@@ -317,7 +326,7 @@ fn core_edit_20_style_options_change_the_selected_object_and_the_tool_memory() {
     assert_eq!(document.version(), version);
     for annotation in document.annotations() {
         assert_eq!(annotation.style().stroke(), PaletteColor::Red);
-        assert!(!annotation.style().fill());
+        assert!(!annotation.style().rectangle().unwrap().fill());
     }
 }
 
@@ -340,7 +349,7 @@ fn core_edit_21_each_tool_keeps_its_style_for_the_session_and_new_documents_defa
     let style = document.annotations()[0].style();
     assert_eq!(style.stroke(), PaletteColor::Green);
     assert_eq!(style.width(), StrokeWidth::Two);
-    assert!(style.fill());
+    assert!(style.rectangle().unwrap().fill());
 
     // A new session's document starts again from the Rectangle defaults.
     let fresh = Document::new(frame());
@@ -387,8 +396,11 @@ fn core_edit_23_an_object_may_leave_the_selection_and_keeps_its_data_until_undo(
     let moved = document.annotations()[0];
     assert_eq!(bounds(moved), (42.0, 28.0, 5.0, 5.0));
     let active = document.selection().unwrap();
-    assert_eq!(moved.visible_bounds(active), None);
-    assert_eq!(moved.bounds(), selection(42.0, 28.0, 5.0, 5.0));
+    assert_eq!(moved.visible_rectangle(active), None);
+    assert_eq!(
+        moved.shape().rectangle_bounds().unwrap(),
+        selection(42.0, 28.0, 5.0, 5.0)
+    );
     assert!(document.undo().unwrap());
     assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 5.0, 5.0));
 }
