@@ -301,6 +301,21 @@ pub enum CaptureAction {
         /// Preparation to cancel.
         ticket: CaptureTicket,
     },
+    /// Explicitly accepts the verified partial result after a known-state stop.
+    ///
+    /// Only valid while awaiting the partial choice with a verified result;
+    /// the shared fenced clipboard Finish runs for that document and no
+    /// other output is produced.
+    AcceptScrollPartial {
+        /// Preparation awaiting the choice.
+        ticket: CaptureTicket,
+    },
+    /// Explicitly abandons the verified partial result and returns the
+    /// pre-scroll selection. Only valid while awaiting the choice.
+    AbandonScrollPartial {
+        /// Preparation awaiting the choice.
+        ticket: CaptureTicket,
+    },
     /// A Scroll native request's state could not be confirmed (I-12).
     ///
     /// This is terminal: no output, no partial result and no in-session restart.
@@ -353,6 +368,10 @@ pub enum CaptureEffect {
     ScrollPreviewUpdated(CaptureTicket),
     /// Preparation stopped with a known-state reason; keep the region session.
     ScrollRefused(CaptureTicket, ScrollRefusal),
+    /// Collection stopped with a known-state reason and a verified result
+    /// remains; the user must explicitly accept or abandon it. No output
+    /// has been produced and the region overlay is not re-presented yet.
+    ScrollPartialChoice(CaptureTicket, ScrollRefusal),
     /// Native state is uncertain; close Scroll UI and require a relaunch.
     ScrollRelaunchRequired,
 }
@@ -643,6 +662,23 @@ impl CaptureSession {
         self.scroll.as_ref().and_then(ScrollPreparation::frame)
     }
 
+    /// The latest verified stitched document, once collection has opened.
+    #[must_use]
+    pub fn scroll_stitch_frame(&self) -> Option<&CapturedFrame> {
+        self.scroll
+            .as_ref()
+            .and_then(ScrollPreparation::stitch_frame)
+    }
+
+    /// Whether a verified result is awaiting an explicit accept-or-abandon.
+    #[must_use]
+    pub fn scroll_partial_available(&self) -> bool {
+        self.scroll.as_ref().is_some_and(|preparation| {
+            preparation.phase() == ScrollPhase::AwaitingPartialChoice
+                && preparation.stitch_frame().is_some()
+        })
+    }
+
     /// Takes the raw frame awaiting image verification, if any.
     #[must_use]
     pub fn take_scroll_pending_frame(&mut self) -> Option<CapturedFrame> {
@@ -926,13 +962,40 @@ impl CaptureSession {
                     Err(error) => {
                         // A failed Scroll completion keeps the collected result:
                         // the region document returns so Esc and retry work.
+                        // An accepted partial instead returns to the explicit
+                        // accept-or-abandon choice; it is never a success.
+                        let partial = self
+                            .scroll
+                            .as_ref()
+                            .is_some_and(ScrollPreparation::partial_output);
+                        let refusal = self.scroll_refusal().cloned();
                         self.restore_scroll_region_document();
+                        if partial {
+                            if let Some(preparation) = self.scroll.as_mut() {
+                                preparation.end_partial_output();
+                            }
+                            if let Some(refusal) = refusal {
+                                return vec![
+                                    CaptureEffect::ScrollPartialChoice(job.ticket(), refusal),
+                                    CaptureEffect::ReportOutputFailure(error),
+                                ];
+                            }
+                        }
                         vec![CaptureEffect::ReportOutputFailure(error)]
                     }
                 }
             }
             CaptureAction::EnterScroll { ticket } => {
                 if self.output.is_some() {
+                    return vec![];
+                }
+                // An active preparation (including one awaiting the partial
+                // choice) owns the selection until it is abandoned or ends.
+                if self
+                    .scroll
+                    .as_ref()
+                    .is_some_and(|preparation| preparation.phase() != ScrollPhase::Inactive)
+                {
                     return vec![];
                 }
                 let State::Frozen {
@@ -1063,6 +1126,8 @@ impl CaptureSession {
                 self.finish_scroll_outcome(ticket, outcome)
             }
             CaptureAction::CompleteScroll { ticket } => self.complete_scroll(ticket),
+            CaptureAction::AcceptScrollPartial { ticket } => self.accept_partial(ticket),
+            CaptureAction::AbandonScrollPartial { ticket } => self.abandon_partial(ticket),
             CaptureAction::CancelScroll { ticket } => {
                 let owned = self
                     .scroll
@@ -1152,6 +1217,12 @@ impl CaptureSession {
                     CaptureEffect::ScrollRefused(ticket, refusal),
                     CaptureEffect::PresentFrozen(ticket),
                 ]
+            }
+            ScrollPrepOutcome::PartialChoice(refusal) => {
+                // Keep the preparation (and its verified result) alive for
+                // the explicit accept-or-abandon choice. No output, no
+                // overlay: the app presents the choice in the control UI.
+                vec![CaptureEffect::ScrollPartialChoice(ticket, refusal)]
             }
             ScrollPrepOutcome::Stopped => {
                 self.restore_scroll_region_document();
@@ -1296,12 +1367,54 @@ impl CaptureSession {
     /// top/bottom coverage. With no scrolling the verified document is exactly
     /// the trusted initial frame, so an untouched collection still completes.
     fn complete_scroll(&mut self, ticket: CaptureTicket) -> Vec<CaptureEffect> {
+        self.begin_scroll_document_output(ticket, false)
+    }
+
+    /// Explicitly accepts the verified partial result (I-11 step 11).
+    ///
+    /// The incomplete verified document is published only now, through the
+    /// same fenced clipboard Finish as a normal completion. A failed publish
+    /// returns to this choice for retry or abandon; a success ends the session.
+    fn accept_partial(&mut self, ticket: CaptureTicket) -> Vec<CaptureEffect> {
+        self.begin_scroll_document_output(ticket, true)
+    }
+
+    /// Explicitly abandons the verified partial result (I-11 step 11).
+    fn abandon_partial(&mut self, ticket: CaptureTicket) -> Vec<CaptureEffect> {
+        let owned = self.scroll.as_ref().is_some_and(|preparation| {
+            preparation.ticket() == ticket
+                && preparation.phase() == ScrollPhase::AwaitingPartialChoice
+        });
+        if !owned {
+            return vec![];
+        }
+        // Abandoning while an accepted partial is publishing cancels its
+        // fence; the stashed region document returns with the overlay.
+        self.output = None;
+        let outcome = self
+            .scroll
+            .as_mut()
+            .map_or(ScrollPrepOutcome::Ignored, ScrollPreparation::stop);
+        self.finish_scroll_outcome(ticket, outcome)
+    }
+
+    /// Publishes the verified stitch document through the shared output path.
+    fn begin_scroll_document_output(
+        &mut self,
+        ticket: CaptureTicket,
+        from_partial: bool,
+    ) -> Vec<CaptureEffect> {
         if self.output.is_some() {
             return vec![]; // Repeated completion is disabled while output runs.
         }
+        let expected_phase = if from_partial {
+            ScrollPhase::AwaitingPartialChoice
+        } else {
+            ScrollPhase::Collecting
+        };
         let may_complete = self.scroll.as_ref().is_some_and(|preparation| {
             preparation.ticket() == ticket
-                && preparation.phase() == ScrollPhase::Collecting
+                && preparation.phase() == expected_phase
                 && preparation.stitch_frame().is_some()
         }) && matches!(self.state, State::Frozen { ticket: current, .. } if current == ticket);
         if !may_complete {
@@ -1337,6 +1450,9 @@ impl CaptureSession {
         let region = std::mem::replace(document, Box::new(completion));
         if let Some(preparation) = self.scroll.as_mut() {
             preparation.stash_region_document(region);
+            if from_partial {
+                preparation.begin_partial_output();
+            }
         }
         self.begin_output(ticket, OutputTarget::Clipboard, None)
     }

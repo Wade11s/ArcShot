@@ -1,9 +1,9 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
 use crate::text_input::{TextInput, text_editor};
 use arcshot_app::{
-    CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PermissionAction,
-    PermissionNotice, ScrollPermissionAction, ScrollPermissionNotice, capture_key_action,
-    capture_press_action, capture_text_press_action,
+    CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PARTIAL_ABANDON_LABEL,
+    PARTIAL_ACCEPT_LABEL, PermissionAction, PermissionNotice, ScrollPermissionAction,
+    ScrollPermissionNotice, capture_key_action, capture_press_action, capture_text_press_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
@@ -102,6 +102,10 @@ pub(crate) enum UiCommand {
     ScrollCancel(CaptureTicket),
     /// The Scroll control window closed.
     ScrollControlClosed(WindowId, CaptureTicket),
+    /// The user explicitly accepts the verified partial result.
+    ScrollPartialAccept(CaptureTicket),
+    /// The user explicitly abandons the verified partial result.
+    ScrollPartialAbandon(CaptureTicket),
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
@@ -1921,6 +1925,9 @@ impl Render for ScrollPermissionView {
 pub(crate) struct ScrollControlView {
     pub(crate) status: String,
     pub(crate) hint: Option<String>,
+    /// Whether the two explicit partial-result choices are shown instead of
+    /// the single cancel button (I-11 step 11).
+    pub(crate) partial_choice: bool,
     pub(crate) ticket: CaptureTicket,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
@@ -1970,13 +1977,33 @@ impl Render for ScrollControlView {
                     .text_xs()
                     .child(hint)
             }))
-            .child(scroll_button(
-                "scroll-control-cancel".to_owned(),
-                "arcshot.scroll.control.cancel".to_owned(),
-                "取消",
-                UiCommand::ScrollCancel(ticket),
-                &self.queue,
-            ))
+            .child(if self.partial_choice {
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(scroll_button(
+                        "scroll-partial-use".to_owned(),
+                        "arcshot.scroll.partial.use".to_owned(),
+                        PARTIAL_ACCEPT_LABEL,
+                        UiCommand::ScrollPartialAccept(ticket),
+                        &self.queue,
+                    ))
+                    .child(scroll_button(
+                        "scroll-partial-abandon".to_owned(),
+                        "arcshot.scroll.partial.abandon".to_owned(),
+                        PARTIAL_ABANDON_LABEL,
+                        UiCommand::ScrollPartialAbandon(ticket),
+                        &self.queue,
+                    ))
+            } else {
+                div().child(scroll_button(
+                    "scroll-control-cancel".to_owned(),
+                    "arcshot.scroll.control.cancel".to_owned(),
+                    "取消",
+                    UiCommand::ScrollCancel(ticket),
+                    &self.queue,
+                ))
+            })
     }
 }
 
