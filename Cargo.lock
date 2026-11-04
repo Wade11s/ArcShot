@@ -161,6 +161,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "log",
+ "raw-window-handle",
 ]
 
 [[package]]

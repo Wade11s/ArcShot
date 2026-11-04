@@ -8,10 +8,11 @@ mod permission;
 mod preferences;
 mod save;
 mod scroll;
+mod scroll_input;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
-    owned_visible_window_ids,
+    capture_scroll_region, owned_visible_window_ids,
 };
 pub use clipboard::{
     ClipboardError, ClipboardSmoke, play_completion_sound, validate_png_pasteboard,
@@ -33,8 +34,13 @@ pub use save::{
     take_save_panel_outcome, write_png_to_file,
 };
 pub use scroll::{
-    frontmost_pid, open_scroll_permission_settings, pointer_location_cg, probe_scroll_target,
-    request_scroll_permission, scroll_exclusion_set, scroll_permissions,
+    activate_scroll_target, frontmost_pid, open_scroll_permission_settings,
+    owned_visible_window_frames, pointer_location_cg, probe_scroll_target,
+    request_scroll_permission, scroll_exclusion_set, scroll_permissions, scroll_target_intact,
+};
+pub use scroll_input::{
+    GlobalRect, ScrollInputTap, ScrollTapError, TapEvent, TapEventKind, TapGate, TapGateCommand,
+    TapStats,
 };
 
 use std::{cell::RefCell, error::Error, fmt};
@@ -48,7 +54,7 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValue, NSControlStateValueOff,
     NSControlStateValueOn, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar,
-    NSStatusItem,
+    NSStatusItem, NSView,
 };
 use objc2_foundation::{NSData, NSObject, NSSize, NSString};
 
@@ -57,6 +63,30 @@ use objc2_foundation::{NSData, NSObject, NSSize, NSString};
 pub fn application_active() -> bool {
     MainThreadMarker::new()
         .is_some_and(|marker| NSApplication::sharedApplication(marker).isActive())
+}
+
+/// Returns the public `NSWindow` number for a borrowed AppKit `NSView` pointer.
+///
+/// GPUI exposes its window's content view through `HasWindowHandle`; this safe
+/// adapter turns that pointer into the exact `CGWindowID` used by the Scroll
+/// exclusion array, so the control window can be identified among several
+/// still-visible owned windows without guessing from geometry.
+///
+/// # Safety
+/// `ns_view` must be null or a live `NSView` pointer on the main thread.
+#[must_use]
+pub fn ns_window_number(ns_view: *mut core::ffi::c_void) -> Option<u32> {
+    let _marker = MainThreadMarker::new()?;
+    if ns_view.is_null() {
+        return None;
+    }
+    // SAFETY: The caller guarantees a live NSView on the main thread; `window`
+    // returns a retained NSWindow borrowed only for the synchronous query.
+    let view: &NSView = unsafe { &*ns_view.cast::<NSView>() };
+    let window = view.window()?;
+    // A synchronous AppKit query on a live window, on the main thread.
+    let number: isize = window.windowNumber();
+    u32::try_from(number).ok().filter(|number| *number != 0)
 }
 
 /// Commands queued by native menu actions for later consumption by the app.

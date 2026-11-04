@@ -20,6 +20,10 @@ pub use scroll_flow::{
 };
 mod scroll_target_tasks;
 pub use scroll_target_tasks::{ScrollTargetSubmitError, ScrollTargetTasks};
+mod scroll_frame_tasks;
+pub use scroll_frame_tasks::{ScrollFrameSubmitError, ScrollFrameTasks, admit_scroll_capture};
+mod scroll_input_flow;
+pub use scroll_input_flow::{ScrollTapCommand, scroll_tap_action};
 mod output_publish;
 pub use output_publish::{PendingSave, encode_document, publish_output};
 mod key_policy;
