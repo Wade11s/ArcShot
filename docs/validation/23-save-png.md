@@ -3,7 +3,8 @@
 本记录覆盖 #23 落地的自动化与常驻原生冒烟：显式 Save PNG、保存对话框互斥、
 取消非错误、分类失败保留文档、同一快照的 PNG 字节复用、PNG 预算与真实文件
 写入回读。真实 `NSSavePanel` 的显示、取消与覆盖写需要有效选区（选区尚无 AX
-节点），仍为 **Not tested**。测试过程未捕获用户屏幕、未保存取证图像、未修改
+节点），仍为 **Not tested**。本分支其后合入 `spec/v1`（#24 选区移动/调整/重选与
+可撤销历史），合并复核见末节。测试过程未捕获用户屏幕、未保存取证图像、未修改
 用户剪贴板；唯一写盘是 `--smoke-test` 在 `$TMPDIR` 写入并删除的 87 字节合成
 PNG。
 
@@ -121,3 +122,46 @@ save_file_smoke=pass bytes=87 roundtrip=true rejected_destination=true invalid_b
 
 每行须填写实际及 Pass/Fail/Not tested，附实测 SHA、配置、UTC、工具链、
 macOS build、显示几何/scale、权限与夹具版本。
+
+## 合入 spec/v1（#24 选区历史）后的复核
+
+- 合并提交：`5eec194d89be7cce4fa46cce34db7bfc7578a0f7`，父提交
+  `dd0006c`（本票）与 `8749793`（`spec/v1` = #24）。
+- 命令：`git fetch . spec/v1 && git merge spec/v1`。
+- 冲突文件与决定（两侧意图都保留）：
+  - `crates/core/src/session.rs`：`dispatch` 里 #23 的
+    `Finish`/`FinishAt`/`Save`/`SavePanelResolved` 与 #24 的
+    `SelectionDragStarted`/`Updated`/`Ended`、`Undo`、`Redo` 并存；两个 Finish
+    变体仍走 #23 的 `begin_output`，不恢复 #24 的 `finish`，因此显式保存与
+    `commit_edits` 预提交钩子保持唯一入口。自动合并把 #24 的 `editable` 留成
+    使用已删除的 `output_mutex`，改为 `self.output.is_some()`：单一输出槽位
+    （`Panel`/`Encoding`）继续屏蔽重选、拖动与撤销/重做。
+  - `crates/app/src/ui.rs`：保留 #23 的 `finish_enabled`/`save_enabled` 与 #24 的
+    `show_handles`；控制点只在冻结、无新建选区带拖动且输出槽位空闲时绘制。
+  - `TEST.md`：三处叙述合并（§3 当前状态段、MAC-E2E-12 的“不覆盖”列、§4.5 的
+    AX 缺口），删掉“选区移动/调整/重选属后续票据”的旧话，同时保留“保存面板需要
+    有效选区、选区尚无 AX 节点、不能用 `--headed` 补足”的 **Not tested** 结论。
+- 稳定 ID 冲突与映射：`CORE-SESSION-14～17` 同时被 #24 的选区历史与 #23 的保存
+  面板占用。#24 先落地在 `spec/v1`，故本票改为 `CORE-SESSION-20～23`，同步改
+  `crates/core/tests/save.rs`、TEST.md 与本文件表格：14→20（面板期间互斥）、
+  15→21（取消回编辑）、16→22（面板失败）、17→23（无选区/过期 ticket）。其余
+  ID（`APP-EFFECT-18～26`、`MAC-RECOVERY-23-*`、`CORE-SESSION-06`）无冲突。
+- 合并后仍保持的历史/输出语义：重选、一次拖动、一个标注各是可撤销的一步，且
+  每步只递增一次 `version`；输出栅栏仍比较 ticket + version（另加 crop/target）；
+  Finish 与 Save 共用 `begin_output` 的快照与同一输出槽位，`may_publish` 只在
+  `Encoding` 阶段成立。
+- 复核结果（工作区干净，代码即合并提交）：
+  - `scripts/check-all.sh` exit 0：fmt、Clippy warnings-as-errors、doc、109 个
+    Rust 测试（0 失败）、验证工具/依赖/架构/真实文字后端、Debug 与 Release
+    驻留/退出、无网络、剪贴板 PNGf 与 `save_file_smoke`。日志
+    `target/23-merge-check-all.log`。合并前的分票记录（83 / 95 个测试）仍只对应
+    各自 SHA。
+  - `scripts/e2e-agent-desktop.py` exit 0，MAC-E2E 12/12 通过；MAC-E2E-12 的 AX
+    树仍为 `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`（无选区
+    时不注册 `arcshot.overlay.save`）。日志 `target/23-merge-e2e-debug.log`。
+  - 时间：2026-11-04T05:19:50Z 前后；环境与夹具同上节（rustc 1.99.1、macOS
+    27.2/26B123、内屏 1470×956@2x、合成夹具 v1）。
+- 合并未消除的 **Not tested**：真实 `NSSavePanel` 的显示/取消/覆盖写、面板期间的
+  真实按键投递、保存与剪贴板的 hash 比对、八个控制点与 `Cmd+Z` 的指针/键盘手势。
+  合并没有新增可驱动接缝，也没有删除上述限制；详见上方两张手动用例表与
+  `TEST.md` §4.5。
