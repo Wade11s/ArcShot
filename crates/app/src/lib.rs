@@ -11,5 +11,6 @@ mod output_tasks;
 pub use output_tasks::{OutputSubmitError, OutputTasks};
 mod key_policy;
 pub use key_policy::{
-    CaptureKeyAction, CapturePressAction, KeyModifiers, capture_key_action, capture_press_action,
+    CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, capture_key_action,
+    capture_press_action,
 };

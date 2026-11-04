@@ -70,8 +70,10 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 
 下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；#22 已实现拖拽选区、Finish/双击/完成入口、
 2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏；#24 已实现选区移动、八向调整、
-重选、共享不可变底图的可撤销历史与八个可见控制点。标注对象/工具、显式保存、滚动截图与
-偏好设置仍未实现，状态仍为 **Not tested**。
+重选、共享不可变底图的可撤销历史与八个可见控制点；#25 已实现 Rectangle 标注对象、左侧
+Select/Rectangle 工具坞与悬停选项、对象命中/移动/八控制点翻转/删除/样式历史，以及
+预览与最终输出共用的像素合成。Line/Arrow/Text/Blur、显式保存、滚动截图与偏好设置仍
+未实现，状态为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -133,6 +135,24 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | `crates/app/tests/key_policy.rs` | APP-KEY-01～03：拖动中忽略 Esc/Enter、输出中忽略 Enter 但 Esc 可取消 | 文字编辑/工具激活时的完整 I-09 优先级 |
 | `scripts/check-startup.sh` | MAC-COLOR-OUTPUT-22-01：真实进程内编码 PNG、私有命名 pasteboard PNGf 写入/回读、AppKit 内存解码尺寸；脚本同时断言该行 | 用户剪贴板、非 ArcShot 应用粘贴、颜色真值 |
 | `crates/macos/tests/native_preflight.rs` | MAC-COLOR-OUTPUT-22-02：worker 线程访问剪贴板/音效时在 AppKit 副作用前拒绝 | 主线程真实写入与播放已由启动冒烟/实机覆盖 |
+
+### #25 的稳定自动化入口
+
+Rectangle 标注只覆盖已确认接缝：core 文档/会话动作、固定文档的像素真值合成、app 键位与
+指针路由，以及覆盖层工具坞/选项的真实 AX 激活。真实指针绘制、对象控制点拖动、选中后
+删除键与预览观感仍属 MAC-ANNOTATION，保持 **Not tested**：控制点与对象没有 AX 节点，
+`--headed` 坐标拖拽不能作为验收证据。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/objects.rs` | CORE-EDIT-13～24：工具内连续创建、选区内起始、越界保留/裁剪、零尺寸不入历史、最上层命中、对象拖动优先于选区、八控制点单边调整与越边翻转、空点取消对象选择但拖动仍移动选区、删除、样式选项与工具记忆、每会话默认重置、整次对象拖动一步、无变化不入历史、切工具/取消选择不入历史 | 真实指针、视觉控制点命中区域 |
+| `crates/core/tests/session_edit.rs` | CORE-SESSION-20：工具切换、PointerPressed/Moved/Released、样式、删除、撤销/重做共用同一文档与输出互斥栅栏 | 原生事件投递 |
+| `crates/image/tests/annotations.rs` | IMAGE-COMPOSE-05～11：默认红/3 点/无填充、2/3/5 点物理线宽、固定色板、20% 同色填充、选区边缘裁剪、创建顺序叠放、任意 crop 与完整合成一致、GPUI BGRA 预览字节 | 原生显示观感、大图压力 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-09～12：Esc 分层（对象→工具→会话）、拖动/输出期间忽略、Delete/Backspace 仅在有选中对象时生效、标注工具内双击不完成、对象命中优先于选区手势与双击 | 真实焦点与 IME |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-13～14：冻结覆盖层工具坞可寻址、AX 切换工具并观察 checked/toggled、悬停浮现选项、AX 改线宽与颜色且版本不变；MAC-E2E-12 仍由 AX 取消 | 选区绘制、对象创建/拖动/删除、预览像素 |
+
+`docs/validation/25-rectangle-annotation.md` 记录实测。窗口内工具坞选项依赖悬停（`hover --headed`
+仅作为前置，激活证据是 AX 与产品日志）；绘制矩形仍需要坐标拖拽，因此不进入 E2E 通过范围。
 
 ### #24 的稳定自动化入口
 
@@ -243,6 +263,8 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
 | MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
 | MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区移动/调整/重选与撤销（控制点无 AX 节点，不能用 `--headed` 坐标） |
+| MAC-E2E-13 | 冻结覆盖层 `snapshot --app` 后按 `arcshot.overlay.tool.*` 驱动 | `group "标注工具"` 含 Select（checked=true）与 Rectangle（checked=false）；AX 激活 Rectangle 后日志 `capture_edit action=SelectTool … tool=Rectangle` 且 checked 状态互换；无选中对象时不出现删除按钮 | 真实指针选择工具、工具图标观感 |
+| MAC-E2E-14 | MAC-E2E-13 后 `hover @<rectangle ref> --headed` 再 `snapshot` | 选项条按 `arcshot.overlay.option.rectangle.*` 可寻址；AX 激活 5 点线宽与蓝色后 `capture_edit action=RectangleOption … style=stroke=#007AFF width=5`，版本不变，选项 checked 状态更新 | 填充开关的像素、选中对象改样式（无对象可选中）、真实指针悬停手感 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -282,11 +304,14 @@ agent-desktop press escape --headed
   证明“可寻址”，NSWindow 销毁级证据仍缺外部探针。
 - 已落地（#53/#54/#55）：权限提示、快捷键设置与冻结覆盖层的元素都有
   `id` + `role` + `aria_label` + `accessibility_id` + `on_a11y_action`，
-  `snapshot --app` 可见、可驱动。**尚未**标注的是未来的产品面：区域选区与八个调整
-  控制点、标注工具、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，
-  但控制点不是 AX 节点，拖动与 `Cmd+Z` 也没有可驱动动作；这些产品面落地时必须沿用
-  §4.2 的约定，否则 MAC-REGION / MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 仍无法进入
-  E2E。
+  `snapshot --app` 可见、可驱动。#25 另外标注了左侧工具坞（`arcshot.overlay.tool.*`）、
+  悬停矩形选项（`arcshot.overlay.option.rectangle.*`）与有选中对象时的删除按钮
+  （`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX 暴露选中态（`checked`）。
+  **尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点、文字编辑与滚动
+  预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点不是 AX 节点；#25 的
+  对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现的删除按钮，而选中
+  对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，否则
+  MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 

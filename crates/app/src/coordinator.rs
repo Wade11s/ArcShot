@@ -1,7 +1,7 @@
 //! Connects the authoritative session to safe native operations and GPUI windows.
 use crate::{
     MenuBarGlobal,
-    ui::{CaptureView, HotkeyView, NoticeView, UiCommand, UiQueue},
+    ui::{CaptureView, HotkeyView, NoticeView, OverlayPreview, UiCommand, UiQueue},
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, GuideHistory, HotkeyAction, HotkeyEffect, HotkeyFlow,
@@ -9,8 +9,9 @@ use arcshot_app::{
     PermissionEffect, PermissionFlow,
 };
 use arcshot_core::{
-    CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
-    CapturedFrame, Document, FrameError, OutputFailure, OutputJob, ScreenGeometry,
+    Annotation, CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession,
+    CaptureTicket, CapturedFrame, Document, FrameError, OutputFailure, OutputJob, PixelRect,
+    RectangleStyle, ScreenGeometry, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -49,6 +50,17 @@ struct Coordinator {
     started: Option<Instant>,
     settings_departed: bool,
     visiting_settings: bool,
+    preview: PreviewSync,
+}
+
+/// One composed selection key: the fenced crop and its annotation snapshot.
+type PreviewKey = (PixelRect, Vec<Annotation>);
+
+/// Coalesces background annotation previews to at most one in flight.
+#[derive(Default)]
+struct PreviewSync {
+    in_flight: Option<PreviewKey>,
+    applied: Option<PreviewKey>,
 }
 pub(crate) fn launch(cx: &mut App) {
     let hotkeys = native::GlobalHotkeys::install().ok();
@@ -81,6 +93,7 @@ pub(crate) fn launch(cx: &mut App) {
         started: None,
         settings_departed: false,
         visiting_settings: false,
+        preview: PreviewSync::default(),
     });
     coordinator.update(cx, |state, cx| {
         state.permission(PermissionAction::Launch, cx);
@@ -146,19 +159,27 @@ impl Coordinator {
                         self.action(CaptureAction::SelectRegion { ticket, from, to }, cx);
                     }
                 }
-                UiCommand::SelectionDragStarted { ticket, point }
-                    if self.session.may_present(ticket) =>
-                {
+                UiCommand::PointerPressed { ticket, point } if self.session.may_present(ticket) => {
                     self.overlay_error = None;
-                    self.action(CaptureAction::SelectionDragStarted { ticket, point }, cx);
+                    self.action(CaptureAction::PointerPressed { ticket, point }, cx);
                 }
-                UiCommand::SelectionDragUpdated { ticket, point }
-                    if self.session.may_present(ticket) =>
-                {
-                    self.action(CaptureAction::SelectionDragUpdated { ticket, point }, cx);
+                UiCommand::PointerMoved { ticket, point } if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::PointerMoved { ticket, point }, cx);
                 }
-                UiCommand::SelectionDragEnded(ticket) if self.session.may_present(ticket) => {
-                    self.action(CaptureAction::SelectionDragEnded { ticket }, cx);
+                UiCommand::PointerReleased(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::PointerReleased { ticket }, cx);
+                }
+                UiCommand::SelectTool(ticket, tool) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::SelectTool { ticket, tool }, cx);
+                }
+                UiCommand::RectangleOption(ticket, option) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::RectangleOption { ticket, option }, cx);
+                }
+                UiCommand::DeleteObject(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::DeleteSelected { ticket }, cx);
+                }
+                UiCommand::DeselectSelected(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::DeselectSelected { ticket }, cx);
                 }
                 UiCommand::Undo(ticket) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::Undo { ticket }, cx);
@@ -462,8 +483,13 @@ impl Coordinator {
             action,
             CaptureAction::Undo { .. }
                 | CaptureAction::Redo { .. }
-                | CaptureAction::SelectionDragEnded { .. }
+                | CaptureAction::PointerPressed { .. }
+                | CaptureAction::PointerReleased { .. }
                 | CaptureAction::SelectRegion { .. }
+                | CaptureAction::SelectTool { .. }
+                | CaptureAction::RectangleOption { .. }
+                | CaptureAction::DeleteSelected { .. }
+                | CaptureAction::DeselectSelected { .. }
         );
         let before = self.session.phase();
         let effects: VecDeque<_> = self.session.dispatch(action).into();
@@ -472,10 +498,17 @@ impl Coordinator {
             log::info!("capture_phase from={before:?} to={after:?} action={name}");
         }
         if edits && let Some(document) = self.session.document() {
-            // Text-only history diagnostics: version and geometry, never pixels.
+            // Text-only edit diagnostics: version, geometry and style, never pixels.
             let selection = document.selection();
+            let style = document
+                .selected_index()
+                .and_then(|index| document.annotations().get(index))
+                .map_or_else(
+                    || document.rectangle_style(),
+                    |annotation| annotation.style(),
+                );
             log::info!(
-                "capture_edit action={name} version={} annotations={} selection={:?}",
+                "capture_edit action={name} version={} annotations={} selection={:?} tool={:?} selected={:?} style={}",
                 document.version(),
                 document.annotations().len(),
                 selection.map(|selection| [
@@ -483,7 +516,10 @@ impl Coordinator {
                     selection.y(),
                     selection.width(),
                     selection.height()
-                ])
+                ]),
+                document.tool(),
+                document.selected_index(),
+                format_style(style)
             );
         }
         effects
@@ -550,8 +586,11 @@ impl Coordinator {
                         }));
                         continue;
                     };
-                    let submitted = self.output_tasks.submit(job, move || {
-                        arcshot_image::compose_crop(&frame, job.crop())
+                    let crop = job.crop();
+                    let annotations = job.annotations().to_vec();
+                    let fence = job.clone();
+                    let submitted = self.output_tasks.submit(fence, move || {
+                        arcshot_image::compose_document(&frame, crop, &annotations)
                             .and_then(|composed| arcshot_image::encode_png(&composed))
                             .map_err(classify_compose_failure)
                     });
@@ -578,6 +617,108 @@ impl Coordinator {
             }
         }
         self.refresh_capture_view(cx);
+        self.sync_preview(cx);
+    }
+
+    /// Keeps the composed selection pixels in step with the authoritative document.
+    ///
+    /// Only discrete edits or live drag updates change the key; composition runs
+    /// on the background executor with at most one request in flight. A late
+    /// result is applied only when the document still matches its snapshot.
+    fn sync_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(document) = self.session.document() else {
+            return;
+        };
+        let Ok(crop) = document.crop() else {
+            return;
+        };
+        let key: PreviewKey = (crop, document.annotations().to_vec());
+        if key.1.is_empty() {
+            if self.preview.applied.take().is_some() {
+                self.set_preview(None, cx);
+            }
+            return;
+        }
+        if self.preview.applied.as_ref() == Some(&key)
+            || self.preview.in_flight.as_ref() == Some(&key)
+        {
+            return;
+        }
+        if self.preview.in_flight.is_some() {
+            return;
+        }
+        let frame = document.frame().clone();
+        let annotations = key.1.clone();
+        self.preview.in_flight = Some(key.clone());
+        let composed = cx
+            .background_executor()
+            .spawn(async move { arcshot_image::compose_document(&frame, crop, &annotations) });
+        let entity = cx.entity();
+        cx.spawn(async move |_, cx| {
+            let result = composed.await;
+            entity.update(cx, |coordinator, cx| {
+                coordinator.finish_preview(key, result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_preview(
+        &mut self,
+        key: PreviewKey,
+        result: Result<arcshot_image::ComposedImage, arcshot_image::ComposeError>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preview.in_flight.as_ref() == Some(&key) {
+            self.preview.in_flight = None;
+        }
+        match result {
+            Ok(image) => {
+                let current = self.session.document().and_then(|document| {
+                    document
+                        .crop()
+                        .ok()
+                        .map(|crop| (crop, document.annotations().to_vec()))
+                });
+                if current.as_ref() == Some(&key) {
+                    self.set_preview(Some(image), cx);
+                    self.preview.applied = Some(key);
+                }
+            }
+            Err(error) => log::warn!("preview_compose_failure={error}"),
+        }
+        self.sync_preview(cx);
+    }
+
+    /// Publishes composed RGBA pixels through the overlay's GPU image cache.
+    fn set_preview(&mut self, image: Option<arcshot_image::ComposedImage>, cx: &mut Context<Self>) {
+        let Some(handle) = self.overlay else {
+            return;
+        };
+        let selection = self.session.document().and_then(Document::selection);
+        let render = image.and_then(|image| {
+            let bgra = match arcshot_image::preview_bgra(&image) {
+                Ok(bgra) => bgra,
+                Err(error) => {
+                    log::warn!("preview_copy_failure={error}");
+                    return None;
+                }
+            };
+            let buffer = image::RgbaImage::from_raw(image.width(), image.height(), bgra)?;
+            Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+        });
+        let _ = handle.update(cx, |view, window, cx| {
+            let previous = match (render, selection) {
+                (Some(image), Some(selection)) => {
+                    view.preview.replace(OverlayPreview { image, selection })
+                }
+                _ => view.preview.take(),
+            };
+            if let Some(previous) = previous {
+                cx.drop_image(previous.image, Some(window));
+            }
+            cx.notify();
+        });
     }
 
     /// Fences the document version, then writes the already-encoded PNG bytes.
@@ -587,7 +728,7 @@ impl Coordinator {
         encoded: Result<Vec<u8>, OutputFailure>,
         cx: &mut Context<Self>,
     ) {
-        if !self.session.may_publish(job) {
+        if !self.session.may_publish(&job) {
             log::info!(
                 "output_stale version={} encoded={}",
                 job.version(),
@@ -615,11 +756,22 @@ impl Coordinator {
         let Some(handle) = self.overlay else {
             return;
         };
-        let selection = self.session.document().and_then(Document::selection);
+        let document = self.session.document();
+        let selection = document.and_then(Document::selection);
+        let tool = document.map_or(Tool::Select, Document::tool);
+        let selected = document.and_then(Document::selected_index);
+        let annotations =
+            document.map_or_else(Vec::new, |document| document.annotations().to_vec());
+        let rectangle_style =
+            document.map_or_else(RectangleStyle::default, Document::rectangle_style);
         let busy = self.session.output_busy();
         let error = self.overlay_error.take();
         let updated = handle.update(cx, |view, _, cx| {
             view.selection = selection;
+            view.tool = tool;
+            view.selected = selected;
+            view.annotations = annotations;
+            view.rectangle_style = rectangle_style;
             view.busy = busy;
             view.error = error;
             cx.notify();
@@ -751,10 +903,14 @@ impl Coordinator {
     }
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        self.preview = PreviewSync::default();
         if let Some(handle) = self.overlay.take() {
             let _ = handle.update(cx, |view, window, cx| {
                 if let Some(image) = view.image.take() {
                     cx.drop_image(image, Some(window));
+                }
+                if let Some(preview) = view.preview.take() {
+                    cx.drop_image(preview.image, Some(window));
                 }
                 window.remove_window();
             });
@@ -801,6 +957,12 @@ impl Coordinator {
                     error: None,
                     screen: None,
                     drag: None,
+                    tool: Tool::default(),
+                    selected: None,
+                    annotations: Vec::new(),
+                    rectangle_style: RectangleStyle::default(),
+                    preview: None,
+                    hovered_tool: None,
                     focus: focus.clone(),
                     queue,
                 });
@@ -861,6 +1023,12 @@ impl Coordinator {
                     error: None,
                     screen: Some(screen),
                     drag: None,
+                    tool: Tool::default(),
+                    selected: None,
+                    annotations: Vec::new(),
+                    rectangle_style: RectangleStyle::default(),
+                    preview: None,
+                    hovered_tool: None,
                     focus: focus.clone(),
                     queue,
                 });
@@ -956,6 +1124,15 @@ impl Coordinator {
         }
     }
 }
+fn format_style(style: RectangleStyle) -> String {
+    format!(
+        "stroke={} width={} fill={}",
+        style.stroke().hex(),
+        style.width().label(),
+        style.fill()
+    )
+}
+
 fn classify_compose_failure(error: arcshot_image::ComposeError) -> OutputFailure {
     match error {
         arcshot_image::ComposeError::ResourceLimit => OutputFailure::ResourceLimit,
@@ -994,9 +1171,13 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::DisplayInvalidated => "DisplayInvalidated",
         CaptureAction::SetOutputBusy { .. } => "SetOutputBusy",
         CaptureAction::SelectRegion { .. } => "SelectRegion",
-        CaptureAction::SelectionDragStarted { .. } => "SelectionDragStarted",
-        CaptureAction::SelectionDragUpdated { .. } => "SelectionDragUpdated",
-        CaptureAction::SelectionDragEnded { .. } => "SelectionDragEnded",
+        CaptureAction::PointerPressed { .. } => "PointerPressed",
+        CaptureAction::PointerMoved { .. } => "PointerMoved",
+        CaptureAction::PointerReleased { .. } => "PointerReleased",
+        CaptureAction::SelectTool { .. } => "SelectTool",
+        CaptureAction::RectangleOption { .. } => "RectangleOption",
+        CaptureAction::DeleteSelected { .. } => "DeleteSelected",
+        CaptureAction::DeselectSelected { .. } => "DeselectSelected",
         CaptureAction::Undo { .. } => "Undo",
         CaptureAction::Redo { .. } => "Redo",
         CaptureAction::Finish { .. } => "Finish",
