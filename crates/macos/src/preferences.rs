@@ -68,5 +68,7 @@ mod tests {
             read_completion_sound(&defaults),
             "removal restores the default"
         );
+        // Leaving the isolated domain behind would be a user-visible artifact.
+        defaults.removePersistentDomainForName(&NSString::from_str(&name));
     }
 }
