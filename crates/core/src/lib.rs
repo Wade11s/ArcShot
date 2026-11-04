@@ -13,7 +13,7 @@ pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry}
 pub use hotkey::Hotkey;
 pub use session::{
     CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession, CaptureTicket,
-    OutputFailure, OutputJob,
+    OutputFailure, OutputJob, OutputTarget, SavePanelResult,
 };
 
 /// Text displayed by the native menu-bar interface.

@@ -210,22 +210,35 @@ fn app_async_04_cancelled_preflight_cannot_submit_native_work() {
 }
 
 #[test]
-fn core_session_06_output_mutex_ignores_hotkey_start_until_released() {
+fn core_session_06_save_dialog_mutex_ignores_hotkey_start_until_closed() {
     let mut s = CaptureSession::default();
     let ticket = start(&mut s);
     s.dispatch(CaptureAction::Completed {
         ticket,
         result: Ok(frame()),
     });
-    // The shared output/save mutex: output processing or an open save dialog
-    // must ignore the capture hotkey without disturbing the session.
-    s.dispatch(CaptureAction::SetOutputBusy { busy: true });
+    s.dispatch(CaptureAction::SelectRegion {
+        ticket,
+        from: [0.0, 0.0],
+        to: [1.0, 1.0],
+    });
+    // The shared output/save mutex: an open save dialog must ignore the capture
+    // hotkey (and the menu Start) without disturbing the frozen session.
+    let CaptureEffect::RequestSavePanel(job) = s.dispatch(CaptureAction::Save { ticket })[0] else {
+        panic!("expected a native save panel request");
+    };
     assert!(s.output_busy());
     assert!(s.dispatch(CaptureAction::Start).is_empty());
     assert_eq!(s.phase(), CapturePhase::Frozen);
     assert!(s.frame().is_some());
-    // Back to editing or resident: the hotkey works again.
-    s.dispatch(CaptureAction::SetOutputBusy { busy: false });
+    // Back to editing: the hotkey works again.
+    assert!(
+        s.dispatch(CaptureAction::SavePanelResolved {
+            job,
+            result: arcshot_core::SavePanelResult::Cancelled
+        })
+        .is_empty()
+    );
     assert!(!s.output_busy());
     let effects = s.dispatch(CaptureAction::Start);
     assert_eq!(effects.first(), Some(&CaptureEffect::DismissOverlay));
