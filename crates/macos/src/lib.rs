@@ -24,7 +24,9 @@ pub use permission::{
     PermissionError, mark_permission_guide_seen, open_screen_recording_settings,
     permission_guide_seen, request_screen_recording, screen_recording_available,
 };
-pub use preferences::{completion_sound_enabled, store_completion_sound};
+pub use preferences::{
+    DensityError, completion_sound_enabled, density, store_completion_sound, store_density,
+};
 pub use save::{
     PngSavePanel, SaveFileError, SavePanelError, SavePanelOutcome, cancel_save_panel,
     take_save_panel_outcome, write_png_to_file,
@@ -32,7 +34,7 @@ pub use save::{
 
 use std::{cell::RefCell, error::Error, fmt};
 
-use arcshot_core::{LoginItemState, MenuBarText, StatusItemIcon};
+use arcshot_core::{Density, LoginItemState, MenuBarText, StatusItemIcon};
 use dispatch2::{DispatchQueue, MainThreadBound};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
@@ -61,15 +63,18 @@ pub enum MenuCommand {
     HotkeySettings,
     /// Show the Screen Recording permission flow.
     ScreenRecordingPermissions,
+    /// Switch 选项密度 between Standard and Compact.
+    ToggleDensity,
     /// Toggle the persisted 完成音效 preference.
     ToggleCompletionSound,
     /// Ask the system to enable or disable 登录时启动.
     ToggleLaunchAtLogin,
 }
 
-/// Tags identify the two preference items inside `validateMenuItem:`.
+/// Tags identify the three preference items inside `validateMenuItem:`.
 const COMPLETION_SOUND_ITEM_TAG: isize = 1;
 const LAUNCH_AT_LOGIN_ITEM_TAG: isize = 2;
+const DENSITY_ITEM_TAG: isize = 3;
 
 fn item_state(enabled: bool) -> NSControlStateValue {
     if enabled {
@@ -105,6 +110,12 @@ define_class!(
         }
 
         // SAFETY: AppKit action methods accept a single sender argument.
+        #[unsafe(method(toggleDensity:))]
+        fn toggle_density(&self, _sender: &NSObject) {
+            self.ivars().borrow_mut().push(MenuCommand::ToggleDensity);
+        }
+
+        // SAFETY: AppKit action methods accept a single sender argument.
         #[unsafe(method(toggleCompletionSound:))]
         fn toggle_completion_sound(&self, _sender: &NSObject) {
             self.ivars().borrow_mut().push(MenuCommand::ToggleCompletionSound);
@@ -117,8 +128,9 @@ define_class!(
         }
 
         // AppKit sends this to the item target while the status menu opens, so
-        // the two preference items always show the stored value and the real
-        // login-item status instead of the last requested one.
+        // the three preference items always show the stored values and the real
+        // login-item status instead of the last requested one. A failed density
+        // read is logged and leaves the last known state untouched.
         //
         // SAFETY: `NSMenuItem` is AppKit's validator argument type; this only
         // reads local preferences and ServiceManagement status.
@@ -133,6 +145,10 @@ define_class!(
                     log::info!("login_item_status state={state:?} source=menu");
                     item.setState(item_state(state == LoginItemState::Enabled));
                 }
+                DENSITY_ITEM_TAG => match density() {
+                    Ok(current) => item.setState(item_state(current == Density::Standard)),
+                    Err(error) => log::warn!("density_menu_read_failure={error}"),
+                },
                 _ => {}
             }
             // 开始截图 / 截图快捷键 / 屏幕录制权限 stay usable; validation must
@@ -158,6 +174,7 @@ pub struct MenuBar {
     marker: MainThreadMarker,
     status_bar: Retained<NSStatusBar>,
     status_item: Retained<NSStatusItem>,
+    density_item: Retained<NSMenuItem>,
     completion_sound_item: Retained<NSMenuItem>,
     launch_at_login_item: Retained<NSMenuItem>,
     quit_item: Retained<NSMenuItem>,
@@ -210,6 +227,7 @@ impl MenuBar {
             ("开始截图", sel!(startCapture:), 0),
             ("截图快捷键…", sel!(hotkeySettings:), 0),
             ("屏幕录制权限…", sel!(screenRecordingPermissions:), 0),
+            ("选项密度", sel!(toggleDensity:), DENSITY_ITEM_TAG),
             (
                 "完成音效",
                 sel!(toggleCompletionSound:),
@@ -221,7 +239,7 @@ impl MenuBar {
                 LAUNCH_AT_LOGIN_ITEM_TAG,
             ),
         ] {
-            // SAFETY: All five selectors are implemented by CommandTarget with
+            // SAFETY: All six selectors are implemented by CommandTarget with
             // the AppKit action signature. MenuBar retains the target until
             // menu removal.
             let item = unsafe {
@@ -238,10 +256,23 @@ impl MenuBar {
             menu.addItem(&item);
             completed_items.push(item);
         }
-        let [_, _, _, completion_sound_item, launch_at_login_item] = completed_items.as_slice()
+        let [
+            _,
+            _,
+            _,
+            density_item,
+            completion_sound_item,
+            launch_at_login_item,
+        ] = completed_items.as_slice()
         else {
             return Err(MenuBarError::MissingPreferenceItems);
         };
+        let density = density().unwrap_or_else(|error| {
+            log::warn!("density_launch_read_failure={error}");
+            Density::default()
+        });
+        // Standard shows the checkmark; Compact (the default) leaves it off.
+        density_item.setState(item_state(density == Density::Standard));
         completion_sound_item.setState(item_state(completion_sound_enabled()));
         launch_at_login_item.setState(item_state(login_item_status() == LoginItemState::Enabled));
         // SAFETY: `terminate:` is an AppKit-declared selector with the required
@@ -262,6 +293,7 @@ impl MenuBar {
             marker,
             status_bar,
             status_item,
+            density_item: density_item.clone(),
             completion_sound_item: completion_sound_item.clone(),
             launch_at_login_item: launch_at_login_item.clone(),
             quit_item,
@@ -292,6 +324,16 @@ impl MenuBar {
     /// Reflects a completed 完成音效 toggle in the native item state.
     pub fn set_completion_sound_state(&self, enabled: bool) {
         self.completion_sound_item.setState(item_state(enabled));
+    }
+
+    /// Reflects the confirmed 选项密度 in the native item state.
+    ///
+    /// Standard is checked, Compact is not: this checkmark is the AX-observable
+    /// menu state for the real current density. It is only set from a confirmed
+    /// write or a real read, never from an unconfirmed intent.
+    pub fn set_density_state(&self, density: Density) {
+        self.density_item
+            .setState(item_state(density == Density::Standard));
     }
 
     /// Reflects an actual login-item read in the native item state.
@@ -333,7 +375,7 @@ impl MenuBar {
         Ok(())
     }
 
-    /// Exercises all five status-menu commands without starting a capture.
+    /// Exercises all six status-menu commands without starting a capture.
     ///
     /// The startup smoke process has no coordinator consuming commands, so the
     /// preference actions only queue their command and never touch the system.
@@ -351,13 +393,18 @@ impl MenuBar {
             .status_item
             .menu(self.marker)
             .ok_or(MenuBarError::MissingMenu)?;
+        // Six commands plus 退出 ArcShot: the I-04 menu has exactly seven items.
+        if menu.numberOfItems() != 7 {
+            return Err(MenuBarError::CaptureCommands);
+        }
         let application = NSApplication::sharedApplication(self.marker);
         for (index, expected) in [
             (0, sel!(startCapture:)),
             (1, sel!(hotkeySettings:)),
             (2, sel!(screenRecordingPermissions:)),
-            (3, sel!(toggleCompletionSound:)),
-            (4, sel!(toggleLaunchAtLogin:)),
+            (3, sel!(toggleDensity:)),
+            (4, sel!(toggleCompletionSound:)),
+            (5, sel!(toggleLaunchAtLogin:)),
         ] {
             let item = menu
                 .itemAtIndex(index)
@@ -372,12 +419,13 @@ impl MenuBar {
                 return Err(MenuBarError::CaptureCommands);
             }
         }
-        // The two preference actions are queued but not executed in smoke mode.
+        // The three preference actions are queued but not executed in smoke mode.
         if self.drain_commands()
             != [
                 MenuCommand::StartCapture,
                 MenuCommand::HotkeySettings,
                 MenuCommand::ScreenRecordingPermissions,
+                MenuCommand::ToggleDensity,
                 MenuCommand::ToggleCompletionSound,
                 MenuCommand::ToggleLaunchAtLogin,
             ]
@@ -387,15 +435,15 @@ impl MenuBar {
         Ok(())
     }
 
-    /// Checks the preference items' selectors and their state against the real
-    /// stored preference and the actual ServiceManagement login-item status.
+    /// Checks the three preference items' selectors and their state against the
+    /// real stored preferences and the actual ServiceManagement login-item status.
     ///
     /// Returns the real login-item state for the caller's evidence line. This is
     /// a read only: the startup smoke never registers or unregisters a login item.
     ///
     /// # Errors
     /// Returns an error when a preference item is missing, has the wrong action,
-    /// or displays a state that disagrees with the actual value.
+    /// a density value cannot be read, or a state disagrees with the actual value.
     pub fn validate_preference_items(&self) -> Result<LoginItemState, MenuBarError> {
         self.validate()?;
         let menu = self
@@ -403,8 +451,9 @@ impl MenuBar {
             .menu(self.marker)
             .ok_or(MenuBarError::MissingMenu)?;
         for (index, expected, item) in [
-            (3, sel!(toggleCompletionSound:), &self.completion_sound_item),
-            (4, sel!(toggleLaunchAtLogin:), &self.launch_at_login_item),
+            (3, sel!(toggleDensity:), &self.density_item),
+            (4, sel!(toggleCompletionSound:), &self.completion_sound_item),
+            (5, sel!(toggleLaunchAtLogin:), &self.launch_at_login_item),
         ] {
             if menu.itemAtIndex(index).as_deref() != Some(item)
                 || item.action() != Some(expected)
@@ -413,11 +462,14 @@ impl MenuBar {
                 return Err(MenuBarError::PreferenceItems);
             }
         }
+        let current_density = density().map_err(|_| MenuBarError::PreferenceItems)?;
+        self.set_density_state(current_density);
         let sound = completion_sound_enabled();
         self.set_completion_sound_state(sound);
         let login_item = login_item_status();
         self.set_launch_at_login_state(login_item);
-        if self.completion_sound_item.state() != item_state(sound)
+        if self.density_item.state() != item_state(current_density == Density::Standard)
+            || self.completion_sound_item.state() != item_state(sound)
             || self.launch_at_login_item.state()
                 != item_state(login_item == LoginItemState::Enabled)
         {
@@ -494,7 +546,7 @@ pub enum MenuBarError {
     MissingQuitAction,
     /// Native capture commands did not reach their retained target in order.
     CaptureCommands,
-    /// The two preference items are missing, mistargeted or show an untrue state.
+    /// The three preference items are missing, mistargeted or show an untrue state.
     PreferenceItems,
     /// The status item menu did not yield the expected five command items.
     MissingPreferenceItems,

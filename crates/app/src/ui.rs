@@ -4,7 +4,7 @@ use arcshot_app::{
     PermissionNotice, capture_key_action, capture_press_action,
 };
 use arcshot_core::{
-    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, CaptureTicket, Endpoint, Hotkey,
+    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, CaptureTicket, Density, Endpoint, Hotkey,
     LineOption, LineStyle, PaletteColor, RectangleOption, RectangleStyle, ResizeHandle,
     ScreenGeometry, Selection, Shape, StrokeWidth, Tool,
 };
@@ -110,8 +110,63 @@ pub(crate) struct CaptureView {
     pub(crate) preview: Option<OverlayPreview>,
     /// Hovered tool row, including its option strip, for the hover-only options.
     pub(crate) hovered_tool: Option<Tool>,
+    /// Mirror of the authoritative option density from the capture session.
+    pub(crate) density: Density,
     pub(crate) focus: FocusHandle,
     pub(crate) queue: UiQueue,
+}
+
+/// I-09 layout numbers are a product choice, not a spec-mandated pixel value.
+///
+/// Both densities expose exactly the same controls: the same tool buttons, the
+/// same option ids, tooltips, accessible names and selected state. Only icon
+/// size, spacing and the optional group heading differ. The dock stays anchored
+/// at a fixed screen position and the top-right finish/save entries do not
+/// change with density, so neither shrinks out of reach at 1470×956 pt or at a
+/// small selection.
+#[derive(Clone, Copy)]
+struct DockMetrics {
+    tool_side: f32,
+    tool_text: f32,
+    option_side: f32,
+    option_text: f32,
+    dock_gap: f32,
+    strip_gap: f32,
+    strip_pad_x: f32,
+    strip_pad_y: f32,
+    heading_text: f32,
+    show_heading: bool,
+}
+
+impl DockMetrics {
+    const fn for_density(density: Density) -> Self {
+        match density {
+            Density::Compact => Self {
+                tool_side: 32.0,
+                tool_text: 16.0,
+                option_side: 24.0,
+                option_text: 12.0,
+                dock_gap: 4.0,
+                strip_gap: 2.0,
+                strip_pad_x: 4.0,
+                strip_pad_y: 2.0,
+                heading_text: 10.0,
+                show_heading: false,
+            },
+            Density::Standard => Self {
+                tool_side: 44.0,
+                tool_text: 22.0,
+                option_side: 32.0,
+                option_text: 15.0,
+                dock_gap: 10.0,
+                strip_gap: 6.0,
+                strip_pad_x: 10.0,
+                strip_pad_y: 8.0,
+                heading_text: 14.0,
+                show_heading: true,
+            },
+        }
+    }
 }
 
 const RESIZE_HANDLES: [ResizeHandle; 8] = [
@@ -205,6 +260,7 @@ impl CaptureView {
     ) -> impl IntoElement {
         let ticket = self.ticket;
         let queue = Rc::clone(&self.queue);
+        let metrics = DockMetrics::for_density(self.density);
         let entity = cx.entity();
         let mut row =
             div()
@@ -230,17 +286,19 @@ impl CaptureView {
             label,
             glyph,
             self.tool == tool,
+            metrics,
             &queue,
         ));
         if self.hovered_tool == Some(tool) && tool.is_annotation() {
-            row = row.child(self.option_strip(tool));
+            row = row.child(self.option_strip(tool, metrics));
         }
         row
     }
 
     /// The hover strip for one annotation tool. Width and palette are shared;
     /// rectangle adds fill, line adds dash and arrow adds the inward head.
-    fn option_strip(&self, tool: Tool) -> impl IntoElement {
+    /// Both densities render the same options; only the metrics differ.
+    fn option_strip(&self, tool: Tool, metrics: DockMetrics) -> impl IntoElement {
         let ticket = self.ticket;
         let queue = Rc::clone(&self.queue);
         let style = self.effective_style(tool);
@@ -256,12 +314,28 @@ impl CaptureView {
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .ml_2()
-            .px_2()
-            .py_1()
+            .gap(px(metrics.strip_gap))
+            .ml(px(8.0))
+            .px(px(metrics.strip_pad_x))
+            .py(px(metrics.strip_pad_y))
             .rounded_lg()
             .bg(rgba(0x20242bee));
+        // Standard keeps a visible group heading; Compact drops it. The option
+        // set below is identical in both densities.
+        if metrics.show_heading {
+            let (heading_id, heading_text) = match tool {
+                Tool::Line => ("line-options-heading", "直线"),
+                Tool::Arrow => ("arrow-options-heading", "箭头"),
+                Tool::Rectangle | Tool::Select => ("rectangle-options-heading", "矩形"),
+            };
+            strip = strip.child(
+                div()
+                    .id(heading_id)
+                    .text_size(px(metrics.heading_text))
+                    .text_color(rgb(0x9aa4b5))
+                    .child(heading_text),
+            );
+        }
         for width in StrokeWidth::ALL {
             let command = match tool {
                 Tool::Line => UiCommand::LineOption(ticket, LineOption::Width(width)),
@@ -276,6 +350,7 @@ impl CaptureView {
                 width.label(),
                 style.width() == width,
                 None,
+                metrics,
                 command,
                 &queue,
             ));
@@ -294,6 +369,7 @@ impl CaptureView {
                 "",
                 style.stroke() == color,
                 Some(color.rgb()),
+                metrics,
                 command,
                 &queue,
             ));
@@ -307,6 +383,7 @@ impl CaptureView {
                     "╌",
                     dash,
                     None,
+                    metrics,
                     UiCommand::LineOption(ticket, LineOption::Dash(!dash)),
                     &queue,
                 ))
@@ -319,6 +396,7 @@ impl CaptureView {
                     "↯",
                     inward,
                     None,
+                    metrics,
                     UiCommand::ArrowOption(ticket, ArrowOption::Inward(!inward)),
                     &queue,
                 ))
@@ -331,6 +409,7 @@ impl CaptureView {
                     "▨",
                     fill,
                     None,
+                    metrics,
                     UiCommand::RectangleOption(ticket, RectangleOption::Fill(!fill)),
                     &queue,
                 ))
@@ -385,13 +464,17 @@ fn rgb_u32([red, green, blue]: [u8; 3]) -> u32 {
     u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a GPUI option button needs its identity, label, state, metrics, command and queue"
+)]
 fn option_button(
     id: String,
     label: &'static str,
     glyph: &'static str,
     selected: bool,
     swatch: Option<[u8; 3]>,
+    metrics: DockMetrics,
     command: UiCommand,
     queue: &UiQueue,
 ) -> impl IntoElement {
@@ -414,8 +497,8 @@ fn option_button(
         })
         .accessibility_id(id)
         .tooltip(move |_, cx| cx.new(|_| TooltipView { label }).into())
-        .w(px(28.0))
-        .h(px(28.0))
+        .w(px(metrics.option_side))
+        .h(px(metrics.option_side))
         .flex()
         .items_center()
         .justify_center()
@@ -429,7 +512,7 @@ fn option_button(
         })
         .bg(background)
         .text_color(rgb(0xffffff))
-        .text_sm()
+        .text_size(px(metrics.option_text))
         .child(glyph)
         .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
         .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
@@ -438,6 +521,10 @@ fn option_button(
         })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a GPUI tool button needs its identity, label, state, metrics, command and queue"
+)]
 fn tool_button(
     ticket: CaptureTicket,
     tool: Tool,
@@ -445,6 +532,7 @@ fn tool_button(
     label: &'static str,
     glyph: &'static str,
     active: bool,
+    metrics: DockMetrics,
     queue: &UiQueue,
 ) -> impl IntoElement {
     let click_queue = Rc::clone(queue);
@@ -461,8 +549,8 @@ fn tool_button(
         })
         .accessibility_id(id)
         .tooltip(move |_, cx| cx.new(|_| TooltipView { label }).into())
-        .w(px(36.0))
-        .h(px(36.0))
+        .w(px(metrics.tool_side))
+        .h(px(metrics.tool_side))
         .flex()
         .items_center()
         .justify_center()
@@ -474,7 +562,7 @@ fn tool_button(
             rgba(0x20242bdd)
         })
         .text_color(rgb(0xffffff))
-        .text_xl()
+        .text_size(px(metrics.tool_text))
         .hover(move |style| style.bg(if active { rgb(0x0062d6) } else { rgb(0x2a2f3a) }))
         .child(glyph)
         .on_click(move |_, _, _| {
@@ -992,6 +1080,13 @@ impl Render for CaptureView {
         if frozen {
             // The left vertical dock lists only tools that exist: no fake or
             // disabled entries. Hover reveals that tool's options to its right.
+            // Density changes only sizes/spacing/heading; the entries stay at the
+            // same fixed screen anchor so they never shrink out of reach.
+            let metrics = DockMetrics::for_density(self.density);
+            let heading = match self.density {
+                Density::Standard => "标注工具",
+                Density::Compact => "工具",
+            };
             let mut dock = div()
                 .id("tool-dock")
                 .role(Role::Group)
@@ -1001,8 +1096,23 @@ impl Render for CaptureView {
                 .top_16()
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap(px(metrics.dock_gap))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            // AX-observable dock attribute for the real current density. The
+            // node and its id exist in both densities so switching never removes
+            // a control; Standard keeps a larger group heading, Compact a tiny
+            // compressed title.
+            dock = dock.child(
+                div()
+                    .id("density-state")
+                    .role(Role::Label)
+                    .aria_label(format!("选项密度 {:?}", self.density))
+                    .aria_value(self.density.as_str())
+                    .accessibility_id("arcshot.overlay.density")
+                    .text_size(px(metrics.heading_text))
+                    .text_color(rgb(0x9aa4b5))
+                    .child(heading),
+            );
             dock = dock.child(self.tool_row(
                 Tool::Select,
                 "select-tool-row",

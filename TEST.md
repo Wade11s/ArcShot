@@ -234,6 +234,22 @@ app 键位路由，以及覆盖层四个工具与各自悬停选项的真实 AX 
 实测记录见 `docs/validation/30-sound-login.md`。完成音效的关闭状态只证明
 “不产生音效副作用”，真实静音效果与系统音量属于实机观感项。
 
+### #29 的稳定自动化入口
+
+选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
+与 AX 可观察的工具坞属性。切换密度不得改动工具、样式、选区、对象或进行中的编辑，
+两种密度必须暴露同一套选项。精确像素与收起延迟是本票选定的布局数值，不是规格承诺。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/density.rs` | CORE-DENSITY-01～02：默认 Compact 与编解码、新会话恢复真实存储值；切换密度保持工具、每工具样式、选区、对象、文档版本与编辑状态不变 | GPUI 实际排版 |
+| `crates/app/tests/preferences.rs` | APP-EFFECT-33～37：默认 Compact 与重启恢复；切换意图来自新的实际读取并持久化；不可读状态只报告；写入失败重读且不当作已生效；一次切换不产生多余偏好副作用 | 真实 `NSUserDefaults` 跨进程时序 |
+| `crates/macos/src/preferences.rs`（单元测试） | MAC-START-29-02：真实偏好 suite 域的密度默认值、写入/新实例读取/删除回默认 | 用户自身偏好域 |
+| `scripts/check-startup.sh`（`--smoke-test`） | MAC-START-29-01：七个菜单 action、`toggleDensity:` selector 与真实状态读取；`density_smoke=pass key=OptionDensity roundtrip=true restored=true default=Compact` | 人工菜单点击、像素密度 |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-01（菜单七项）与 MAC-E2E-22：经状态菜单切换 Compact↔Standard，工具坞 `arcshot.overlay.density` 的 AX 值随之变化；同一套选项仍可寻址，工具/样式保持，跨一次真实重启保留，结束时还原用户原值 | 图标像素观感、悬停收起延迟、键盘单独访问选项 |
+
+实测记录见 `docs/validation/29-density.md`。
+
 权限提示替换竞态的原生冒烟记录见上述验证报告：真实 GPUI Esc 先入队、替换提示后
 消费，旧 Esc 不关闭新提示，当前 Esc 正常关闭；该场景未纳入常驻自动化入口。
 
@@ -319,7 +335,7 @@ E2E 的观察合同因此是**双通道**：
 
 | 稳定 ID | 前置与步骤 | 必须观察 | 明确不覆盖 |
 | --- | --- | --- | --- |
-| MAC-E2E-01 | 启动被测可执行文件（stderr 重定向到日志）；`agent-desktop snapshot --surface menu-bar-extras --app "ArcShot Debug"` | 恰好一个状态项（role `menuitem`、name `ArcShot`）；其菜单六项依次为 开始截图 / 截图快捷键… / 屏幕录制权限… / 完成音效 / 登录时启动 / 退出 ArcShot，`native_id` 与 selector 一致；不要求 ArcShot 在前台 | 图标像素观感、Dock 策略、勾选状态的像素表现 |
+| MAC-E2E-01 | 启动被测可执行文件（stderr 重定向到日志）；`agent-desktop snapshot --surface menu-bar-extras --app "ArcShot Debug"` | 恰好一个状态项（role `menuitem`、name `ArcShot`）；其菜单七项依次为 开始截图 / 截图快捷键… / 屏幕录制权限… / 选项密度 / 完成音效 / 登录时启动 / 退出 ArcShot，`native_id` 与 selector 一致；不要求 ArcShot 在前台 | 图标像素观感、Dock 策略、勾选状态的像素表现 |
 | MAC-E2E-02 | 驻留时 `agent-desktop list-windows --app "ArcShot Debug"` | 返回空列表（无可捕获自有窗口） | 未标题覆盖层；见 §4.2 |
 | MAC-E2E-03 | `find --surface menu-bar-extras --role menuitem --name "开始截图"` 取引用后 headless `click` | 新增 `capture_request_us=`、`capture_probe_grid` 与 `capture_wake_window_submit_us=` | 覆盖层内容、选区、输出 |
 | MAC-E2E-04 | 驻留时先 `agent-desktop press <未注册组合>`，再 `press <已注册组合>`（组合从日志 `hotkey_launch config=` 翻译） | 未注册组合不产生 capture 序列；已注册组合产生与 MAC-E2E-03 相同的序列；不要求前台应用是 ArcShot | 系统冲突、冲突恢复、真实键盘布局与按键重复率 |
@@ -341,6 +357,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-19 | 悬停 Line 工具后 AX 激活虚线、2 点线宽与绿色 | 选项条按 `arcshot.overlay.option.line.*` 可寻址；日志依次出现 `capture_edit action=LineOption … dash=true`、`width=2`、`stroke=#34C759`，checked 状态更新且版本不变 | 虚线像素、选中线改样式（无对象可选中） |
 | MAC-E2E-20 | 悬停 Arrow 工具后 AX 激活内凹、5 点线宽与橙色 | 选项条按 `arcshot.overlay.option.arrow.*` 可寻址；日志依次出现 `capture_edit action=ArrowOption … inward=true`、`width=5`、`stroke=#FF9500`，checked 状态更新且版本不变 | 箭头像素、选中箭头改样式 |
 | MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
+| MAC-E2E-22 | 读启动日志 `preferences_launch density=`；冻结后保持 Rectangle 与一个已改样式；状态菜单点击 选项密度 两次并重启一次 | 每次出现 `option_density density=… persisted=true`；工具坞 `arcshot.overlay.density` 的 AX `value` 变为对应密度；`arcshot.overlay.option.rectangle.*` 仍可寻址、工具与样式保持；重启后 `preferences_launch density=` 等于切换值；结束时还原用户原值 | 密度图标/间距的像素观感、悬停收起延迟、键盘单独访问选项 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -385,6 +402,10 @@ agent-desktop press escape --headed
   `SMAppService` 状态并写一行 `login_item_status … source=menu`；完成音效切换写
   `completion_sound enabled=… persisted=true`。`AXPress` 只驱动 action，实际
   `SMAppService` 变更仍由 coordinator 执行，因此 E2E 不点击“登录时启动”。
+- 已落地（#29）：密度是 `arcshot.overlay.density` 的 AX `statictext` 值
+  （`Compact` / `Standard`），状态菜单切换另写一行
+  `option_density density=… persisted=true`，启动时写 `preferences_launch density=…`。
+  `agent-desktop` 不暴露 NSMenuItem 勾选状态，因此工具坞属性是唯一可驱动的密度断言。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。

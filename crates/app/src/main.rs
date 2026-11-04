@@ -77,12 +77,16 @@ fn run_app(mode: RunMode) -> Result<()> {
                         "status-item-only smoke must not expose a capture window"
                     );
                     println!("capture_window_exclusion_smoke=pass visible_owned_windows=0 no_native_capture=true");
-                    println!("capture_menu_smoke=pass queued_commands=5 no_native_capture=true");
-                    // The two preference items show the stored sound value and the
-                    // real SMAppService login-item status; the smoke only reads.
+                    println!(
+                        "capture_menu_smoke=pass queued_commands=6 menu_items=7 no_native_capture=true"
+                    );
+                    println!("menu_items_smoke=pass count=7 density_index=3");
+                    // The three preference items show the stored density/sound
+                    // values and the real SMAppService login-item status; the
+                    // smoke only reads.
                     let login_item = menu_bar.validate_preference_items()?;
                     println!(
-                        "preference_items_smoke=pass sound_selector=toggleCompletionSound: login_selector=toggleLaunchAtLogin: state_from_system=true"
+                        "preference_items_smoke=pass density_selector=toggleDensity: sound_selector=toggleCompletionSound: login_selector=toggleLaunchAtLogin: state_from_system=true"
                     );
                     println!(
                         "login_item_status_smoke=pass state={login_item:?} read_only=true"
@@ -102,6 +106,23 @@ fn run_app(mode: RunMode) -> Result<()> {
                     );
                     println!(
                         "preference_smoke=pass key=CompletionSoundEnabled roundtrip=true restored=true"
+                    );
+                    // The option-density preference round-trips in the same real
+                    // per-user preferences domain and is restored afterwards.
+                    let original_density = arcshot_macos::density()?;
+                    let flipped_density = original_density.toggled();
+                    arcshot_macos::store_density(flipped_density)?;
+                    ensure!(
+                        arcshot_macos::density()? == flipped_density,
+                        "option density did not round-trip"
+                    );
+                    arcshot_macos::store_density(original_density)?;
+                    ensure!(
+                        arcshot_macos::density()? == original_density,
+                        "option density was not restored"
+                    );
+                    println!(
+                        "density_smoke=pass key=OptionDensity roundtrip=true restored=true default=Compact"
                     );
                     // Native hotkey registration, suspension and cleanup; no
                     // key event is synthesized, so no session can start.

@@ -71,9 +71,30 @@ case "$output" in
         ;;
 esac
 case "$output" in
-    *'preference_items_smoke=pass'*'state_from_system=true'*) ;;
+    *'capture_menu_smoke=pass queued_commands=6'*) ;;
     *)
-        printf 'startup check failed: expected both preference menu items in the real menu, got: %s\n' "$output" >&2
+        printf 'startup check failed: expected six dispatched status-menu commands, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
+case "$output" in
+    *'menu_items_smoke=pass count=7'*) ;;
+    *)
+        printf 'startup check failed: expected a seven-item status menu, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
+case "$output" in
+    *'preference_items_smoke=pass'*'density_selector=toggleDensity:'*'state_from_system=true'*) ;;
+    *)
+        printf 'startup check failed: expected all three preference menu items in the real menu, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
+case "$output" in
+    *'density_smoke=pass'*'restored=true'*) ;;
+    *)
+        printf 'startup check failed: expected a restored option-density preference roundtrip, got: %s\n' "$output" >&2
         exit 1
         ;;
 esac
