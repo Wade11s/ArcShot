@@ -96,6 +96,38 @@ fn run_app(mode: RunMode) -> Result<()> {
                         "clipboard_pngf_smoke=pass width={} height={} private_pasteboard=true",
                         decoded.width, decoded.height
                     );
+                    // Explicit save writes the same encoded bytes to a real file,
+                    // verifies the roundtrip and removes the probe file. Rejected
+                    // destinations and non-PNG bytes never claim success.
+                    let save_path = std::env::temp_dir()
+                        .join(format!("arcshot-save-smoke-{}.png", std::process::id()));
+                    arcshot_macos::write_png_to_file(&save_path, &png)?;
+                    ensure!(
+                        std::fs::read(&save_path)? == png,
+                        "saved PNG did not read back byte-identically"
+                    );
+                    std::fs::remove_file(&save_path)?;
+                    let missing = std::env::temp_dir().join(format!(
+                        "arcshot-save-smoke-missing-{}/out.png",
+                        std::process::id()
+                    ));
+                    ensure!(
+                        arcshot_macos::write_png_to_file(&missing, &png).is_err()
+                            && !missing.exists(),
+                        "a missing destination must fail without creating a file"
+                    );
+                    ensure!(
+                        arcshot_macos::write_png_to_file(&save_path, b"not a png").is_err()
+                            && !save_path.exists(),
+                        "non-PNG bytes must not create a file"
+                    );
+                    // Configures the real PNG panel without showing it; showing and
+                    // cancelling it is a MAC-RECOVERY manual case.
+                    drop(arcshot_macos::PngSavePanel::try_new("ArcShot.png")?);
+                    println!(
+                        "save_file_smoke=pass bytes={} roundtrip=true rejected_destination=true invalid_bytes=true panel_configured=true",
+                        png.len()
+                    );
                     println!(
                         "startup_smoke=pass activation_policy=Accessory quit_action=terminate:"
                     );

@@ -125,7 +125,7 @@ AX value/checked（`aria_selected` 单独在 button 上不会被 AccessKit macOS
 | CORE-EDIT-22 | 对象拖动原地释放，再真实拖动，undo/redo | 原地不入历史；真实拖动一步；undo/redo 恢复/重放 | 完全一致 | Pass |
 | CORE-EDIT-23 | 把对象拖到选区外 | 数据保留为 42,28,5×5，`visible_bounds` 为 None；undo 恢复原位置 | 完全一致 | Pass |
 | CORE-EDIT-24 | 选中对象后 deselect、切工具两次 | 不推进版本、不入历史；undo 仍回到对象创建前 | 完全一致 | Pass |
-| CORE-SESSION-20 | Frozen+选区；SelectTool、PointerPressed/Moved/Released、RectangleOption、DeleteSelected、Undo/Redo；Finish 在途时重复这些动作 | 手势实时预览、松开一步；样式/删除/撤销共享文档；输出在途时工具/样式/删除/取消选择全部忽略，版本不动 | 完全一致 | Pass |
+| CORE-SESSION-24 | Frozen+选区；SelectTool、PointerPressed/Moved/Released、RectangleOption、DeleteSelected、Undo/Redo；Finish 在途时重复这些动作 | 手势实时预览、松开一步；样式/删除/撤销共享文档；输出在途时工具/样式/删除/取消选择全部忽略，版本不动 | 完全一致 | Pass |
 | IMAGE-COMPOSE-05 | 选区全屏；矩形 (10,5,10,5)，默认红/3 点/无填充 | 2x 路径 (20,10)-(40,20)，6 像素描边中心线；内部保持底图；四边带像素逐点吻合 | 与 literal 真值完全一致 | Pass |
 | IMAGE-COMPOSE-06 | 同上加 20% 同色填充 | 内部 (75,28,18,255)；描边保持不透明红 | 完全一致 | Pass |
 | IMAGE-COMPOSE-07 | 七色板 × 2/3/5 点线宽 | 每色 stroke 像素等于固定 sRGB；4/6/10 物理像素带宽、中心位置正确 | 全部一致 | Pass |

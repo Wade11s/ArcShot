@@ -4,6 +4,7 @@ mod capture;
 mod clipboard;
 mod hotkey;
 mod permission;
+mod save;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
@@ -19,6 +20,10 @@ pub use hotkey::{
 pub use permission::{
     PermissionError, mark_permission_guide_seen, open_screen_recording_settings,
     permission_guide_seen, request_screen_recording, screen_recording_available,
+};
+pub use save::{
+    PngSavePanel, SaveFileError, SavePanelError, SavePanelOutcome, cancel_save_panel,
+    take_save_panel_outcome, write_png_to_file,
 };
 
 use std::{cell::RefCell, error::Error, fmt};

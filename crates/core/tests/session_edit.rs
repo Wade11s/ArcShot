@@ -264,7 +264,7 @@ fn core_session_19_undo_without_history_is_a_no_op() {
 }
 
 #[test]
-fn core_session_20_annotation_actions_share_the_edit_fence_and_history() {
+fn core_session_24_annotation_actions_share_the_edit_fence_and_history() {
     let (mut session, ticket) = frozen();
     select(&mut session, ticket);
 

@@ -5,13 +5,13 @@ use crate::{
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, GuideHistory, HotkeyAction, HotkeyEffect, HotkeyFlow,
-    HotkeyNotice, HotkeyOutcome, OutputSubmitError, OutputTasks, PermissionAction,
-    PermissionEffect, PermissionFlow,
+    HotkeyNotice, HotkeyOutcome, OutputSubmitError, OutputTasks, PendingSave, PermissionAction,
+    PermissionEffect, PermissionFlow, encode_document,
 };
 use arcshot_core::{
     Annotation, CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession,
     CaptureTicket, CapturedFrame, Document, FrameError, OutputFailure, OutputJob, PixelRect,
-    RectangleStyle, ScreenGeometry, Tool,
+    RectangleStyle, SavePanelResult, ScreenGeometry, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -35,6 +35,10 @@ struct Coordinator {
     session: CaptureSession,
     tasks: CaptureTasks,
     output_tasks: OutputTasks,
+    /// Destination chosen by the native save panel, fenced by its exact job.
+    pending_save: PendingSave,
+    /// Job whose save panel is still open; its outcome is drained from AppKit.
+    pending_panel: Option<OutputJob>,
     permissions: PermissionFlow,
     hotkeys: Option<native::GlobalHotkeys>,
     hotkey_flow: HotkeyFlow,
@@ -74,6 +78,8 @@ pub(crate) fn launch(cx: &mut App) {
         session: CaptureSession::default(),
         tasks: CaptureTasks::default(),
         output_tasks: OutputTasks::default(),
+        pending_save: PendingSave::default(),
+        pending_panel: None,
         permissions: PermissionFlow::new(if native::permission_guide_seen() {
             GuideHistory::Handled
         } else {
@@ -189,6 +195,7 @@ impl Coordinator {
                 }
                 UiCommand::FinishCapture { ticket, point } => {
                     if self.session.may_present(ticket) {
+                        self.overlay_error = None;
                         self.action(
                             match point {
                                 Some(point) => CaptureAction::FinishAt { ticket, point },
@@ -196,6 +203,12 @@ impl Coordinator {
                             },
                             cx,
                         );
+                    }
+                }
+                UiCommand::SaveCapture(ticket) => {
+                    if self.session.may_present(ticket) {
+                        self.overlay_error = None;
+                        self.action(CaptureAction::Save { ticket }, cx);
                     }
                 }
                 UiCommand::Permission(window_id, action)
@@ -276,6 +289,9 @@ impl Coordinator {
         }
         if let Some((job, encoded)) = self.output_tasks.poll() {
             self.publish_output(job, encoded, cx);
+        }
+        if let Some(outcome) = native::take_save_panel_outcome() {
+            self.resolve_save_panel(outcome, cx);
         }
         // No SCK call is made for this continuous screen validity check.
         if let Some(frame) = self.session.frame() {
@@ -553,6 +569,7 @@ impl Coordinator {
                 CaptureEffect::PresentFrozen(ticket) => self.prepare_preview(ticket, cx),
                 CaptureEffect::DismissOverlay => {
                     self.preview_task = None;
+                    self.end_pending_save();
                     self.close_overlay(cx);
                 }
                 CaptureEffect::PermissionUnavailable => {
@@ -586,14 +603,13 @@ impl Coordinator {
                         }));
                         continue;
                     };
-                    let crop = job.crop();
-                    let annotations = job.annotations().to_vec();
+                    // Finish and explicit Save submit the same compose/encode
+                    // route for the same snapshot; only the target differs.
                     let fence = job.clone();
-                    let submitted = self.output_tasks.submit(fence, move || {
-                        arcshot_image::compose_document(&frame, crop, &annotations)
-                            .and_then(|composed| arcshot_image::encode_png(&composed))
-                            .map_err(classify_compose_failure)
-                    });
+                    let snapshot = job.clone();
+                    let submitted = self
+                        .output_tasks
+                        .submit(fence, move || encode_document(&frame, snapshot));
                     if let Err(error) = submitted {
                         log::error!("output_submit_failure={error}");
                         effects.extend(self.session.dispatch(CaptureAction::OutputCompleted {
@@ -603,6 +619,23 @@ impl Coordinator {
                                 OutputSubmitError::WorkerUnavailable => OutputFailure::Worker,
                             }),
                         }));
+                    }
+                }
+                CaptureEffect::RequestSavePanel(job) => {
+                    self.overlay_error = None;
+                    log::info!("save_panel_open version={}", job.version());
+                    let opened = native::PngSavePanel::try_new("ArcShot.png")
+                        .and_then(|panel| panel.begin());
+                    match opened {
+                        Ok(()) => self.pending_panel = Some(job),
+                        Err(error) => {
+                            log::error!("save_panel_failure={error}");
+                            self.pending_panel = None;
+                            effects.extend(self.dispatch(CaptureAction::SavePanelResolved {
+                                job,
+                                result: SavePanelResult::Failed,
+                            }));
+                        }
                     }
                 }
                 CaptureEffect::PlayCompletionSound => {
@@ -721,7 +754,7 @@ impl Coordinator {
         });
     }
 
-    /// Fences the document version, then writes the already-encoded PNG bytes.
+    /// Fences the document version, then performs the one target side effect.
     fn publish_output(
         &mut self,
         job: OutputJob,
@@ -734,22 +767,82 @@ impl Coordinator {
                 job.version(),
                 encoded.is_ok()
             );
+            self.pending_save.clear();
             return;
         }
         let result = match encoded {
-            Ok(png) => match native::write_png_to_clipboard(&png) {
-                Ok(()) => {
-                    log::info!("output_published bytes={}", png.len());
-                    Ok(())
-                }
-                Err(error) => {
-                    log::error!("clipboard_failure={error}");
-                    Err(OutputFailure::Clipboard)
-                }
-            },
-            Err(error) => Err(error),
+            Ok(png) => {
+                log::info!(
+                    "output_publish target={:?} bytes={}",
+                    job.target(),
+                    png.len()
+                );
+                arcshot_app::publish_output(
+                    job.clone(),
+                    &png,
+                    &mut self.pending_save,
+                    |png| match native::write_png_to_clipboard(png) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            log::error!("clipboard_failure={error}");
+                            Err(OutputFailure::Clipboard)
+                        }
+                    },
+                    |path, png| match native::write_png_to_file(path, png) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            log::error!("save_file_failure={error}");
+                            Err(OutputFailure::SaveFile)
+                        }
+                    },
+                )
+            }
+            Err(error) => {
+                self.pending_save.clear();
+                Err(error)
+            }
         };
         self.action(CaptureAction::OutputCompleted { job, result }, cx);
+    }
+
+    /// Applies the native save panel outcome and clears unused destinations.
+    fn resolve_save_panel(&mut self, outcome: native::SavePanelOutcome, cx: &mut Context<Self>) {
+        let Some(job) = self.pending_panel.take() else {
+            log::warn!("save_panel_outcome_without_request");
+            self.pending_save.clear();
+            return;
+        };
+        let result = match outcome {
+            native::SavePanelOutcome::Chosen(path) => {
+                log::info!("save_panel_outcome=chosen version={}", job.version());
+                self.pending_save.remember(job.clone(), path);
+                SavePanelResult::Chosen
+            }
+            native::SavePanelOutcome::Cancelled => {
+                log::info!("save_panel_outcome=cancelled version={}", job.version());
+                SavePanelResult::Cancelled
+            }
+            native::SavePanelOutcome::Failed(error) => {
+                log::error!("save_panel_failure={error}");
+                SavePanelResult::Failed
+            }
+        };
+        self.action(CaptureAction::SavePanelResolved { job, result }, cx);
+        // Cancelled, failed or stale results leave no file destination behind.
+        if !self.session.output_busy() {
+            self.pending_save.clear();
+        }
+    }
+
+    /// Releases the save panel and any chosen destination when the session ends.
+    fn end_pending_save(&mut self) {
+        if self.pending_panel.take().is_some() {
+            native::cancel_save_panel();
+            // An outcome that raced with the cancellation is already fenced off
+            // by the dropped job; discard it instead of applying it to no panel.
+            let _ = native::take_save_panel_outcome();
+        }
+        self.pending_save.clear();
     }
 
     fn refresh_capture_view(&mut self, cx: &mut Context<Self>) {
@@ -1133,13 +1226,6 @@ fn format_style(style: RectangleStyle) -> String {
     )
 }
 
-fn classify_compose_failure(error: arcshot_image::ComposeError) -> OutputFailure {
-    match error {
-        arcshot_image::ComposeError::ResourceLimit => OutputFailure::ResourceLimit,
-        _ => OutputFailure::Encode,
-    }
-}
-
 fn classify_native_failure(error: &native::CaptureError) -> CaptureFailure {
     match error {
         native::CaptureError::Display => CaptureFailure::DisplayInvalid,
@@ -1169,7 +1255,8 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::Cancel => "Cancel",
         CaptureAction::CancelAttempt(_) => "CancelAttempt",
         CaptureAction::DisplayInvalidated => "DisplayInvalidated",
-        CaptureAction::SetOutputBusy { .. } => "SetOutputBusy",
+        CaptureAction::Save { .. } => "Save",
+        CaptureAction::SavePanelResolved { .. } => "SavePanelResolved",
         CaptureAction::SelectRegion { .. } => "SelectRegion",
         CaptureAction::PointerPressed { .. } => "PointerPressed",
         CaptureAction::PointerMoved { .. } => "PointerMoved",
