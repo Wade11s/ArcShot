@@ -1061,7 +1061,7 @@ def main() -> int:
             "default=medium diagnostics=level"
         )
 
-        # MAC-E2E-24: the Text tool is addressable, its colour and size options
+        # MAC-E2E-25: the Text tool is addressable, its colour and size options
         # are reachable through hover, the default is red 16 pt, the size
         # steppers and colour swatch each write one text-only diagnostic, and a
         # created editor is addressable. The selection drag and the creating
@@ -1094,6 +1094,10 @@ def main() -> int:
         )
         if not text_input.get("ref_id"):
             fail("the text editor is not addressable after creation")
+        # Type one ASCII character so the commit has a non-empty object. The
+        # IME composition path itself is a MAC-TEXT manual item; a physical key
+        # is the headed precondition, and the commit diagnostic is the evidence.
+        agent("press", "a", "--headed")
 
         hover(text_tool["ref_id"])
         size_field = wait_node(
@@ -1175,15 +1179,16 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.text.color.blue", True, 10.0)
 
         # Commit the editor by clicking elsewhere: one creation history step and
-        # the editor disappears.
+        # the editor disappears. The point is clear of the left dock and its
+        # hover option strip (which legitimately consumes its own clicks).
         mark = len(read_log(log))
-        agent("mouse-click", "--xy", "300,300", "--headed")
+        agent("mouse-click", "--xy", "500,500", "--headed")
         wait_log(log, "capture_edit action=TextCommit", 10.0, after=mark)
         commit = wait_log_line(log, "capture_edit action=TextCommit", 10.0, after=mark)
         if "annotations=1" not in commit:
             fail(f"text commit diagnostic was {commit!r}")
         note(
-            "mac_e2e_24=pass tool_dock=ax text_editor=ax size=16->16.5 "
+            "mac_e2e_25=pass tool_dock=ax text_editor=ax size=16->16.5 "
             "colour=#007AFF commit=1"
         )
 
@@ -1369,7 +1374,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=24")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=25")
     return 0
 
 

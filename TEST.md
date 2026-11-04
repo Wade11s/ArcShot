@@ -212,7 +212,7 @@ MAC-TEXT，保持 **Not tested**：系统字体适配与 IME 候选窗位置需�
 | `crates/core/tests/text.rs` | CORE-EDIT-35～39：创建一步、空文本丢弃、重编一步、编辑变空删除且可撤销、字号 6–64/0.5 取整、命中/移动/层叠/工具切换提交；CORE-SESSION-28～29：TextBegin/TextEdited/TextCommit/TextOption 共用编辑栅栏、Finish 先提交、输出在途忽略、TextCancel 丢弃、过期 ticket 不改新会话 | 真实指针、IME 组合文字 |
 | `crates/image/tests/text.rs` | IMAGE-COMPOSE-26～34：可复现 5x7 字形的固定 golden、字号/颜色整对象生效、选区裁剪、文字位于模糊层之上、多行与未知字形确定、可插拔字体输入、预览与 PNG 字节一致、逻辑度量与物理位图一致 | 原生系统字体、中文/emoji 真实字形、大图压力 |
 | `crates/app/tests/key_policy.rs` | APP-KEY-17：编辑期间 Enter/Delete/Backspace/撤销/重做归编辑器与 IME，Esc 先结束编辑保留内容，拖动/输出期优先，双击文字对象重编 | 真实焦点与 IME 候选框 |
-| `scripts/e2e-agent-desktop.py` | MAC-E2E-24：第六个工具可寻址且 checked 互换；悬停出现色板与字号步进；默认红 16；AX 步进写 `capture_edit action=TextOption … size=16.5`、色板写 `stroke=#007AFF`；创建后文字输入可寻址，点击别处提交为一次创建 | 选区绘制、真实文字创建/拖动、直接输入字号、原生字体/IME |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-25：第六个工具可寻址且 checked 互换；悬停出现色板与字号步进；默认红 16；AX 步进写 `capture_edit action=TextOption … size=16.5`、色板写 `stroke=#007AFF`；创建后文字输入可寻址，点击别处提交为一次创建 | 选区绘制、真实文字创建/拖动、直接输入字号、原生字体/IME |
 
 `docs/validation/28-text-ime.md` 记录实测。创建前置使用 `--headed` 拖拽/点击（选区与
 对象没有 AX 节点）；验收证据是 AX 激活行与产品诊断行。字号直接输入由 core 的
@@ -401,7 +401,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
 | MAC-E2E-22 | 读启动日志 `preferences_launch density=`；冻结后保持 Rectangle 与一个已改样式；状态菜单点击 选项密度 两次并重启一次 | 每次出现 `option_density density=… persisted=true`；工具坞 `arcshot.overlay.density` 的 AX `value` 变为对应密度；`arcshot.overlay.option.rectangle.*` 仍可寻址、工具与样式保持；重启后 `preferences_launch density=` 等于切换值；结束时还原用户原值 | 密度图标/间距的像素观感、悬停收起延迟、键盘单独访问选项 |
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
-| MAC-E2E-24 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
+| MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入

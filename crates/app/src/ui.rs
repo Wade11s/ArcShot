@@ -1532,8 +1532,12 @@ impl Render for CaptureView {
 
         if let Some(input) = self.text_input.clone()
             && let Some(edit) = self.text_edit.as_ref()
+            && let Some(focus) = self.text_focus.clone()
         {
-            root = root.child(text_editor(input, edit.anchor, edit.bounds));
+            let metrics = arcshot_image::measure_text(&edit.content, edit.style.size_points());
+            let width = (metrics.max_line_width as f32).max(1.0);
+            let height = (metrics.line_count as f32 * metrics.line_height as f32).max(1.0);
+            root = root.child(text_editor(input, edit.anchor, width, height, focus));
         }
 
         if let Some(error) = error {

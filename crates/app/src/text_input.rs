@@ -398,18 +398,21 @@ impl Element for TextElement {
 pub(crate) fn text_editor(
     input: Entity<TextInput>,
     anchor: [f64; 2],
-    bounds: arcshot_core::Selection,
+    width: f32,
+    height: f32,
+    focus: FocusHandle,
 ) -> impl IntoElement {
     div()
         .id("arcshot.overlay.text.input")
-        .role(Role::Button)
+        .role(Role::TextInput)
         .aria_label("文字输入")
         .accessibility_id("arcshot.overlay.text.input")
+        .track_focus(&focus)
         .absolute()
         .left(px(anchor[0] as f32))
         .top(px(anchor[1] as f32))
-        .w(px(bounds.width() as f32))
-        .h(px(bounds.height() as f32))
+        .w(px(width))
+        .h(px(height))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
             // Clicks inside the editor must not commit it as "clicked elsewhere".
             cx.stop_propagation();
