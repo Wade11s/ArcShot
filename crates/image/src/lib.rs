@@ -1,6 +1,8 @@
-//! Image assets and future image processing for ArcShot.
+//! Image assets, compositing and encoding for ArcShot.
 
+mod compose;
 mod preview;
+pub use compose::{ComposeError, ComposedImage, compose_crop, encode_png};
 pub use preview::{CapturePreview, PreviewError, capture_preview};
 
 use arcshot_core::StatusItemIcon;

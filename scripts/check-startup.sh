@@ -56,4 +56,11 @@ case "$output" in
         exit 1
         ;;
 esac
+case "$output" in
+    *'clipboard_pngf_smoke=pass'*) ;;
+    *)
+        printf 'startup check failed: expected private-pasteboard PNGf roundtrip, got: %s\n' "$output" >&2
+        exit 1
+        ;;
+esac
 printf '%s\n' "$output"
