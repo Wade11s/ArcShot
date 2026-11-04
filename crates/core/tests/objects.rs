@@ -284,9 +284,12 @@ fn core_edit_20_style_options_change_the_selected_object_and_the_tool_memory() {
             .unwrap()
     );
     assert_eq!(document.version(), version + 1);
-    assert_eq!(document.annotations()[0].style().width(), StrokeWidth::Five);
     assert_eq!(
-        document.annotations()[1].style().width(),
+        document.annotations()[0].style().width().unwrap(),
+        StrokeWidth::Five
+    );
+    assert_eq!(
+        document.annotations()[1].style().width().unwrap(),
         StrokeWidth::Three
     );
     assert_eq!(document.rectangle_style().width(), StrokeWidth::Five);
@@ -294,12 +297,15 @@ fn core_edit_20_style_options_change_the_selected_object_and_the_tool_memory() {
     // Undo restores the object style; the tool's current style is not history.
     assert!(document.undo().unwrap());
     assert_eq!(
-        document.annotations()[0].style().width(),
+        document.annotations()[0].style().width().unwrap(),
         StrokeWidth::Three
     );
     assert_eq!(document.rectangle_style().width(), StrokeWidth::Five);
     assert!(document.redo().unwrap());
-    assert_eq!(document.annotations()[0].style().width(), StrokeWidth::Five);
+    assert_eq!(
+        document.annotations()[0].style().width().unwrap(),
+        StrokeWidth::Five
+    );
 
     // Re-selecting and choosing the same value changes nothing.
     document.begin_pointer([14.0, 10.0]);
@@ -325,7 +331,7 @@ fn core_edit_20_style_options_change_the_selected_object_and_the_tool_memory() {
     assert!(document.rectangle_style().fill());
     assert_eq!(document.version(), version);
     for annotation in document.annotations() {
-        assert_eq!(annotation.style().stroke(), PaletteColor::Red);
+        assert_eq!(annotation.style().stroke().unwrap(), PaletteColor::Red);
         assert!(!annotation.style().rectangle().unwrap().fill());
     }
 }
@@ -347,8 +353,8 @@ fn core_edit_21_each_tool_keeps_its_style_for_the_session_and_new_documents_defa
     document.update_drag([18.0, 14.0]);
     document.end_drag().unwrap();
     let style = document.annotations()[0].style();
-    assert_eq!(style.stroke(), PaletteColor::Green);
-    assert_eq!(style.width(), StrokeWidth::Two);
+    assert_eq!(style.stroke().unwrap(), PaletteColor::Green);
+    assert_eq!(style.width().unwrap(), StrokeWidth::Two);
     assert!(style.rectangle().unwrap().fill());
 
     // A new session's document starts again from the Rectangle defaults.

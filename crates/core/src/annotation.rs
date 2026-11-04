@@ -42,6 +42,8 @@ pub enum Tool {
     Line,
     /// Create flat or inward arrow objects by dragging inside the selection.
     Arrow,
+    /// Create frosted-glass blur rectangles by dragging inside the selection.
+    Blur,
 }
 
 impl Tool {
@@ -333,6 +335,81 @@ pub enum ArrowOption {
     Inward(bool),
 }
 
+/// One of the three gaussian blur levels, named by its logical-point radius.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BlurLevel {
+    /// A 4 logical point blur radius.
+    Weak,
+    /// An 8 logical point blur radius, the default.
+    #[default]
+    Medium,
+    /// A 12 logical point blur radius.
+    Strong,
+}
+
+impl BlurLevel {
+    /// Every selectable level in display order.
+    pub const ALL: [Self; 3] = [Self::Weak, Self::Medium, Self::Strong];
+
+    /// Blur radius in logical points; composition converts it to physical
+    /// pixels exactly once.
+    #[must_use]
+    pub const fn points(self) -> f64 {
+        match self {
+            Self::Weak => 4.0,
+            Self::Medium => 8.0,
+            Self::Strong => 12.0,
+        }
+    }
+
+    /// Stable label used by tooltips and text diagnostics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Weak => "weak",
+            Self::Medium => "medium",
+            Self::Strong => "strong",
+        }
+    }
+}
+
+/// The appearance of one blur rectangle: its level. There is no colour, mask
+/// or width option; the effect is the frosted blur itself.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BlurStyle {
+    level: BlurLevel,
+}
+
+impl BlurStyle {
+    /// Builds one style from its level.
+    #[must_use]
+    pub const fn new(level: BlurLevel) -> Self {
+        Self { level }
+    }
+
+    /// The gaussian blur level.
+    #[must_use]
+    pub const fn level(self) -> BlurLevel {
+        self.level
+    }
+
+    /// Applies one option, returning the resulting style.
+    #[must_use]
+    pub const fn with_option(self, option: BlurOption) -> Self {
+        match option {
+            BlurOption::Level(level) => Self { level },
+        }
+    }
+}
+
+/// One selectable blur option; clicking it updates the tool memory and,
+/// when a blur object is selected, that object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlurOption {
+    /// The weak / medium / strong blur level.
+    Level(BlurLevel),
+}
+
 /// The appearance of one annotation, tagged by the tool that owns it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnnotationStyle {
@@ -342,6 +419,8 @@ pub enum AnnotationStyle {
     Line(LineStyle),
     /// Arrow stroke and Flat/Inward head shape.
     Arrow(ArrowStyle),
+    /// Blur rectangle level; no colour mask is involved.
+    Blur(BlurStyle),
 }
 
 impl AnnotationStyle {
@@ -352,26 +431,30 @@ impl AnnotationStyle {
             Self::Rectangle(_) => Tool::Rectangle,
             Self::Line(_) => Tool::Line,
             Self::Arrow(_) => Tool::Arrow,
+            Self::Blur(_) => Tool::Blur,
         }
     }
 
-    /// Stroke colour shared by every tool.
+    /// Stroke colour of the coloured tools; a blur rectangle has none.
     #[must_use]
-    pub const fn stroke(self) -> PaletteColor {
+    pub const fn stroke(self) -> Option<PaletteColor> {
         match self {
-            Self::Rectangle(style) => style.stroke(),
-            Self::Line(style) => style.stroke(),
-            Self::Arrow(style) => style.stroke(),
+            Self::Rectangle(style) => Some(style.stroke()),
+            Self::Line(style) => Some(style.stroke()),
+            Self::Arrow(style) => Some(style.stroke()),
+            Self::Blur(_) => None,
         }
     }
 
-    /// Stroke width in logical points shared by every tool.
+    /// Stroke width in logical points of the coloured tools; a blur
+    /// rectangle has no stroke.
     #[must_use]
-    pub const fn width(self) -> StrokeWidth {
+    pub const fn width(self) -> Option<StrokeWidth> {
         match self {
-            Self::Rectangle(style) => style.width(),
-            Self::Line(style) => style.width(),
-            Self::Arrow(style) => style.width(),
+            Self::Rectangle(style) => Some(style.width()),
+            Self::Line(style) => Some(style.width()),
+            Self::Arrow(style) => Some(style.width()),
+            Self::Blur(_) => None,
         }
     }
 
@@ -380,7 +463,7 @@ impl AnnotationStyle {
     pub const fn rectangle(self) -> Option<RectangleStyle> {
         match self {
             Self::Rectangle(style) => Some(style),
-            Self::Line(_) | Self::Arrow(_) => None,
+            Self::Line(_) | Self::Arrow(_) | Self::Blur(_) => None,
         }
     }
 
@@ -389,7 +472,7 @@ impl AnnotationStyle {
     pub const fn line(self) -> Option<LineStyle> {
         match self {
             Self::Line(style) => Some(style),
-            Self::Rectangle(_) | Self::Arrow(_) => None,
+            Self::Rectangle(_) | Self::Arrow(_) | Self::Blur(_) => None,
         }
     }
 
@@ -398,7 +481,16 @@ impl AnnotationStyle {
     pub const fn arrow(self) -> Option<ArrowStyle> {
         match self {
             Self::Arrow(style) => Some(style),
-            Self::Rectangle(_) | Self::Line(_) => None,
+            Self::Rectangle(_) | Self::Line(_) | Self::Blur(_) => None,
+        }
+    }
+
+    /// The blur appearance when this is a blur style.
+    #[must_use]
+    pub const fn blur(self) -> Option<BlurStyle> {
+        match self {
+            Self::Blur(style) => Some(style),
+            Self::Rectangle(_) | Self::Line(_) | Self::Arrow(_) => None,
         }
     }
 }
@@ -634,6 +726,15 @@ impl Annotation {
         }
     }
 
+    /// Creates one blur rectangle object with its retained bounds and style.
+    #[must_use]
+    pub const fn blur(bounds: Selection, style: BlurStyle) -> Self {
+        Self {
+            shape: Shape::Rectangle(bounds),
+            style: AnnotationStyle::Blur(style),
+        }
+    }
+
     /// Returns the retained display-local geometry.
     #[must_use]
     pub const fn shape(self) -> Shape {
@@ -670,7 +771,7 @@ impl Annotation {
                 style: AnnotationStyle::Rectangle(style.with_option(option)),
                 ..self
             }),
-            AnnotationStyle::Line(_) | AnnotationStyle::Arrow(_) => None,
+            AnnotationStyle::Line(_) | AnnotationStyle::Arrow(_) | AnnotationStyle::Blur(_) => None,
         }
     }
 
@@ -682,7 +783,9 @@ impl Annotation {
                 style: AnnotationStyle::Line(style.with_option(option)),
                 ..self
             }),
-            AnnotationStyle::Rectangle(_) | AnnotationStyle::Arrow(_) => None,
+            AnnotationStyle::Rectangle(_)
+            | AnnotationStyle::Arrow(_)
+            | AnnotationStyle::Blur(_) => None,
         }
     }
 
@@ -694,7 +797,23 @@ impl Annotation {
                 style: AnnotationStyle::Arrow(style.with_option(option)),
                 ..self
             }),
-            AnnotationStyle::Rectangle(_) | AnnotationStyle::Line(_) => None,
+            AnnotationStyle::Rectangle(_) | AnnotationStyle::Line(_) | AnnotationStyle::Blur(_) => {
+                None
+            }
+        }
+    }
+
+    /// Returns a copy with one blur option applied, or `None` for other types.
+    #[must_use]
+    pub const fn with_blur_option(self, option: BlurOption) -> Option<Self> {
+        match self.style {
+            AnnotationStyle::Blur(style) => Some(Self {
+                style: AnnotationStyle::Blur(style.with_option(option)),
+                ..self
+            }),
+            AnnotationStyle::Rectangle(_)
+            | AnnotationStyle::Line(_)
+            | AnnotationStyle::Arrow(_) => None,
         }
     }
 
@@ -767,8 +886,10 @@ impl Annotation {
         match self.shape {
             Shape::Rectangle(bounds) => bounds.contains(point),
             Shape::Line(segment) => {
-                let half = self.style.width().points() / 2.0;
-                if segment.distance_to(point) <= half.max(LINE_HIT_TOLERANCE) {
+                let tolerance = self.style.width().map_or(LINE_HIT_TOLERANCE, |width| {
+                    (width.points() / 2.0).max(LINE_HIT_TOLERANCE)
+                });
+                if segment.distance_to(point) <= tolerance {
                     return true;
                 }
                 self.arrow_outlines().is_some_and(|outlines| {

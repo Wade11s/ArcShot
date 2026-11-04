@@ -1,8 +1,8 @@
 //! Immutable capture document, logical region selection and physical output geometry.
 use crate::{
-    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, CapturedFrame, Endpoint, LineOption,
-    LineStyle, RectangleOption, RectangleStyle, ScreenGeometry, Segment, Tool,
-    annotation::annotation_at, frame::MAX_EDGE, frame::MAX_PIXELS,
+    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
+    CapturedFrame, Endpoint, LineOption, LineStyle, RectangleOption, RectangleStyle,
+    ScreenGeometry, Segment, Tool, annotation::annotation_at, frame::MAX_EDGE, frame::MAX_PIXELS,
 };
 use std::{error::Error, fmt};
 
@@ -337,6 +337,8 @@ pub struct Document {
     line_style: LineStyle,
     /// Session-scoped appearance of the next arrow, independent of history.
     arrow_style: ArrowStyle,
+    /// Session-scoped appearance of the next blur rectangle, independent of history.
+    blur_style: BlurStyle,
     /// Session-scoped active pointer tool, independent of history.
     tool: Tool,
     /// Single selected object; history never promises to restore this state.
@@ -371,6 +373,7 @@ impl Document {
                 crate::StrokeWidth::Three,
                 false,
             ),
+            blur_style: BlurStyle::new(BlurLevel::Medium),
             tool: Tool::Select,
             selected: None,
             history: History {
@@ -427,6 +430,11 @@ impl Document {
     pub const fn arrow_style(&self) -> ArrowStyle {
         self.arrow_style
     }
+    /// Returns the session-scoped appearance used by the next blur rectangle.
+    #[must_use]
+    pub const fn blur_style(&self) -> BlurStyle {
+        self.blur_style
+    }
     /// Returns the session-scoped appearance of one annotation tool.
     #[must_use]
     pub const fn tool_style(&self, tool: Tool) -> Option<AnnotationStyle> {
@@ -435,6 +443,7 @@ impl Document {
             Tool::Rectangle => Some(AnnotationStyle::Rectangle(self.rectangle_style)),
             Tool::Line => Some(AnnotationStyle::Line(self.line_style)),
             Tool::Arrow => Some(AnnotationStyle::Arrow(self.arrow_style)),
+            Tool::Blur => Some(AnnotationStyle::Blur(self.blur_style)),
         }
     }
 
@@ -503,6 +512,21 @@ impl Document {
         }
         self.arrow_style = self.arrow_style.with_option(option);
         self.apply_selected_option(|annotation| annotation.with_arrow_option(option))
+    }
+
+    /// Applies one blur option to the tool memory and, when a blur object is
+    /// selected, to that object as one undoable step.
+    ///
+    /// Other object types are never touched and the tool is never switched.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn apply_blur_option(&mut self, option: BlurOption) -> Result<bool, DocumentError> {
+        if self.drag.is_some() {
+            return Ok(false);
+        }
+        self.blur_style = self.blur_style.with_option(option);
+        self.apply_selected_option(|annotation| annotation.with_blur_option(option))
     }
 
     /// Applies an option edit to the selected object when the tool type matches.
@@ -603,7 +627,7 @@ impl Document {
     /// With the select tool, the topmost visible object wins over the selection
     /// and its body/control points resolve to an object move/resize/endpoint edit.
     /// Empty space clears the object selection but still starts a selection move.
-    /// With an annotation tool (Rectangle, Line, Arrow), the press must start
+    /// With an annotation tool (Rectangle, Line, Arrow, Blur), the press must start
     /// inside the valid selection and creates a new object; a press outside
     /// starts no core drag so the overlay can begin a new selection band.
     pub fn begin_pointer(&mut self, point: [f64; 2]) -> Option<DragTarget> {
@@ -701,6 +725,9 @@ impl Document {
                     AnnotationStyle::Arrow(style) => Segment::from_drag(drag.start, point)
                         .ok()
                         .map(|segment| Annotation::arrow(segment, style)),
+                    AnnotationStyle::Blur(style) => Selection::from_drag(drag.start, point)
+                        .ok()
+                        .map(|bounds| Annotation::blur(bounds, style)),
                 };
                 if let Some(draft) = draft {
                     let mut annotations = drag.baseline.annotations.clone();

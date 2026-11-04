@@ -491,7 +491,6 @@ fn press(
 ) -> Option<CapturePressAction> {
     capture_press_action(double_click, busy, tool, selection, object_hit, point)
 }
-
 #[test]
 fn app_key_13_line_and_arrow_tools_create_inside_and_never_finish_on_double_click() {
     let selection = selection();
@@ -643,4 +642,116 @@ fn app_key_15_a_line_object_hit_is_an_object_gesture_only_with_the_select_tool()
             "{tool:?}"
         );
     }
+}
+
+#[test]
+fn app_key_16_the_blur_tool_shares_the_annotation_pointer_and_esc_priority() {
+    let selection = selection();
+    // A press inside creates; a press outside starts a new selection band.
+    assert_eq!(
+        press(
+            false,
+            false,
+            Tool::Blur,
+            Some(selection),
+            false,
+            [20.0, 10.0]
+        ),
+        Some(CapturePressAction::Create)
+    );
+    assert_eq!(
+        press(false, false, Tool::Blur, Some(selection), false, [5.0, 5.0]),
+        Some(CapturePressAction::Band)
+    );
+    // A double-click never finishes while the blur tool is active.
+    assert_eq!(
+        press(
+            true,
+            false,
+            Tool::Blur,
+            Some(selection),
+            false,
+            [20.0, 10.0]
+        ),
+        Some(CapturePressAction::Create)
+    );
+    // An object hit is still a new blur gesture, not an object drag.
+    assert_eq!(
+        press(
+            false,
+            false,
+            Tool::Blur,
+            Some(selection),
+            true,
+            [20.0, 10.0]
+        ),
+        Some(CapturePressAction::Create)
+    );
+    // Without a selection there is no creation area; output ignores presses.
+    assert_eq!(
+        press(false, false, Tool::Blur, None, false, [20.0, 10.0]),
+        Some(CapturePressAction::Band)
+    );
+    assert_eq!(
+        press(
+            false,
+            true,
+            Tool::Blur,
+            Some(selection),
+            false,
+            [20.0, 10.0]
+        ),
+        None
+    );
+    // Enter still finishes and Esc leaves the tool layer first.
+    let blur_context = CaptureKeyContext {
+        tool: Tool::Blur,
+        ..Default::default()
+    };
+    assert_eq!(
+        capture_key_action("enter", KeyModifiers::default(), blur_context),
+        Some(CaptureKeyAction::Finish)
+    );
+    assert_eq!(
+        capture_key_action("escape", KeyModifiers::default(), blur_context),
+        Some(CaptureKeyAction::SelectTool)
+    );
+    // Esc layers a selected object, then the tool, then the session.
+    assert_eq!(
+        capture_key_action(
+            "escape",
+            KeyModifiers::default(),
+            with_object(context(false, false), Tool::Blur)
+        ),
+        Some(CaptureKeyAction::Deselect)
+    );
+    assert_eq!(
+        capture_key_action(
+            "escape",
+            KeyModifiers::default(),
+            CaptureKeyContext {
+                tool: Tool::Blur,
+                dragging: true,
+                ..Default::default()
+            }
+        ),
+        None
+    );
+    assert_eq!(
+        capture_key_action(
+            "escape",
+            KeyModifiers::default(),
+            CaptureKeyContext {
+                tool: Tool::Blur,
+                busy: true,
+                ..Default::default()
+            }
+        ),
+        Some(CaptureKeyAction::Cancel)
+    );
+    // Delete still needs a selected object even with the blur tool active.
+    assert_eq!(
+        capture_key_action("backspace", KeyModifiers::default(), blur_context),
+        None
+    );
 }

@@ -176,6 +176,27 @@ app 键位路由，以及覆盖层四个工具与各自悬停选项的真实 AX 
 `docs/validation/26-line-arrow.md` 记录实测。与 #25 一样，窗口内选项依赖悬停作为浮现前置，
 激活证据是 AX 行与产品诊断行；对象绘制与端点拖拽仍不进入 E2E 通过范围。
 
+### #27 的稳定自动化入口
+
+Blur Rectangle 只覆盖已确认接缝：core 的创建/编辑/样式/历史语义，固定文档的物理像素
+真值高斯模糊，app 的指针/Esc/双击优先级，以及覆盖层第五个工具与三档选项的真实 AX
+激活。真实指针绘制、模糊对象命中/控制点拖动、预览观感与 tooltip 文本仍属
+MAC-ANNOTATION，保持 **Not tested**：对象没有 AX 节点，`agent-desktop 1.1.0` 也读不到
+GPUI tooltip/`aria_description`，`--headed` 坐标拖拽不能作为验收证据。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/blur.rs` | CORE-EDIT-32～34：选区内起始、默认中档、零尺寸拒绝、最上层命中、对象移动/八控制点/删除/选区移动与调整、样式选项只改同类且每会话记忆、按下时样式快照 | 真实指针、控制点命中区域 |
+| `crates/core/tests/session_edit.rs` | CORE-SESSION-27：BlurOption 经权威会话修改选中模糊对象与工具记忆、其他工具选项不改、输出在途时忽略、过期 ticket 不改新会话 | 原生事件投递 |
+| `crates/image/tests/blur.rs` | IMAGE-BLUR-19～25：4/8/12 逻辑点半径按 2x 转为 8/16/24 物理像素支撑、均匀面无色罩/alpha 变化、模糊只在矩形内、选区边缘像素延伸、下层模糊后层清晰、移动/调整重算、确定性、预览与 PNG 字节一致 | 原生显示观感、大图压力、真实截图内容 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-16：Blur 工具内双击不完成、区内创建/区外重选、对象命中仍创建、Esc 分层与输出期取消、Delete 需选中对象 | 真实焦点与 IME |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-23：第五个工具可寻址且 checked 互换；悬停出现三档选项；默认中档；AX 改弱/强后 `capture_edit action=BlurOption … level=…` 诊断与 checked 更新 | 选区绘制、模糊对象创建/拖动、预览像素、tooltip 文本 |
+
+`docs/validation/27-blur.md` 记录实测。与 #25/#26 一样，窗口内选项依赖悬停作为浮现前置，
+激活证据是 AX 行与产品诊断行；模糊对象绘制与拖拽仍不进入 E2E 通过范围。tooltip 文案
+是真实 GPUI tooltip 与 `aria_description`，并由 `ui::blur_tooltip_tests` 守护；
+`agent-desktop 1.1.0` 的 snapshot/find 不暴露该文本，因此 E2E 不断言它。
+
 ### #24 的稳定自动化入口
 
 选区移动/八向调整、重选与历史只覆盖 core 语义、文档/历史合同、app 输入路由与共享裁剪
@@ -358,11 +379,12 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-20 | 悬停 Arrow 工具后 AX 激活内凹、5 点线宽与橙色 | 选项条按 `arcshot.overlay.option.arrow.*` 可寻址；日志依次出现 `capture_edit action=ArrowOption … inward=true`、`width=5`、`stroke=#FF9500`，checked 状态更新且版本不变 | 箭头像素、选中箭头改样式 |
 | MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
 | MAC-E2E-22 | 读启动日志 `preferences_launch density=`；冻结后保持 Rectangle 与一个已改样式；状态菜单点击 选项密度 两次并重启一次 | 每次出现 `option_density density=… persisted=true`；工具坞 `arcshot.overlay.density` 的 AX `value` 变为对应密度；`arcshot.overlay.option.rectangle.*` 仍可寻址、工具与样式保持；重启后 `preferences_launch density=` 等于切换值；结束时还原用户原值 | 密度图标/间距的像素观感、悬停收起延迟、键盘单独访问选项 |
+| MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
-`target/e2e-agent-desktop-<configuration>.log`（MAC-E2E-16 的两次重启另写
-`-restart-1/-2.log`，不清空前一份），然后逐条断言上表并打印
+`target/e2e-agent-desktop-<configuration>.log`（MAC-E2E-16 的两次重启与 MAC-E2E-22 的三次
+重启另写 `-restart-1…-5.log`，不清空前一份），然后逐条断言上表并打印
 `mac_e2e_XX=pass …`。失败即非零退出，不得改成“人工看一眼”。手工排查时可用同类
 单条命令（引用不得跨快照复用）：
 
@@ -417,13 +439,15 @@ agent-desktop press escape --headed
   `snapshot --app` 可见、可驱动。#23 的“保存”控件在有效选区且输出空闲时注册为
   `button arcshot.overlay.save`，但打开保存面板需要有效选区，而选区本身尚无 AX
   节点（需先完成拖拽）。因此 MAC-RECOVERY 的保存面板显示/取消/覆盖写仍为
-  **Not tested**，不能用 `--headed` 拖拽补足。#25/#26 另外标注了左侧工具坞
-  （`arcshot.overlay.tool.*`）、矩形/直线/箭头各自的悬停选项
-  （`arcshot.overlay.option.rectangle.*`、`.line.*`、`.arrow.*`）与有选中对象时的删除
+  **Not tested**，不能用 `--headed` 拖拽补足。#25/#26/#27 另外标注了左侧工具坞
+  （`arcshot.overlay.tool.*`）、矩形/直线/箭头/模糊各自的悬停选项
+  （`arcshot.overlay.option.rectangle.*`、`.line.*`、`.arrow.*`、`.blur.*`）与有选中对象时的删除
   按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX 暴露选中态
-  （`checked`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
+  （`checked`）。#27 的模糊 tooltip 与 `aria_description` 是真实 GPUI 文本，但
+  `agent-desktop 1.1.0` 的 snapshot/find 不暴露 tooltip 或 description，因此 E2E 只断言
+  AX id 与 `capture_edit` 诊断，tooltip 文案由 `ui::blur_tooltip_tests` 守护。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
   （含线/箭头的两个端点）、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
-  不是 AX 节点；#25 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
+  不是 AX 节点；#25/#27 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
   的删除按钮，而选中对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，
   否则 MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
@@ -444,7 +468,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、两个偏好项与完成音效跨重启见 §4.3（MAC-E2E-01/15/16/17），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；TCC 授权与设置返回属 §4.4 |
 | MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
-| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分：四个工具与矩形/直线/箭头样式选项可 AX 驱动；绘制、对象命中与端点拖动仍无 AX 节点 |
+| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分：五个工具与矩形/直线/箭头样式选项、模糊三档可 AX 驱动；绘制、对象命中与端点拖动仍无 AX 节点 |
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层尚未实现，落地时须补 AX 标注 |

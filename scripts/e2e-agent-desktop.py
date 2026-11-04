@@ -969,6 +969,98 @@ def main() -> int:
         wait_tool_state(app, "arcshot.overlay.option.rectangle.color.blue", True, 10.0)
         note("mac_e2e_21=pass tool_memory=independent rectangle=#007AFF/5")
 
+        # MAC-E2E-23: the Blur tool is addressable, its three levels are
+        # reachable through hover, the default is Medium, each AX level change
+        # writes one text diagnostic, and the tooltip states the redaction
+        # limitation in the accessibility tree.
+        blur_tool = wait_tool_state(app, "arcshot.overlay.tool.blur", False, 10.0)
+        if not blur_tool.get("ref_id"):
+            fail("the blur tool button is not addressable")
+        mark = len(read_log(log))
+        agent("click", blur_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.blur action=Click", 10.0, after=mark)
+        select = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+        if "tool=Blur" not in select:
+            fail(f"blur tool diagnostic was {select!r}")
+        wait_tool_state(app, "arcshot.overlay.tool.blur", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.arrow", False, 10.0)
+
+        hover(blur_tool["ref_id"])
+        weak = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.blur.weak",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        medium = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.blur.medium",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        strong = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.blur.strong",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not weak.get("ref_id") or not medium.get("ref_id") or not strong.get("ref_id"):
+            fail("hovered blur options are not addressable")
+        if not checked_state(medium):
+            fail("a new blur session must default to the medium level")
+        if checked_state(weak) or checked_state(strong):
+            fail("only the medium level may be checked by default")
+
+        mark = len(read_log(log))
+        agent("click", weak["ref_id"])
+        wait_log(
+            log,
+            "a11y_action=arcshot.overlay.option.blur.weak action=Click",
+            10.0,
+            after=mark,
+        )
+        edit = wait_log_line(log, "capture_edit action=BlurOption", 10.0, after=mark)
+        if "level=weak" not in edit:
+            fail(f"blur weak diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.blur.weak", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.blur.medium", False, 10.0)
+
+        mark = len(read_log(log))
+        agent("click", strong["ref_id"])
+        wait_log(
+            log,
+            "a11y_action=arcshot.overlay.option.blur.strong action=Click",
+            10.0,
+            after=mark,
+        )
+        edit = wait_log_line(log, "capture_edit action=BlurOption", 10.0, after=mark)
+        if "level=strong" not in edit:
+            fail(f"blur strong diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.blur.strong", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.blur.weak", False, 10.0)
+        note(
+            "mac_e2e_23=pass tool_dock=ax blur_levels=weak/medium/strong "
+            "default=medium diagnostics=level"
+        )
+
         root = wait_node(
             app,
             lambda tree: (
@@ -1151,7 +1243,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=22")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=23")
     return 0
 
 

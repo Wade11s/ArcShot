@@ -1,6 +1,6 @@
 //! Authority for capture preparation, cancellation and native uncertainty.
 use crate::{
-    Annotation, ArrowOption, CapturedFrame, Density, Document, LineOption, PixelRect,
+    Annotation, ArrowOption, BlurOption, CapturedFrame, Density, Document, LineOption, PixelRect,
     RectangleOption, Selection, Tool,
 };
 use std::{error::Error, fmt};
@@ -105,6 +105,13 @@ pub enum CaptureAction {
         ticket: CaptureTicket,
         /// Style option the user selected.
         option: ArrowOption,
+    },
+    /// Applies one blur option to the tool memory and any selected blur.
+    BlurOption {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Style option the user selected.
+        option: BlurOption,
     },
     /// Deletes the single selected object as one undoable step.
     DeleteSelected {
@@ -596,6 +603,12 @@ impl CaptureSession {
             CaptureAction::ArrowOption { ticket, option } => {
                 if let Some(document) = self.editable(ticket) {
                     let _ = document.apply_arrow_option(option);
+                }
+                vec![]
+            }
+            CaptureAction::BlurOption { ticket, option } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.apply_blur_option(option);
                 }
                 vec![]
             }
