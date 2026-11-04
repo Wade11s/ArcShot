@@ -262,9 +262,10 @@ E2E 的观察合同因此是**双通道**：
 2. **状态**以产品 stderr 诊断行为准（`capture_phase from=… to=… action=…`、
    `capture_request_us=`、`capture_probe_grid`、`capture_wake_window_submit_us=`、
    `capture_edit action=… version=… annotations=… selection=…`、
-   `menu_hotkey_settings`、`hotkey_register …`、`preferences_launch completion_sound=…`、
-   `completion_sound enabled=… persisted=true`、`login_item_status state=… source=…`、
-   `login_item_set enabled=… outcome=…`）。`capture_phase` 是会话相位的唯一
+   `menu_hotkey_settings`、`hotkey_register …`、`app_active surface=frozen`、
+   `preferences_launch completion_sound=…`、`completion_sound enabled=… persisted=true`、
+   `login_item_status state=… source=…`、`login_item_set enabled=… outcome=…`）。
+   `capture_phase` 是会话相位的唯一
    真相：开始、暂停、取消、重启与失败都各有一行，不打印帧内容。冻结覆盖层必须先在
    日志中出现 `capture_wake_window_submit_us=`，取消必须出现 `to=Resident` 的相位
    行，才能声称会话真的离开了冻结态。`capture_edit` 只在重选、拖动提交、撤销与重做
@@ -274,9 +275,12 @@ E2E 的观察合同因此是**双通道**：
    既不能证明覆盖层存在，也不能证明它已关闭，只能证明没有可捕获的自有窗口。
 4. **按键**分两类。全局组合用不带 `--headed` 的 `press`（physical 投递，不要求
    ArcShot 在前台，但必须先用一个未注册组合做阴性对照）；窗口内按键（录制新组合、
-   Esc）只能用 `press … --headed` 投到前台应用，并且只在产品刚报告会话或提示窗口
-   打开（产品自己 `activate`）之后发出。headless `press --app` 在无焦点 AX 元素时
-   必然 `ACTION_FAILED`；`--headed` 坐标点击不属于稳定断言，不能用于验收。
+   Esc）只能用 `press … --headed` 投到前台应用，并且必须先确认前台真的是被测应用：
+   冻结覆盖层用产品自己的 `app_active surface=frozen`（覆盖层无标题、`snapshot
+   --surface focused` 对它返回 `WINDOW_NOT_FOUND`）；带标题窗口用
+   `snapshot --surface focused` 的 `app` 等于被测显示名。headless `press --app` 在
+   无焦点 AX 元素时必然 `ACTION_FAILED`；`--headed` 坐标点击不属于稳定断言，不能用
+   于验收。这个前置只吸收焦点竞态，不放宽对产品行为的断言。
 5. **AX 语义**：`AXPress` **不会**触发 `on_click`，两条路径都必须显式注册
    `on_a11y_action(AccessibleAction::Click, …)`，且两条路径入同一个 `UiQueue`；每次
    AX 激活另写一行 `a11y_action=<surface>.<control> action=Click`，E2E 以该行证明
@@ -297,14 +301,14 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-02 | 驻留时 `agent-desktop list-windows --app "ArcShot Debug"` | 返回空列表（无可捕获自有窗口） | 未标题覆盖层；见 §4.2 |
 | MAC-E2E-03 | `find --surface menu-bar-extras --role menuitem --name "开始截图"` 取引用后 headless `click` | 新增 `capture_request_us=`、`capture_probe_grid` 与 `capture_wake_window_submit_us=` | 覆盖层内容、选区、输出 |
 | MAC-E2E-04 | 驻留时先 `agent-desktop press <未注册组合>`，再 `press <已注册组合>`（组合从日志 `hotkey_launch config=` 翻译） | 未注册组合不产生 capture 序列；已注册组合产生与 MAC-E2E-03 相同的序列；不要求前台应用是 ArcShot | 系统冲突、冲突恢复、真实键盘布局与按键重复率 |
-| MAC-E2E-05a | MAC-E2E-03 后 `agent-desktop press escape --headed`，再取 `list-windows --app` | `press` 返回 `ok` 且 `delivery=delivered_unverified`；`list-windows --app` 为空；随后开始截图仍产生新的 capture 序列 | 冻结层 NSWindow 是否被销毁（无外部探针） |
+| MAC-E2E-05a | MAC-E2E-03 后等产品报告 `app_active surface=frozen`，再 `agent-desktop press escape --headed`，再取 `list-windows --app` | `press` 返回 `ok` 且 `delivery=delivered_unverified`；`list-windows --app` 为空；随后开始截图仍产生新的 capture 序列 | 冻结层 NSWindow 是否被销毁（无外部探针） |
 | MAC-E2E-05b | 同上，读 Esc 之后的 `capture_phase` 行 | 出现 `from=Frozen to=Resident action=CancelAttempt` | NSWindow 销毁级证据；GPUI 键处理细节（CORE-SESSION 已覆盖） |
 | MAC-E2E-06 | 点击 截图快捷键… | 日志 `menu_hotkey_settings`；`list-windows --app` 出现一个可寻址窗口（`480x362`、标题 `ArcShot Debug`、`is_focused: true`） | 窗口内录入、保存、Esc 取消（无 AX 节点，策略由 APP-EFFECT 覆盖） |
 | MAC-E2E-07 | 点击 屏幕录制权限… 后 `press escape --headed` | 出现 `560x282` 自有窗口；Esc 后 `list-windows --app` 为空 | 真实 TCC 提示、设置返回重检、运行中撤权 |
 | MAC-E2E-08 | 点击 退出 ArcShot | 进程退出；`agent-desktop find --surface menu-bar-extras --app "ArcShot Debug"` 返回 `APP_NOT_FOUND`；`list-apps --app "ArcShot"` 为空 | 系统按 ID 重启、登录项、状态项像素残留 |
 | MAC-E2E-09 | 启动前后 `agent-desktop list-apps --app "ArcShot"` | 只出现被测 `bundle_id` 与显示名（Debug/Release 各一） | 系统按 bundle ID 解析到哪一份拷贝 |
 | MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
-| MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
+| MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动；每次投递录制组合前先确认 `snapshot --surface focused` 的 `app` 是被测显示名 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
 | MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区移动/调整/重选与撤销（控制点无 AX 节点，不能用 `--headed` 坐标）；选区/标注与保存（保存按钮只在有效选区时成为 `button arcshot.overlay.save`，选区尚无 AX 节点） |
 | MAC-E2E-13 | 冻结覆盖层 `snapshot --app` 后按 `arcshot.overlay.tool.*` 驱动 | `group "标注工具"` 含 Select（checked=true）与 Rectangle（checked=false）；AX 激活 Rectangle 后日志 `capture_edit action=SelectTool … tool=Rectangle` 且 checked 状态互换；无选中对象时不出现删除按钮 | 真实指针选择工具、工具图标观感 |
 | MAC-E2E-14 | MAC-E2E-13 后 `hover @<rectangle ref> --headed` 再 `snapshot` | 选项条按 `arcshot.overlay.option.rectangle.*` 可寻址；AX 激活 5 点线宽与蓝色后 `capture_edit action=RectangleOption … style=stroke=#007AFF width=5`，版本不变，选项 checked 状态更新 | 填充开关的像素、选中对象改样式（无对象可选中）、真实指针悬停手感 |
@@ -346,6 +350,10 @@ agent-desktop press escape --headed
 - 已落地：会话每次相位转换（`Resident` / `CheckingPermission` / `Preparing` /
   `Draining` / `Frozen` / `RelaunchRequired`，附语义动作名）各有一行纯文本 stderr
   事件，因此 MAC-E2E-05b 与重启/失败路径不再依赖坐标或截图。
+- 已落地（#30）：冻结覆盖层在打开后第一次真正成为前台应用时写一行
+  `app_active surface=frozen`，E2E 用它挡在 `--headed` Esc 之前；带标题窗口改用
+  `snapshot --surface focused` 的 `app` 判断前台。两者只消除焦点竞态，不替代
+  `capture_phase` / `hotkey_store` 等行为断言。
 - 已落地（#30）：两个偏好项是普通菜单项（`toggleCompletionSound:` /
   `toggleLaunchAtLogin:`），菜单打开时 `validateMenuItem:` 读真实偏好与
   `SMAppService` 状态并写一行 `login_item_status … source=menu`；完成音效切换写

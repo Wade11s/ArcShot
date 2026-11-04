@@ -60,6 +60,8 @@ struct Coordinator {
     overlay_error: Option<String>,
     notice: Option<WindowHandle<NoticeView>>,
     pending: Option<(CaptureTicket, Instant)>,
+    /// True while the frozen overlay still needs one active-application check.
+    overlay_activation_pending: bool,
     preview_task: Option<Task<()>>,
     started: Option<Instant>,
     settings_departed: bool,
@@ -111,6 +113,7 @@ pub(crate) fn launch(cx: &mut App) {
         overlay_error: None,
         notice: None,
         pending: None,
+        overlay_activation_pending: false,
         preview_task: None,
         started: None,
         settings_departed: false,
@@ -333,6 +336,13 @@ impl Coordinator {
         }
         if let Some(outcome) = native::take_save_panel_outcome() {
             self.resolve_save_panel(outcome, cx);
+        }
+        // The overlay takes keyboard focus after it opens; report the first tick
+        // where the app really owns focus, so E2E can gate headed key delivery on
+        // a product observation instead of a guess.
+        if self.overlay_activation_pending && native::application_active() {
+            self.overlay_activation_pending = false;
+            log::info!("app_active surface=frozen");
         }
         // No SCK call is made for this continuous screen validity check.
         if let Some(frame) = self.session.frame() {
@@ -1100,6 +1110,7 @@ impl Coordinator {
     }
 
     fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        self.overlay_activation_pending = false;
         self.preview = PreviewSync::default();
         if let Some(handle) = self.overlay.take() {
             let _ = handle.update(cx, |view, window, cx| {
@@ -1234,6 +1245,7 @@ impl Coordinator {
                 entity
             },
         )?);
+        self.overlay_activation_pending = true;
         cx.activate(true);
         Ok(())
     }

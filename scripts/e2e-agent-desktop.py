@@ -110,6 +110,35 @@ def wait_line(path: pathlib.Path, predicate, timeout: float) -> str:
     fail(f"timeout waiting for a matching line in {path}")
 
 
+def wait_frontmost(app: str, timeout: float) -> None:
+    """Waits until the app is frontmost, for keys meant for its titled window."""
+    deadline = time.monotonic() + timeout
+    last: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            last = agent("snapshot", "--surface", "focused").get("app")
+        except Failure as error:
+            if "WINDOW_NOT_FOUND" not in str(error) and "APP_NOT_FOUND" not in str(error):
+                raise
+            last = None
+        if last == app:
+            return
+        time.sleep(POLL)
+    fail(f"{app} did not become the frontmost application; currently {last!r}")
+
+
+def wait_frozen_active(log: pathlib.Path, after: int, timeout: float = 15.0) -> int:
+    """Waits for this session's freeze and the product's own activation line.
+
+    Headed key delivery to the borderless overlay is only meaningful once the
+    app reports it owns keyboard focus; without this wait a focus race can send
+    Escape to whatever application is still in front.
+    """
+    wake = wait_log(log, "capture_wake_window_submit_us=", timeout, after=after)
+    wait_log(log, "app_active surface=frozen", timeout, after=wake)
+    return wake
+
+
 def count_log(path: pathlib.Path, needle: str) -> int:
     return sum(1 for line in read_log(path) if needle in line)
 
@@ -432,10 +461,11 @@ def main() -> int:
         note("mac_e2e_02=pass own_windows=0")
 
         # MAC-E2E-03: the menu command enters the session and freezes the screen.
+        log_mark = len(read_log(log))
         click(app, "开始截图")
-        wait_log(log, "capture_request_us=", 15.0)
-        wait_log(log, "capture_wake_window_submit_us=", 15.0)
-        wait_log(log, "to=Frozen action=Completed", 15.0)
+        wait_log(log, "capture_request_us=", 15.0, after=log_mark)
+        wait_frozen_active(log, log_mark)
+        wait_log(log, "to=Frozen action=Completed", 15.0, after=log_mark)
         if windows(app):
             fail(f"frozen session exposes a capturable own window: {windows(app)}")
         note("mac_e2e_03=pass menu_start=frozen own_windows=0")
@@ -460,20 +490,23 @@ def main() -> int:
         time.sleep(1.5)
         if count_log(log, "capture_request_us=") != before:
             fail("an unregistered key combination started a capture")
+        log_mark = len(read_log(log))
         press(hotkey_combo(config), headed=False)
         wait_count(log, "capture_request_us=", before + 1, 10.0)
         if count_log(log, "capture_request_us=") != before + 1:
             fail("the registered hotkey did not start exactly one capture")
-        wait_log(log, "to=Frozen action=Completed", 15.0)
+        wait_frozen_active(log, log_mark)
+        wait_log(log, "to=Frozen action=Completed", 15.0, after=log_mark)
         note(f"mac_e2e_04=pass hotkey={config} negative_control=no_capture")
         press("escape", headed=True)
-        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=log_mark)
 
         # MAC-E2E-07: the permission notice appears and Escape closes it.
         click(app, "屏幕录制权限…")
         notice = wait_window_size(app, 560.0, 282.0, 10.0)
         if not notice.get("is_focused"):
             fail(f"permission notice is not focused, refusing headed key delivery: {notice}")
+        wait_frontmost(app, 5.0)
         size = notice.get("bounds", {})
         press("escape", headed=True)
         wait_windows(app, 0, 10.0)
@@ -554,6 +587,7 @@ def main() -> int:
         first_label = recorder[0].get("name")
         agent("click", recorder[0]["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
+        wait_frontmost(app, 5.0)
         original = next(
             line.split("config=", 1)[1].split(" ", 1)[0]
             for line in read_log(log)
@@ -580,6 +614,7 @@ def main() -> int:
         recorder = find_nodes(root, native_id="arcshot.hotkey.recorder", require_ref=True)[0]
         agent("click", recorder["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
+        wait_frontmost(app, 5.0)
         press(hotkey_combo(original), headed=False)
         wait_log(log, f"candidate={original}", 10.0)
         save = wait_node(
