@@ -8,9 +8,10 @@
 
 ## 实测来源与环境
 
-- 基线 SHA：`8749793`（`spec/v1`，#24 合并点）。
-- 实测实现/脚本 SHA：`f60b5d8f2559668f4c26c6ddf0f7dde94f41de93`。
-- 时间：2026-11-04T05:40:02Z（record-validation 采集）。
+- 基线 SHA：`8749793`（`spec/v1`，#24 合并点）；最终实测树另合并了 `9ba5641`（#23 显式 Save）。
+- 实测实现/脚本 SHA：`b9fb5fb6a4543a8b9bb8ef4da9ff12a2960dd3f5`（合并提交；实现提交为
+  `ef99e19`/`97d18e5`/`f60b5d8`，证据文档为 `c1f8938`）。
+- 时间：2026-11-04T05:47:16Z（record-validation 采集）。
 - 构建配置：Debug 与 Release。完整入口构建并冒烟两者，Rust 自动化运行在 Debug 测试配置。
 - Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
 - Xcode：27.0 (Build version 27A266a)。
@@ -25,10 +26,11 @@
 - 夹具：合成夹具 v1——40×20 逻辑点（2x，80×40 物理像素）统一不透明 BGRA 底图，RGBA
   为 (30,20,10,255)；100×50 逻辑点（2x）全 255 底图；不含用户截图。像素断言使用固定
   literal 真值，不读取产品私有实现。
-- 日志：`target/25-check-all.log`、`target/25-e2e-debug.log`、
-  `target/25-product-debug.log`、`target/25-validation-debug.txt`、
+- 日志：`target/25-check-all-merged.log`、`target/25-e2e-merged.log`、
+  `target/25-product-merged.log`、`target/25-validation-merged.txt`、
   `target/25-manual-pointer.log`。日志是本地构建产物，不入库；本报告保存摘要。
-- `worktree_dirty=false`（record-validation 在提交 `f60b5d8` 上采集）。
+- `worktree_dirty=false`（record-validation 在合并提交 `b9fb5fb` 上采集；本报告是之后的
+  纯文档提交）。
 
 ## 执行
 
@@ -37,20 +39,21 @@ cargo test --locked -p arcshot-core --test objects      # 12 passed
 cargo test --locked -p arcshot-core --test session_edit # 7 passed
 cargo test --locked -p arcshot-image --test annotations # 7 passed
 cargo test --locked -p arcshot-app --test key_policy     # 12 passed
-scripts/check-all.sh > target/25-check-all.log 2>&1      # exit 0
-scripts/e2e-agent-desktop.py > target/25-e2e-debug.log 2>&1  # exit 0, cases=14
+scripts/check-all.sh > target/25-check-all-merged.log 2>&1      # exit 0
+scripts/e2e-agent-desktop.py > target/25-e2e-merged.log 2>&1       # exit 0, cases=14
 scripts/record-validation.sh --configuration debug \
-  --logs target/25-check-all.log,target/25-e2e-debug.log,target/25-product-debug.log \
-  > target/25-validation-debug.txt
+  --logs target/25-check-all-merged.log,target/25-e2e-merged.log,target/25-product-merged.log \
+  > target/25-validation-merged.txt
 ```
 
-完整入口 exit 0：fmt、Clippy warnings-as-errors、doc、119 个测试、验证工具/依赖/架构/
+完整入口 exit 0：fmt、Clippy warnings-as-errors、doc、133 个测试、验证工具/依赖/架构/
 真实文字后端、Debug/Release 原生驻留/退出、无网络与 PNGf 剪贴板冒烟全部通过。关键输出：
 
 ```text
 text_backend=pass font=Helvetica i_advance=3.5546875px W_advance=15.1015625px
+save_file_smoke=pass bytes=87 roundtrip=true rejected_destination=true invalid_bytes=true panel_configured=true
 startup_smoke=pass activation_policy=Accessory quit_action=terminate:
-privacy_smoke=pass resident_pid=53272 network_sockets=0 lsof_status=1
+privacy_smoke=pass resident_pid=25611 network_sockets=0 lsof_status=1
 validation_reports=pass directory=docs/validation
 dependency_inspection=pass
 ```
@@ -153,7 +156,8 @@ AX value/checked（`aria_selected` 单独在 button 上不会被 AccessKit macOS
   coordinator 在后台执行器上合成选区预览，最多一个在途请求，完成时用当前文档的
   crop+annotations 校验，过期结果丢弃；替换/关闭窗口时 `cx.drop_image` 释放旧纹理。
 - 输出任务在提交时快照 `crop + annotations`，worker 不读取可变文档；发布前仍用
-  ticket/version/crop 栅栏。预览与最终 PNG 因此共用同一栅格化语义。
+  ticket/version/crop 栅栏。预览、Finish 与显式 Save 因此共用同一栅格化语义；
+  `encode_document` 的两个目标只决定发布副作用，不各自重新合成。
 - 左侧工具坞只有 Select 与 Rectangle；悬停行包含工具与其右侧选项，悬停不切换工具，
   移入选项区保持展开，离开收起。选项与工具有 tooltip、`aria_label`、`accessibility_id`、
   `aria_selected` 与 `aria_toggled`（macOS AX 暴露为 checked/value）。
