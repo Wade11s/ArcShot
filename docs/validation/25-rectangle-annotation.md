@@ -9,8 +9,8 @@
 ## 实测来源与环境
 
 - 基线 SHA：`8749793`（`spec/v1`，#24 合并点）；最终实测树另合并了 `9ba5641`（#23 显式 Save）。
-- 实测实现/脚本 SHA：`b9fb5fb6a4543a8b9bb8ef4da9ff12a2960dd3f5`（合并提交；实现提交为
-  `ef99e19`/`97d18e5`/`f60b5d8`，证据文档为 `c1f8938`）。
+- 实测实现/脚本 SHA：`b9fb5fb6a4543a8b9bb8ef4da9ff12a2960dd3f5`（合并 spec/v1 的
+  #23 后实测；本票实现提交为 `ef99e19`/`97d18e5`/`f60b5d8`）。
 - 时间：2026-11-04T05:47:16Z（record-validation 采集）。
 - 构建配置：Debug 与 Release。完整入口构建并冒烟两者，Rust 自动化运行在 Debug 测试配置。
 - Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
@@ -63,7 +63,7 @@ Debug 与 Release bundle 的 `bundle_identity_smoke`、`capture_window_exclusion
 
 ## 原生 E2E（agent-desktop）与 AX 合同
 
-在 `f60b5d8` 的同一字节树上用 Debug bundle 执行 `scripts/e2e-agent-desktop.py`。
+在合并提交 `b9fb5fb` 的同一字节树上用 Debug bundle 执行 `scripts/e2e-agent-desktop.py`。
 `agent-desktop 1.1.0`（envelope 2.6），`status` 原文：
 
 ```text
