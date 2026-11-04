@@ -266,6 +266,7 @@ impl CaptureView {
         id: &'static str,
         label: &'static str,
         tooltip: &'static str,
+        description: Option<&'static str>,
         glyph: &'static str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -296,6 +297,7 @@ impl CaptureView {
             id,
             label,
             tooltip,
+            description,
             glyph,
             self.tool == tool,
             metrics,
@@ -584,6 +586,7 @@ fn tool_button(
     id: &'static str,
     label: &'static str,
     tooltip: &'static str,
+    description: Option<&'static str>,
     glyph: &'static str,
     active: bool,
     metrics: DockMetrics,
@@ -591,7 +594,7 @@ fn tool_button(
 ) -> impl IntoElement {
     let click_queue = Rc::clone(queue);
     let a11y_queue = Rc::clone(queue);
-    div()
+    let mut button = div()
         .id(id)
         .role(Role::Button)
         .aria_label(label)
@@ -601,7 +604,11 @@ fn tool_button(
         } else {
             Toggled::False
         })
-        .accessibility_id(id)
+        .accessibility_id(id);
+    if let Some(description) = description {
+        button = button.aria_description(description);
+    }
+    button
         .tooltip(move |_, cx| cx.new(|_| TooltipView { label: tooltip }).into())
         .w(px(metrics.tool_side))
         .h(px(metrics.tool_side))
@@ -1178,6 +1185,7 @@ impl Render for CaptureView {
                 "arcshot.overlay.tool.select",
                 "选择",
                 "选择",
+                None,
                 "⌖",
                 cx,
             ));
@@ -1187,6 +1195,7 @@ impl Render for CaptureView {
                 "arcshot.overlay.tool.rectangle",
                 "矩形",
                 "矩形",
+                None,
                 "▭",
                 cx,
             ));
@@ -1196,6 +1205,7 @@ impl Render for CaptureView {
                 "arcshot.overlay.tool.line",
                 "直线",
                 "直线",
+                None,
                 "╱",
                 cx,
             ));
@@ -1205,6 +1215,7 @@ impl Render for CaptureView {
                 "arcshot.overlay.tool.arrow",
                 "箭头",
                 "箭头",
+                None,
                 "➤",
                 cx,
             ));
@@ -1214,6 +1225,7 @@ impl Render for CaptureView {
                 "arcshot.overlay.tool.blur",
                 "模糊矩形",
                 BLUR_TOOLTIP,
+                Some(BLUR_TOOLTIP),
                 "▨",
                 cx,
             ));
@@ -1620,5 +1632,16 @@ impl Render for HotkeyView {
                     .text_color(rgb(0xff6b6b))
                     .child(text!(id = "hotkey-error-text", error))
             }))
+    }
+}
+
+#[cfg(test)]
+mod blur_tooltip_tests {
+    use super::BLUR_TOOLTIP;
+
+    #[test]
+    fn the_blur_tooltip_states_the_redaction_limitation() {
+        assert!(BLUR_TOOLTIP.contains("模糊不保证敏感信息不可读"));
+        assert!(BLUR_TOOLTIP.contains("不是可靠的信息遮盖方式"));
     }
 }
