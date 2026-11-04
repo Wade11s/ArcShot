@@ -2,6 +2,7 @@
 
 mod coordinator;
 mod logging;
+mod text_input;
 mod ui;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};

@@ -1,17 +1,19 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
+use crate::text_input::{TextInput, text_editor};
 use arcshot_app::{
     CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PermissionAction,
     PermissionNotice, ScrollPermissionAction, ScrollPermissionNotice, capture_key_action,
-    capture_press_action,
+    capture_press_action, capture_text_press_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
     CaptureTicket, Density, Endpoint, Hotkey, LineOption, LineStyle, PaletteColor, RectangleOption,
-    RectangleStyle, ResizeHandle, ScreenGeometry, Selection, Shape, StrokeWidth, Tool,
+    RectangleStyle, ResizeHandle, ScreenGeometry, Selection, Shape, StrokeWidth, TextOption,
+    TextStyle, Tool,
 };
 use gpui::{
-    AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Toggled, Window, WindowId,
-    div, img, prelude::*, px, rgb, rgba, text,
+    AccessibleAction, Context, Entity, FocusHandle, Render, RenderImage, Role, Toggled, Window,
+    WindowId, div, img, prelude::*, px, rgb, rgba, text,
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
@@ -24,7 +26,7 @@ pub(crate) enum DragState {
     Core,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum UiCommand {
     CancelCapture(CaptureTicket),
     Permission(WindowId, PermissionAction),
@@ -62,6 +64,21 @@ pub(crate) enum UiCommand {
     ArrowOption(CaptureTicket, ArrowOption),
     /// One blur level from the hover strip.
     BlurOption(CaptureTicket, BlurOption),
+    /// One text colour or size option from the hover strip.
+    TextOption(CaptureTicket, TextOption),
+    /// Start a text edit at a point (new object or re-edit).
+    BeginText {
+        ticket: CaptureTicket,
+        point: [f64; 2],
+    },
+    /// The live editor content and its measured bounds changed.
+    TextEdited {
+        ticket: CaptureTicket,
+        content: String,
+        bounds: Selection,
+    },
+    /// Commit the in-progress text edit as one history step.
+    TextCommit(CaptureTicket),
     /// Delete the single selected object.
     DeleteObject(CaptureTicket),
     /// Esc layer one: clear the selected object.
@@ -94,6 +111,16 @@ pub(crate) struct OverlayPreview {
     pub(crate) selection: Selection,
 }
 
+/// A mirror of the authoritative in-progress text edit.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TextEditMirror {
+    pub(crate) anchor: [f64; 2],
+    pub(crate) content: String,
+    pub(crate) bounds: Selection,
+    pub(crate) style: TextStyle,
+    pub(crate) target: Option<usize>,
+}
+
 pub(crate) struct CaptureView {
     pub(crate) ticket: CaptureTicket,
     pub(crate) image: Option<Arc<RenderImage>>,
@@ -119,6 +146,18 @@ pub(crate) struct CaptureView {
     pub(crate) arrow_style: ArrowStyle,
     /// Mirror of the session-scoped blur tool style.
     pub(crate) blur_style: BlurStyle,
+    /// Mirror of the session-scoped text tool style.
+    pub(crate) text_style: TextStyle,
+    /// Mirror of the authoritative in-progress text edit.
+    pub(crate) text_edit: Option<TextEditMirror>,
+    /// The live IME-capable editor entity, present only while editing.
+    pub(crate) text_input: Option<Entity<TextInput>>,
+    /// Focus handle of the live text editor.
+    pub(crate) text_focus: Option<FocusHandle>,
+    /// Whether the size field is accepting direct keyboard input.
+    pub(crate) size_editing: bool,
+    /// The raw size draft while direct input is active.
+    pub(crate) size_draft: String,
     /// Composed selection pixels; the overlay draws only interaction chrome on top.
     pub(crate) preview: Option<OverlayPreview>,
     /// Hovered tool row, including its option strip, for the hover-only options.
@@ -244,17 +283,83 @@ impl CaptureView {
         let [width, height] = self.logical_size();
         [point[0].clamp(0.0, width), point[1].clamp(0.0, height)]
     }
+
+    /// Creates or drops the live editor to match the authoritative text edit.
+    pub(crate) fn sync_text_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.text_edit.clone() else {
+            if self.text_input.take().is_some() {
+                self.text_focus = None;
+                self.size_editing = false;
+                self.size_draft.clear();
+                cx.notify();
+            }
+            return;
+        };
+        if let Some(input) = self.text_input.as_ref() {
+            let size = edit.style.size_points();
+            input.update(cx, |input, cx| {
+                if input.size_points != size {
+                    input.size_points = size;
+                    input.sync(window, cx);
+                }
+            });
+            return;
+        }
+        let focus = cx.focus_handle();
+        let input = cx.new(|_| {
+            TextInput::new(
+                edit.content,
+                edit.style.size_points(),
+                edit.anchor,
+                focus.clone(),
+                Rc::clone(&self.queue),
+                self.ticket,
+            )
+        });
+        self.text_input = Some(input);
+        self.text_focus = Some(focus.clone());
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Confirms the IME composition, commits the draft as one history step and
+    /// clears the live editor.
+    pub(crate) fn commit_editor(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.text_input.take() {
+            input.update(cx, |input, cx| {
+                input.marked_range = None;
+                cx.notify();
+            });
+        }
+        self.text_focus = None;
+        self.text_edit = None;
+        self.size_editing = false;
+        self.size_draft.clear();
+        self.queue
+            .borrow_mut()
+            .push(UiCommand::TextCommit(self.ticket));
+        cx.notify();
+    }
 }
 
 impl CaptureView {
     /// The style the option strip reflects: a selected object of the same tool,
     /// else that tool's session memory.
     fn effective_style(&self, tool: Tool) -> AnnotationStyle {
+        // While a text edit is active, the option strip reflects the draft style
+        // (which the core updates on every option click) rather than the last
+        // committed object.
+        if tool == Tool::Text
+            && let Some(edit) = self.text_edit.as_ref()
+        {
+            return AnnotationStyle::Text(edit.style);
+        }
         let memory = match tool {
             Tool::Rectangle | Tool::Select => AnnotationStyle::Rectangle(self.rectangle_style),
             Tool::Line => AnnotationStyle::Line(self.line_style),
             Tool::Arrow => AnnotationStyle::Arrow(self.arrow_style),
             Tool::Blur => AnnotationStyle::Blur(self.blur_style),
+            Tool::Text => AnnotationStyle::Text(self.text_style),
         };
         self.selected
             .and_then(|index| self.annotations.get(index))
@@ -283,6 +388,7 @@ impl CaptureView {
         let queue = Rc::clone(&self.queue);
         let metrics = DockMetrics::for_density(self.density);
         let entity = cx.entity();
+        let hover_entity = entity.clone();
         let mut row =
             div()
                 .id(row_id)
@@ -291,7 +397,7 @@ impl CaptureView {
                 .items_center()
                 .on_hover(move |hovered, _, cx| {
                     let hovered = *hovered;
-                    entity.update(cx, |view, cx| {
+                    hover_entity.update(cx, |view, cx| {
                         if hovered {
                             view.hovered_tool = Some(tool);
                         } else if view.hovered_tool == Some(tool) {
@@ -313,7 +419,7 @@ impl CaptureView {
             &queue,
         ));
         if self.hovered_tool == Some(tool) && tool.is_annotation() {
-            row = row.child(self.option_strip(tool, metrics));
+            row = row.child(self.option_strip(tool, metrics, entity));
         }
         row
     }
@@ -321,7 +427,12 @@ impl CaptureView {
     /// The hover strip for one annotation tool. Width and palette are shared;
     /// rectangle adds fill, line adds dash and arrow adds the inward head.
     /// Both densities render the same options; only the metrics differ.
-    fn option_strip(&self, tool: Tool, metrics: DockMetrics) -> impl IntoElement {
+    fn option_strip(
+        &self,
+        tool: Tool,
+        metrics: DockMetrics,
+        entity: Entity<Self>,
+    ) -> impl IntoElement {
         let ticket = self.ticket;
         let queue = Rc::clone(&self.queue);
         let style = self.effective_style(tool);
@@ -329,6 +440,7 @@ impl CaptureView {
             Tool::Line => ("line-options", "直线选项"),
             Tool::Arrow => ("arrow-options", "箭头选项"),
             Tool::Blur => ("blur-options", "模糊选项"),
+            Tool::Text => ("text-options", "文字选项"),
             Tool::Rectangle | Tool::Select => ("rectangle-options", "矩形选项"),
         };
         let mut strip = div()
@@ -351,6 +463,7 @@ impl CaptureView {
                 Tool::Line => ("line-options-heading", "直线"),
                 Tool::Arrow => ("arrow-options-heading", "箭头"),
                 Tool::Blur => ("blur-options-heading", "模糊"),
+                Tool::Text => ("text-options-heading", "文字"),
                 Tool::Rectangle | Tool::Select => ("rectangle-options-heading", "矩形"),
             };
             strip = strip.child(
@@ -378,6 +491,93 @@ impl CaptureView {
             }
             return strip;
         }
+        if tool == Tool::Text {
+            // Text has no width, font, weight, background or alignment options:
+            // one fixed palette and one whole-object size. The size applies to
+            // the selected text object or the tool memory, quantized by the core.
+            for color in PaletteColor::ALL {
+                strip = strip.child(option_button(
+                    option_id(tool, &format!("color.{}", color_name(color))),
+                    color_label(color),
+                    "",
+                    style.text().is_some_and(|text| text.color() == color),
+                    Some(color.rgb()),
+                    metrics,
+                    UiCommand::TextOption(ticket, TextOption::Stroke(color)),
+                    &queue,
+                ));
+            }
+            let size = style.text().map_or(16.0, |text| text.size_points());
+            let display_label = if self.size_editing {
+                self.size_draft.clone()
+            } else {
+                TextStyle::new(
+                    style.text().map_or(PaletteColor::Red, |text| text.color()),
+                    size,
+                )
+                .size_label()
+            };
+            let step_down = TextStyle::quantize_size(size - 0.5);
+            let step_up = TextStyle::quantize_size(size + 0.5);
+            strip = strip.child(option_button(
+                option_id(tool, "size.down"),
+                "字号减 0.5 点",
+                "−",
+                false,
+                None,
+                metrics,
+                UiCommand::TextOption(ticket, TextOption::Size(step_down)),
+                &queue,
+            ));
+            strip = strip.child(
+                div()
+                    .id("text-size-value")
+                    .role(Role::Button)
+                    .aria_label(format!("字号 {display_label} 点"))
+                    .aria_value(display_label.clone())
+                    .accessibility_id("arcshot.overlay.text.size")
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| TooltipView {
+                            label: "字号（点击后可直接输入）",
+                        })
+                        .into()
+                    })
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(metrics.option_side + 8.0))
+                    .h(px(metrics.option_side))
+                    .rounded_md()
+                    .bg(rgba(0x2a2f3add))
+                    .text_color(rgb(0xffffff))
+                    .text_size(px(metrics.option_text))
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |view, cx| {
+                            let current = view
+                                .effective_style(Tool::Text)
+                                .text()
+                                .map_or(16.0, |text| text.size_points());
+                            view.size_draft =
+                                TextStyle::new(PaletteColor::Red, current).size_label();
+                            view.size_editing = true;
+                            cx.notify();
+                        });
+                    })
+                    .child(display_label),
+            );
+            strip = strip.child(option_button(
+                option_id(tool, "size.up"),
+                "字号加 0.5 点",
+                "+",
+                false,
+                None,
+                metrics,
+                UiCommand::TextOption(ticket, TextOption::Size(step_up)),
+                &queue,
+            ));
+            return strip;
+        }
         for width in StrokeWidth::ALL {
             let command = match tool {
                 Tool::Line => UiCommand::LineOption(ticket, LineOption::Width(width)),
@@ -385,9 +585,9 @@ impl CaptureView {
                 Tool::Rectangle | Tool::Select => {
                     UiCommand::RectangleOption(ticket, RectangleOption::Width(width))
                 }
-                // The blur strip returned above; this arm only satisfies
-                // exhaustiveness for the shared colour/width loops.
-                Tool::Blur => return strip,
+                // The text and blur strips return above; these arms only
+                // satisfy exhaustiveness for the shared colour/width loops.
+                Tool::Blur | Tool::Text => return strip,
             };
             strip = strip.child(option_button(
                 option_id(tool, &format!("width.{}", width.label())),
@@ -407,7 +607,7 @@ impl CaptureView {
                 Tool::Rectangle | Tool::Select => {
                     UiCommand::RectangleOption(ticket, RectangleOption::Stroke(color))
                 }
-                Tool::Blur => return strip,
+                Tool::Blur | Tool::Text => return strip,
             };
             strip = strip.child(option_button(
                 option_id(tool, &format!("color.{}", color_name(color))),
@@ -460,7 +660,7 @@ impl CaptureView {
                     &queue,
                 ))
             }
-            Tool::Blur => strip,
+            Tool::Blur | Tool::Text => strip,
         }
     }
 }
@@ -471,6 +671,7 @@ fn option_id(tool: Tool, option: &str) -> String {
         Tool::Line => "line",
         Tool::Arrow => "arrow",
         Tool::Blur => "blur",
+        Tool::Text => "text",
         Tool::Rectangle | Tool::Select => "rectangle",
     };
     format!("arcshot.overlay.option.{tool}.{option}")
@@ -544,6 +745,7 @@ fn option_button(
 ) -> impl IntoElement {
     let click_queue = Rc::clone(queue);
     let a11y_queue = Rc::clone(queue);
+    let a11y_command = command.clone();
     let a11y_id = id.clone();
     let background = match swatch {
         Some(channels) => rgb(rgb_u32(channels)),
@@ -578,10 +780,10 @@ fn option_button(
         .text_color(rgb(0xffffff))
         .text_size(px(metrics.option_text))
         .child(glyph)
-        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(command.clone()))
         .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
             log::info!("a11y_action={a11y_id} action=Click");
-            a11y_queue.borrow_mut().push(command);
+            a11y_queue.borrow_mut().push(a11y_command.clone());
         })
 }
 
@@ -747,6 +949,45 @@ impl Render for CaptureView {
                 let queue = Rc::clone(&self.queue);
                 let entity = cx.entity();
                 move |event, _, cx| {
+                    // Direct size input consumes every key until Enter or Esc.
+                    if entity.read_with(cx, |view, _| view.size_editing) {
+                        entity.update(cx, |view, cx| {
+                            match event.keystroke.key.as_ref() {
+                                "escape" => {
+                                    view.size_editing = false;
+                                    view.size_draft.clear();
+                                }
+                                "enter" => {
+                                    if let Ok(size) = view.size_draft.trim().parse::<f64>() {
+                                        let size = TextStyle::quantize_size(size);
+                                        view.queue.borrow_mut().push(UiCommand::TextOption(
+                                            ticket,
+                                            TextOption::Size(size),
+                                        ));
+                                    }
+                                    view.size_editing = false;
+                                    view.size_draft.clear();
+                                }
+                                "backspace" => {
+                                    view.size_draft.pop();
+                                }
+                                "delete" => {
+                                    view.size_draft.clear();
+                                }
+                                _ => {
+                                    if let Some(ch) = plain_key_char(&event.keystroke.key)
+                                        && (ch.is_ascii_digit() || ch == '.')
+                                        && view.size_draft.len() < 8
+                                    {
+                                        view.size_draft.push(ch);
+                                    }
+                                }
+                            }
+                            cx.notify();
+                        });
+                        cx.stop_propagation();
+                        return;
+                    }
                     // Read the live drag flag rather than the render-time snapshot,
                     // so a key right after release never sees a stale held state.
                     let context = entity.read_with(cx, |view, _| CaptureKeyContext {
@@ -754,6 +995,7 @@ impl Render for CaptureView {
                         dragging: view.drag.is_some(),
                         object_selected: view.selected.is_some(),
                         tool: view.tool,
+                        text_editing: view.text_edit.is_some(),
                     });
                     let action = capture_key_action(
                         &event.keystroke.key,
@@ -794,6 +1036,13 @@ impl Render for CaptureView {
                             queue.borrow_mut().push(UiCommand::DeleteObject(ticket));
                             cx.stop_propagation();
                         }
+                        Some(CaptureKeyAction::EndTextEdit) => {
+                            // Esc layer zero: end editing and keep the content.
+                            entity.update(cx, |view, cx| {
+                                view.commit_editor(cx);
+                            });
+                            cx.stop_propagation();
+                        }
                         None => {}
                     }
                 }
@@ -807,11 +1056,30 @@ impl Render for CaptureView {
                         if !frozen || view.busy {
                             return;
                         }
+                        // A press while editing commits the draft; the same press
+                        // does not also start a new object.
+                        if view.text_edit.is_some() {
+                            view.commit_editor(cx);
+                            cx.notify();
+                            return;
+                        }
                         // Only the visible part of an object is interactive.
                         let object = view
                             .selection
                             .filter(|selection| selection.contains(raw))
                             .and_then(|_| arcshot_core::annotation_at(&view.annotations, raw));
+                        let text_hit = object
+                            .and_then(|index| view.annotations.get(index))
+                            .and_then(|annotation| annotation.style().text())
+                            .is_some();
+                        if capture_text_press_action(double, view.tool, text_hit, raw).is_some() {
+                            view.queue.borrow_mut().push(UiCommand::BeginText {
+                                ticket,
+                                point: view.clamp(raw),
+                            });
+                            cx.notify();
+                            return;
+                        }
                         match capture_press_action(
                             double,
                             view.busy,
@@ -828,6 +1096,14 @@ impl Render for CaptureView {
                                     point: Some(point),
                                 });
                             }
+                            Some(CapturePressAction::Create) if view.tool == Tool::Text => {
+                                // The text tool positions an editor instead of a drag.
+                                view.queue.borrow_mut().push(UiCommand::BeginText {
+                                    ticket,
+                                    point: view.clamp(raw),
+                                });
+                            }
+                            Some(CapturePressAction::EditText(_)) => {}
                             Some(CapturePressAction::Create) => {
                                 // A new object starts unselected; the draft is
                                 // selected as soon as the first move lands.
@@ -1016,6 +1292,7 @@ impl Render for CaptureView {
                         .into_iter()
                         .map(|endpoint| segment.endpoint_center(endpoint))
                         .collect(),
+                    Shape::Text(_) => Vec::new(),
                 };
                 for [x, y] in centers {
                     let [x, y] = [x as f32, y as f32];
@@ -1119,6 +1396,8 @@ impl Render for CaptureView {
                     .child({
                         let queue = Rc::clone(&self.queue);
                         let a11y_queue = Rc::clone(&self.queue);
+                        let entity = cx.entity();
+                        let entity_for_a11y = entity.clone();
                         let mut button = div()
                             .id("save-capture")
                             .aria_label("保存 PNG")
@@ -1138,11 +1417,13 @@ impl Render for CaptureView {
                                 .role(Role::Button)
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(0x52617b)))
-                                .on_click(move |_, _, _| {
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |view, cx| view.commit_editor(cx));
                                     queue.borrow_mut().push(UiCommand::SaveCapture(ticket));
                                 })
-                                .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                                .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
                                     log::info!("a11y_action=arcshot.overlay.save action=Click");
+                                    entity_for_a11y.update(cx, |view, cx| view.commit_editor(cx));
                                     a11y_queue.borrow_mut().push(UiCommand::SaveCapture(ticket));
                                 });
                         }
@@ -1151,6 +1432,8 @@ impl Render for CaptureView {
                     .child({
                         let queue = Rc::clone(&self.queue);
                         let a11y_queue = Rc::clone(&self.queue);
+                        let entity = cx.entity();
+                        let entity_for_a11y = entity.clone();
                         let mut button = div()
                             .id("finish-capture")
                             .aria_label("完成")
@@ -1170,14 +1453,16 @@ impl Render for CaptureView {
                                 .role(Role::Button)
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(0x0062d6)))
-                                .on_click(move |_, _, _| {
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |view, cx| view.commit_editor(cx));
                                     queue.borrow_mut().push(UiCommand::FinishCapture {
                                         ticket,
                                         point: None,
                                     });
                                 })
-                                .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                                .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
                                     log::info!("a11y_action=arcshot.overlay.finish action=Click");
+                                    entity_for_a11y.update(cx, |view, cx| view.commit_editor(cx));
                                     a11y_queue.borrow_mut().push(UiCommand::FinishCapture {
                                         ticket,
                                         point: None,
@@ -1275,10 +1560,30 @@ impl Render for CaptureView {
                 "▨",
                 cx,
             ));
+            dock = dock.child(self.tool_row(
+                Tool::Text,
+                "text-tool-row",
+                "arcshot.overlay.tool.text",
+                "文字",
+                "文字",
+                None,
+                "T",
+                cx,
+            ));
             if self.selected.is_some() && !busy {
                 dock = dock.child(delete_button(ticket, &self.queue));
             }
             root = root.child(dock);
+        }
+
+        if let Some(input) = self.text_input.clone()
+            && let Some(edit) = self.text_edit.as_ref()
+            && let Some(focus) = self.text_focus.clone()
+        {
+            let metrics = arcshot_image::measure_text(&edit.content, edit.style.size_points());
+            let width = (metrics.max_line_width as f32).max(1.0);
+            let height = (metrics.line_count as f32 * metrics.line_height as f32).max(1.0);
+            root = root.child(text_editor(input, edit.anchor, width, height, focus));
         }
 
         if let Some(error) = error {
@@ -1331,6 +1636,8 @@ fn button(
 ) -> impl IntoElement {
     let click_queue = Rc::clone(queue);
     let a11y_queue = Rc::clone(queue);
+    let click_command = command.clone();
+    let a11y_command = command;
     div()
         .id(label)
         .role(Role::Button)
@@ -1343,12 +1650,12 @@ fn button(
         .bg(rgb(0x3b465b))
         .hover(|style| style.bg(rgb(0x52617b)))
         .child(label)
-        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(click_command.clone()))
         // AXPress never reaches `on_click`, so the accessible path enqueues the
         // same command explicitly and reports itself for end-to-end checks.
         .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
             log::info!("a11y_action={a11y_id} action=Click");
-            a11y_queue.borrow_mut().push(command);
+            a11y_queue.borrow_mut().push(a11y_command.clone());
         })
 }
 impl Render for NoticeView {
@@ -1373,6 +1680,7 @@ impl Render for NoticeView {
         };
         let window_id = window.window_handle().window_id();
         let cancel = UiCommand::Permission(window_id, PermissionAction::Cancel);
+        let key_cancel = cancel.clone();
         let queue = Rc::clone(&self.queue);
         let mut buttons = div().flex().gap_2();
         match self.notice {
@@ -1433,7 +1741,7 @@ impl Render for NoticeView {
             .track_focus(&self.focus)
             .on_key_down(move |event, _, cx| {
                 if event.keystroke.key == "escape" {
-                    queue.borrow_mut().push(cancel);
+                    queue.borrow_mut().push(key_cancel.clone());
                     cx.stop_propagation();
                 }
             })
@@ -1453,6 +1761,8 @@ fn scroll_button(
 ) -> impl IntoElement {
     let click_queue = Rc::clone(queue);
     let a11y_queue = Rc::clone(queue);
+    let click_command = command.clone();
+    let a11y_command = command;
     div()
         .id(element_id)
         .role(Role::Button)
@@ -1465,10 +1775,10 @@ fn scroll_button(
         .bg(rgb(0x3b465b))
         .hover(|style| style.bg(rgb(0x52617b)))
         .child(label)
-        .on_click(move |_, _, _| click_queue.borrow_mut().push(command))
+        .on_click(move |_, _, _| click_queue.borrow_mut().push(click_command.clone()))
         .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
             log::info!("a11y_action={a11y_id} action=Click");
-            a11y_queue.borrow_mut().push(command);
+            a11y_queue.borrow_mut().push(a11y_command.clone());
         })
 }
 
@@ -1847,6 +2157,8 @@ impl Render for HotkeyView {
                     let entity = cx.entity();
                     let a11y_entity = entity.clone();
                     let a11y_queue = Rc::clone(&self.queue);
+                    let click_command = command.clone();
+                    let a11y_command = command;
                     buttons = buttons.child(
                         div()
                             .id("hotkey-save")
@@ -1866,7 +2178,7 @@ impl Render for HotkeyView {
                                     cx.notify();
                                 });
                                 log::info!("hotkey_save_pushed window_id={window_id:?}");
-                                queue.borrow_mut().push(command);
+                                queue.borrow_mut().push(click_command.clone());
                             })
                             .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
                                 log::info!("a11y_action=arcshot.hotkey.save action=Click");
@@ -1874,7 +2186,7 @@ impl Render for HotkeyView {
                                     view.recording = false;
                                     cx.notify();
                                 });
-                                a11y_queue.borrow_mut().push(command);
+                                a11y_queue.borrow_mut().push(a11y_command.clone());
                             }),
                     );
                 }

@@ -45,14 +45,14 @@ fn segment(x0: f64, y0: f64, x1: f64, y1: f64) -> Segment {
     Segment::try_new([x0, y0], [x1, y1]).unwrap()
 }
 
-fn line_style(annotation: arcshot_core::Annotation) -> LineStyle {
+fn line_style(annotation: &arcshot_core::Annotation) -> LineStyle {
     annotation
         .style()
         .line()
         .expect("a line annotation carries a line style")
 }
 
-fn arrow_style(annotation: arcshot_core::Annotation) -> ArrowStyle {
+fn arrow_style(annotation: &arcshot_core::Annotation) -> ArrowStyle {
     annotation
         .style()
         .arrow()
@@ -79,7 +79,7 @@ fn core_edit_25_the_line_tool_creates_directed_segments_from_inside_the_selectio
     document.update_drag([42.0, 8.0]);
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
-    let line = document.annotations()[0];
+    let line = document.annotations()[0].clone();
     assert_eq!(line.shape().segment(), Some(segment(12.0, 8.0, 42.0, 8.0)));
     assert_eq!(
         line.style(),
@@ -125,7 +125,7 @@ fn core_edit_26_the_arrow_tool_creates_flat_arrows_and_rejects_zero_length() {
     document.update_drag([30.0, 20.0]);
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
-    let arrow = document.annotations()[0];
+    let arrow = document.annotations()[0].clone();
     // Direction is retained from start tail to end tip.
     assert_eq!(
         arrow.shape().segment(),
@@ -297,7 +297,7 @@ fn core_edit_29_line_and_arrow_options_edit_only_same_type_objects() {
     // A selected line takes the option together with the tool memory.
     document.set_tool(Tool::Line);
     draw(&mut document, [12.0, 8.0], [28.0, 8.0]);
-    assert!(line_style(document.annotations()[0]).dash());
+    assert!(line_style(&document.annotations()[0]).dash());
     let version = document.version();
     assert!(
         document
@@ -306,14 +306,14 @@ fn core_edit_29_line_and_arrow_options_edit_only_same_type_objects() {
     );
     assert_eq!(document.version(), version + 1);
     assert_eq!(
-        line_style(document.annotations()[0]).width(),
+        line_style(&document.annotations()[0]).width(),
         StrokeWidth::Five
     );
     assert_eq!(document.line_style().width(), StrokeWidth::Five);
     // Undo restores the object but not the session style memory.
     assert!(document.undo().unwrap());
     assert_eq!(
-        line_style(document.annotations()[0]).width(),
+        line_style(&document.annotations()[0]).width(),
         StrokeWidth::Three
     );
     assert_eq!(document.line_style().width(), StrokeWidth::Five);
@@ -336,14 +336,14 @@ fn core_edit_29_line_and_arrow_options_edit_only_same_type_objects() {
     assert_eq!(document.version(), version);
     assert!(document.arrow_style().inward());
     assert_eq!(
-        line_style(document.annotations()[0]).width(),
+        line_style(&document.annotations()[0]).width(),
         StrokeWidth::Five
     );
 
     // A selected arrow takes arrow options and keeps line options separate.
     document.set_tool(Tool::Arrow);
     draw(&mut document, [14.0, 12.0], [34.0, 12.0]);
-    assert!(arrow_style(document.annotations()[1]).inward());
+    assert!(arrow_style(&document.annotations()[1]).inward());
     let version = document.version();
     assert!(
         document
@@ -352,7 +352,7 @@ fn core_edit_29_line_and_arrow_options_edit_only_same_type_objects() {
     );
     assert_eq!(document.version(), version + 1);
     assert_eq!(
-        arrow_style(document.annotations()[1]).width(),
+        arrow_style(&document.annotations()[1]).width(),
         StrokeWidth::Two
     );
     assert_eq!(document.arrow_style().width(), StrokeWidth::Two);
@@ -391,7 +391,7 @@ fn core_edit_30_creation_keeps_the_press_style_and_new_sessions_reset_defaults()
     );
     document.update_drag([30.0, 8.0]);
     document.end_drag().unwrap();
-    let style = line_style(document.annotations()[0]);
+    let style = line_style(&document.annotations()[0]);
     assert_eq!(style.stroke(), PaletteColor::Blue);
     assert_eq!(style.width(), StrokeWidth::Five);
     assert!(style.dash());

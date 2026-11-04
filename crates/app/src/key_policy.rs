@@ -29,6 +29,8 @@ pub struct CaptureKeyContext {
     pub object_selected: bool,
     /// The active pointer tool.
     pub tool: Tool,
+    /// A text editor is active; Enter, Delete/Backspace and undo/redo belong to it.
+    pub text_editing: bool,
 }
 
 /// What the overlay should queue for a key press, if anything.
@@ -44,6 +46,8 @@ pub enum CaptureKeyAction {
     Redo,
     /// Esc layer one: clear the selected object.
     Deselect,
+    /// Esc layer zero while text is active: end editing and keep the content.
+    EndTextEdit,
     /// Esc layer two: leave the active annotation tool for the select tool.
     SelectTool,
     /// Delete/Backspace: delete the selected object.
@@ -57,6 +61,8 @@ pub enum CapturePressAction {
     FinishAt([f64; 2]),
     /// Annotation tool: start a new object inside the selection.
     Create,
+    /// Double-click on a text object under the select tool: re-edit it.
+    EditText([f64; 2]),
     /// Select tool: a hit object starts its own move/resize in the core.
     ObjectDrag,
     /// Select tool: the core owns a selection move/resize.
@@ -78,6 +84,15 @@ pub fn capture_key_action(
 ) -> Option<CaptureKeyAction> {
     let command_only = modifiers.command && !modifiers.control && !modifiers.option;
     let plain = !command_only && !modifiers.shift && !modifiers.control && !modifiers.option;
+    // While a text editor is active, Enter, Delete/Backspace and undo/redo stay
+    // with the editor and IME. Esc ends the edit first; every other application
+    // shortcut is suppressed so IME composition keys keep priority.
+    if context.text_editing && !context.busy && !context.dragging {
+        return match key {
+            "escape" => Some(CaptureKeyAction::EndTextEdit),
+            _ => None,
+        };
+    }
     match key {
         "escape" if context.dragging => None,
         "escape" if context.busy => Some(CaptureKeyAction::Cancel),
@@ -98,6 +113,23 @@ pub fn capture_key_action(
         }
         _ => None,
     }
+}
+
+/// Decides whether a press is a text re-edit under the select tool.
+///
+/// A double-click on a text object re-edits it; every other object keeps the
+/// normal object drag. The text tool always creates, even on a double-click.
+#[must_use]
+pub fn capture_text_press_action(
+    double_click: bool,
+    tool: Tool,
+    object_is_text: bool,
+    point: [f64; 2],
+) -> Option<CapturePressAction> {
+    if double_click && tool == Tool::Select && object_is_text {
+        return Some(CapturePressAction::EditText(point));
+    }
+    None
 }
 
 /// Routes one primary-button press; the core still validates the exact target.

@@ -262,7 +262,7 @@ fn core_edit_08_out_of_bounds_annotations_are_retained_and_clipped_then_reappear
     document
         .add_rectangle(selection(25.0, 25.0, 10.0, 10.0))
         .unwrap();
-    let annotation = document.annotations()[0];
+    let annotation = document.annotations()[0].clone();
     let initial = document.selection().unwrap();
     assert_eq!(
         annotation.visible_rectangle(initial),

@@ -10,12 +10,14 @@ mod session;
 
 pub use annotation::{
     Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
-    Endpoint, LineOption, LineStyle, PaletteColor, RectangleOption, RectangleStyle, Segment, Shape,
-    StrokeWidth, Tool, annotation_at,
+    DEFAULT_TEXT_SIZE, Endpoint, LineOption, LineStyle, MAX_TEXT_SIZE, MIN_TEXT_SIZE, PaletteColor,
+    RectangleOption, RectangleStyle, Segment, Shape, StrokeWidth, TEXT_SIZE_STEP, TextGeometry,
+    TextOption, TextStyle, Tool, annotation_at,
 };
 pub use density::Density;
 pub use document::{
     Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle, Selection,
+    TextEdit,
 };
 pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry};
 pub use hotkey::Hotkey;

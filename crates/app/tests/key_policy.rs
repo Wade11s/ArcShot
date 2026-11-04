@@ -491,6 +491,83 @@ fn press(
 ) -> Option<CapturePressAction> {
     capture_press_action(double_click, busy, tool, selection, object_hit, point)
 }
+
+#[test]
+fn app_key_17_text_editing_consumes_editor_keys_and_esc_ends_it_first() {
+    use arcshot_app::capture_text_press_action;
+
+    let editing = CaptureKeyContext {
+        text_editing: true,
+        ..Default::default()
+    };
+    // Enter inserts a newline, Delete/Backspace and undo/redo belong to the
+    // editor/IME, and every other application shortcut is suppressed.
+    assert_eq!(
+        capture_key_action("enter", KeyModifiers::default(), editing),
+        None
+    );
+    for key in ["delete", "backspace"] {
+        assert_eq!(
+            capture_key_action(key, KeyModifiers::default(), editing),
+            None
+        );
+    }
+    assert_eq!(capture_key_action("z", command(), editing), None);
+    assert_eq!(capture_key_action("z", command_shift(), editing), None);
+    assert_eq!(
+        capture_key_action("a", KeyModifiers::default(), editing),
+        None
+    );
+    // Esc ends the edit and keeps the content before any other layer.
+    assert_eq!(
+        capture_key_action("escape", KeyModifiers::default(), editing),
+        Some(CaptureKeyAction::EndTextEdit)
+    );
+    // A held drag or output ownership wins over the editor layer.
+    assert_eq!(
+        capture_key_action(
+            "escape",
+            KeyModifiers::default(),
+            CaptureKeyContext {
+                text_editing: true,
+                dragging: true,
+                ..Default::default()
+            }
+        ),
+        None
+    );
+    assert_eq!(
+        capture_key_action(
+            "escape",
+            KeyModifiers::default(),
+            CaptureKeyContext {
+                text_editing: true,
+                busy: true,
+                ..Default::default()
+            }
+        ),
+        Some(CaptureKeyAction::Cancel)
+    );
+
+    // A double-click on a text object under the select tool re-edits it.
+    assert_eq!(
+        capture_text_press_action(true, Tool::Select, true, [20.0, 10.0]),
+        Some(CapturePressAction::EditText([20.0, 10.0]))
+    );
+    // A non-text object, the text tool, and a single click never re-edit.
+    assert_eq!(
+        capture_text_press_action(true, Tool::Select, false, [20.0, 10.0]),
+        None
+    );
+    assert_eq!(
+        capture_text_press_action(true, Tool::Text, true, [20.0, 10.0]),
+        None
+    );
+    assert_eq!(
+        capture_text_press_action(false, Tool::Select, true, [20.0, 10.0]),
+        None
+    );
+}
 #[test]
 fn app_key_13_line_and_arrow_tools_create_inside_and_never_finish_on_double_click() {
     let selection = selection();

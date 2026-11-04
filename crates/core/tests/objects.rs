@@ -38,7 +38,7 @@ fn draw(document: &mut Document, from: [f64; 2], to: [f64; 2]) {
     document.end_drag().unwrap();
 }
 
-fn bounds(annotation: arcshot_core::Annotation) -> (f64, f64, f64, f64) {
+fn bounds(annotation: &arcshot_core::Annotation) -> (f64, f64, f64, f64) {
     let bounds = annotation.shape().rectangle_bounds().unwrap();
     (bounds.x(), bounds.y(), bounds.width(), bounds.height())
 }
@@ -64,7 +64,7 @@ fn core_edit_13_the_rectangle_tool_creates_one_selected_object_per_gesture() {
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
     assert_eq!(document.annotations().len(), 1);
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 10.0, 10.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 10.0, 10.0));
     assert_eq!(
         document.annotations()[0].style().rectangle(),
         Some(RectangleStyle::default())
@@ -121,8 +121,8 @@ fn core_edit_15_creation_starts_inside_the_selection_but_may_extend_outside() {
     document.begin_pointer([12.0, 8.0]);
     document.update_drag([55.0, 45.0]);
     document.end_drag().unwrap();
-    let created = document.annotations()[0];
-    assert_eq!(bounds(created), (12.0, 8.0, 43.0, 37.0));
+    let created = document.annotations()[0].clone();
+    assert_eq!(bounds(&created), (12.0, 8.0, 43.0, 37.0));
     // Retained data leaves the selection; preview and output clip it.
     let active = document.selection().unwrap();
     assert_eq!(
@@ -150,8 +150,8 @@ fn core_edit_16_the_topmost_object_wins_and_object_drags_precede_selection_drags
     document.update_drag([23.0, 18.0]);
     document.end_drag().unwrap();
     assert_eq!(document.selected_index(), Some(1));
-    assert_eq!(bounds(document.annotations()[1]), (18.0, 13.0, 10.0, 10.0));
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 10.0, 10.0));
+    assert_eq!(bounds(&document.annotations()[1]), (18.0, 13.0, 10.0, 10.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 10.0, 10.0));
     // The whole selection never moved: the object drag had priority.
     assert_eq!(document.selection(), Some(selection));
 }
@@ -191,7 +191,7 @@ fn core_edit_17_object_handles_resize_one_edge_and_may_flip_across_the_opposite_
             "{handle:?}"
         );
         document.update_drag(target);
-        assert_eq!(bounds(document.annotations()[0]), expected, "{handle:?}");
+        assert_eq!(bounds(&document.annotations()[0]), expected, "{handle:?}");
         assert!(document.end_drag().unwrap());
     }
 
@@ -210,10 +210,10 @@ fn core_edit_17_object_handles_resize_one_edge_and_may_flip_across_the_opposite_
     );
     document.update_drag([35.0, 20.0]);
     assert!(document.end_drag().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (30.0, 15.0, 5.0, 5.0));
+    assert_eq!(bounds(&document.annotations()[0]), (30.0, 15.0, 5.0, 5.0));
     assert_eq!(document.version(), version + 1);
     assert!(document.undo().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (20.0, 10.0, 10.0, 5.0));
+    assert_eq!(bounds(&document.annotations()[0]), (20.0, 10.0, 10.0, 5.0));
 }
 
 #[test]
@@ -229,11 +229,11 @@ fn core_edit_18_a_click_on_empty_space_deselects_but_a_drag_moves_the_selection_
     document.update_drag([37.0, 23.0]);
     // The live preview carries every object with the selection.
     assert_eq!(document.selection(), Some(selection(12.0, 6.0, 30.0, 20.0)));
-    assert_eq!(bounds(document.annotations()[0]), (14.0, 9.0, 4.0, 4.0));
+    assert_eq!(bounds(&document.annotations()[0]), (14.0, 9.0, 4.0, 4.0));
     assert!(document.end_drag().unwrap());
     assert!(document.undo().unwrap());
     assert_eq!(document.selection(), Some(selection(10.0, 5.0, 30.0, 20.0)));
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 4.0, 4.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 4.0, 4.0));
 }
 
 #[test]
@@ -249,14 +249,14 @@ fn core_edit_19_delete_removes_only_the_selected_object_as_one_undoable_step() {
     let version = document.version();
     assert!(document.delete_selected().unwrap());
     assert_eq!(document.annotations().len(), 1);
-    assert_eq!(bounds(document.annotations()[0]), (18.0, 10.0, 4.0, 4.0));
+    assert_eq!(bounds(&document.annotations()[0]), (18.0, 10.0, 4.0, 4.0));
     assert_eq!(document.selected_index(), None);
     assert_eq!(document.version(), version + 1);
 
     assert!(document.undo().unwrap());
     assert_eq!(document.annotations().len(), 2);
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 4.0, 4.0));
-    assert_eq!(bounds(document.annotations()[1]), (18.0, 10.0, 4.0, 4.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 4.0, 4.0));
+    assert_eq!(bounds(&document.annotations()[1]), (18.0, 10.0, 4.0, 4.0));
     assert!(document.redo().unwrap());
     assert_eq!(document.annotations().len(), 1);
 
@@ -384,11 +384,11 @@ fn core_edit_22_each_object_drag_is_one_history_step_and_no_ops_record_nothing()
     document.update_drag([18.0, 14.0]);
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
-    assert_eq!(bounds(document.annotations()[0]), (15.0, 11.0, 6.0, 6.0));
+    assert_eq!(bounds(&document.annotations()[0]), (15.0, 11.0, 6.0, 6.0));
     assert!(document.undo().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 6.0, 6.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 6.0, 6.0));
     assert!(document.redo().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (15.0, 11.0, 6.0, 6.0));
+    assert_eq!(bounds(&document.annotations()[0]), (15.0, 11.0, 6.0, 6.0));
 }
 
 #[test]
@@ -399,8 +399,8 @@ fn core_edit_23_an_object_may_leave_the_selection_and_keeps_its_data_until_undo(
     assert!(document.begin_pointer([14.0, 10.0]).is_some());
     document.update_drag([44.0, 30.0]);
     document.end_drag().unwrap();
-    let moved = document.annotations()[0];
-    assert_eq!(bounds(moved), (42.0, 28.0, 5.0, 5.0));
+    let moved = document.annotations()[0].clone();
+    assert_eq!(bounds(&moved), (42.0, 28.0, 5.0, 5.0));
     let active = document.selection().unwrap();
     assert_eq!(moved.visible_rectangle(active), None);
     assert_eq!(
@@ -408,7 +408,7 @@ fn core_edit_23_an_object_may_leave_the_selection_and_keeps_its_data_until_undo(
         selection(42.0, 28.0, 5.0, 5.0)
     );
     assert!(document.undo().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 5.0, 5.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 5.0, 5.0));
 }
 
 #[test]
