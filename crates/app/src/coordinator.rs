@@ -146,6 +146,26 @@ impl Coordinator {
                         self.action(CaptureAction::SelectRegion { ticket, from, to }, cx);
                     }
                 }
+                UiCommand::SelectionDragStarted { ticket, point }
+                    if self.session.may_present(ticket) =>
+                {
+                    self.overlay_error = None;
+                    self.action(CaptureAction::SelectionDragStarted { ticket, point }, cx);
+                }
+                UiCommand::SelectionDragUpdated { ticket, point }
+                    if self.session.may_present(ticket) =>
+                {
+                    self.action(CaptureAction::SelectionDragUpdated { ticket, point }, cx);
+                }
+                UiCommand::SelectionDragEnded(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::SelectionDragEnded { ticket }, cx);
+                }
+                UiCommand::Undo(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::Undo { ticket }, cx);
+                }
+                UiCommand::Redo(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::Redo { ticket }, cx);
+                }
                 UiCommand::FinishCapture { ticket, point } => {
                     if self.session.may_present(ticket) {
                         self.action(
@@ -438,11 +458,33 @@ impl Coordinator {
     /// observe session state without reading GPUI windows or pixels.
     fn dispatch(&mut self, action: CaptureAction) -> VecDeque<CaptureEffect> {
         let name = action_name(&action);
+        let edits = matches!(
+            action,
+            CaptureAction::Undo { .. }
+                | CaptureAction::Redo { .. }
+                | CaptureAction::SelectionDragEnded { .. }
+                | CaptureAction::SelectRegion { .. }
+        );
         let before = self.session.phase();
         let effects: VecDeque<_> = self.session.dispatch(action).into();
         let after = self.session.phase();
         if after != before {
             log::info!("capture_phase from={before:?} to={after:?} action={name}");
+        }
+        if edits && let Some(document) = self.session.document() {
+            // Text-only history diagnostics: version and geometry, never pixels.
+            let selection = document.selection();
+            log::info!(
+                "capture_edit action={name} version={} annotations={} selection={:?}",
+                document.version(),
+                document.annotations().len(),
+                selection.map(|selection| [
+                    selection.x(),
+                    selection.y(),
+                    selection.width(),
+                    selection.height()
+                ])
+            );
         }
         effects
     }
@@ -952,6 +994,11 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::DisplayInvalidated => "DisplayInvalidated",
         CaptureAction::SetOutputBusy { .. } => "SetOutputBusy",
         CaptureAction::SelectRegion { .. } => "SelectRegion",
+        CaptureAction::SelectionDragStarted { .. } => "SelectionDragStarted",
+        CaptureAction::SelectionDragUpdated { .. } => "SelectionDragUpdated",
+        CaptureAction::SelectionDragEnded { .. } => "SelectionDragEnded",
+        CaptureAction::Undo { .. } => "Undo",
+        CaptureAction::Redo { .. } => "Redo",
         CaptureAction::Finish { .. } => "Finish",
         CaptureAction::FinishAt { .. } => "FinishAt",
         CaptureAction::OutputCompleted { .. } => "OutputCompleted",

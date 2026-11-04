@@ -10,4 +10,6 @@ pub use hotkey_flow::{HotkeyAction, HotkeyEffect, HotkeyFlow, HotkeyNotice, Hotk
 mod output_tasks;
 pub use output_tasks::{OutputSubmitError, OutputTasks};
 mod key_policy;
-pub use key_policy::{CaptureKeyAction, capture_key_action};
+pub use key_policy::{
+    CaptureKeyAction, CapturePressAction, KeyModifiers, capture_key_action, capture_press_action,
+};

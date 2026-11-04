@@ -1,6 +1,7 @@
 //! CORE-COORD: one logical selection converts directly to physical output.
 use arcshot_core::{
-    CapturedFrame, Document, DocumentError, MAX_PIXELS, PixelRect, ScreenGeometry, Selection,
+    CapturedFrame, Document, DocumentError, MAX_PIXELS, PixelRect, ResizeHandle, ScreenGeometry,
+    Selection,
 };
 
 fn screen() -> ScreenGeometry {
@@ -147,4 +148,69 @@ fn core_document_01_selection_changes_bump_version_and_invalid_input_keeps_the_o
     );
     assert_eq!(document.selection(), Some(selection));
     assert_eq!(document.version(), 1);
+}
+
+#[test]
+fn core_coord_08_moved_and_resized_selection_crop_uses_the_same_2x_conversion() {
+    let mut document = Document::new(frame());
+    let initial = Selection::from_drag([10.0, 5.0], [40.0, 25.0]).unwrap();
+    document.select(initial).unwrap();
+    assert_eq!(
+        document.crop().unwrap(),
+        PixelRect::try_new(20, 10, 60, 40).unwrap()
+    );
+
+    // +2/+1 logical points move the crop by exactly +4/+2 physical pixels.
+    document.begin_drag([20.0, 10.0]);
+    document.update_drag([22.0, 11.0]);
+    assert_eq!(
+        document.selection(),
+        Some(Selection::try_new(12.0, 6.0, 30.0, 20.0).unwrap())
+    );
+    assert_eq!(
+        document.crop().unwrap(),
+        PixelRect::try_new(24, 12, 60, 40).unwrap()
+    );
+    document.end_drag().unwrap();
+
+    // +5/+5 points from the bottom-right handle widen/tallten the same crop.
+    let selection = document.selection().unwrap();
+    document.begin_drag(selection.handle_center(ResizeHandle::BottomRight));
+    document.update_drag([47.0, 31.0]);
+    assert_eq!(
+        document.selection(),
+        Some(Selection::try_new(12.0, 6.0, 35.0, 25.0).unwrap())
+    );
+    assert_eq!(
+        document.crop().unwrap(),
+        PixelRect::try_new(24, 12, 70, 50).unwrap()
+    );
+}
+
+#[test]
+fn core_coord_09_resize_handles_hit_test_in_logical_points_and_keep_a_move_area() {
+    let selection = Selection::try_new(10.0, 10.0, 30.0, 20.0).unwrap();
+    let handles = [
+        ResizeHandle::TopLeft,
+        ResizeHandle::Top,
+        ResizeHandle::TopRight,
+        ResizeHandle::Right,
+        ResizeHandle::BottomRight,
+        ResizeHandle::Bottom,
+        ResizeHandle::BottomLeft,
+        ResizeHandle::Left,
+    ];
+    for handle in handles {
+        assert_eq!(
+            selection.resize_handle_at(selection.handle_center(handle)),
+            Some(handle),
+            "{handle:?}"
+        );
+    }
+    // The middle of the selection is a move target, not a control point.
+    assert_eq!(selection.resize_handle_at([25.0, 20.0]), None);
+
+    // A tiny selection still has a move area in its middle.
+    let tiny = Selection::try_new(10.0, 10.0, 1.0, 1.0).unwrap();
+    assert_eq!(tiny.resize_handle_at([10.5, 10.5]), None);
 }
