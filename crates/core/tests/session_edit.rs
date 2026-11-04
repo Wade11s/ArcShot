@@ -353,7 +353,7 @@ fn core_session_24_annotation_actions_share_the_edit_fence_and_history() {
 }
 
 #[test]
-fn core_session_25_line_and_arrow_actions_share_the_edit_fence() {
+fn core_session_26_line_and_arrow_actions_share_the_edit_fence() {
     let (mut session, ticket) = frozen();
     select(&mut session, ticket);
     let version = session.document().unwrap().version();

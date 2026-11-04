@@ -361,6 +361,31 @@ def hotkey_combo(display: str) -> str:
     return "+".join([*parts, key])
 
 
+def press_until(
+    app: str, combo: str, *, headed: bool, observe, gate=None, attempts: int = 4
+) -> None:
+    """Delivers one key until the product observes it, re-gating focus each try.
+
+    Focus can shift between the frontmost check and the physical delivery; every
+    attempt re-confirms focus (the frontmost application, or a caller-supplied
+    product gate such as `app_active surface=frozen`) before pressing. The product
+    assertion is unchanged: `observe` must still see the real effect, so a key
+    that never reaches the product still fails the case instead of being assumed.
+    """
+    for _ in range(attempts):
+        if gate is not None:
+            gate()
+        else:
+            wait_frontmost(app, 5.0)
+        press(combo, headed=headed)
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if observe():
+                return
+            time.sleep(POLL)
+    fail(f"press {combo!r} did not reach the product after {attempts} deliveries")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="ArcShot agent-desktop end-to-end check")
     parser.add_argument("--release", action="store_true")
@@ -477,8 +502,19 @@ def main() -> int:
         note("mac_e2e_03=pass menu_start=frozen own_windows=0")
 
         # MAC-E2E-05a/05b: Escape reaches the app and the session leaves Frozen.
-        press("escape", headed=True)
-        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        # The borderless overlay is not enumerated by `snapshot --surface focused`,
+        # so each delivery re-gates on the product's own activation line.
+        press_until(
+            app,
+            "escape",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "from=Frozen to=Resident action=CancelAttempt" in line
+                for line in read_log(log)[log_mark:]
+            ),
+        )
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=log_mark)
         if windows(app):
             fail(f"cancelled session left own windows: {windows(app)}")
         note("mac_e2e_05a=pass escape_delivery=headed own_windows=0")
@@ -504,7 +540,16 @@ def main() -> int:
         wait_frozen_active(log, log_mark)
         wait_log(log, "to=Frozen action=Completed", 15.0, after=log_mark)
         note(f"mac_e2e_04=pass hotkey={config} negative_control=no_capture")
-        press("escape", headed=True)
+        press_until(
+            app,
+            "escape",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "from=Frozen to=Resident action=CancelAttempt" in line
+                for line in read_log(log)[log_mark:]
+            ),
+        )
         wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=log_mark)
 
         # MAC-E2E-07: the permission notice appears and Escape closes it.
@@ -514,8 +559,7 @@ def main() -> int:
             fail(f"permission notice is not focused, refusing headed key delivery: {notice}")
         wait_frontmost(app, 5.0)
         size = notice.get("bounds", {})
-        press("escape", headed=True)
-        wait_windows(app, 0, 10.0)
+        press_until(app, "escape", headed=True, observe=lambda: not windows(app))
         note(f"mac_e2e_07=pass notice_size={size['width']}x{size['height']} escape_closed=true")
 
         # MAC-E2E-10: the notice is readable and drivable through AX alone.
@@ -600,8 +644,12 @@ def main() -> int:
             if "hotkey_launch config=" in line
         )
         temporary = "⌃⌥9" if original != "⌃⌥9" else "⌃⌥8"
-        press(hotkey_combo(temporary), headed=False)
-        wait_log(log, f"candidate={temporary}", 10.0)
+        press_until(
+            app,
+            hotkey_combo(temporary),
+            headed=True,
+            observe=lambda: any(f"candidate={temporary}" in line for line in read_log(log)),
+        )
         save = wait_node(
             app,
             lambda tree: (find_nodes(tree, native_id="arcshot.hotkey.save", require_ref=True) or [None])[0],
@@ -620,9 +668,12 @@ def main() -> int:
         recorder = find_nodes(root, native_id="arcshot.hotkey.recorder", require_ref=True)[0]
         agent("click", recorder["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
-        wait_frontmost(app, 5.0)
-        press(hotkey_combo(original), headed=False)
-        wait_log(log, f"candidate={original}", 10.0)
+        press_until(
+            app,
+            hotkey_combo(original),
+            headed=True,
+            observe=lambda: any(f"candidate={original}" in line for line in read_log(log)),
+        )
         save = wait_node(
             app,
             lambda tree: (find_nodes(tree, native_id="arcshot.hotkey.save", require_ref=True) or [None])[0],

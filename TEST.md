@@ -168,7 +168,7 @@ app 键位路由，以及覆盖层四个工具与各自悬停选项的真实 AX 
 | 文件 | 稳定 ID 与覆盖 | 不覆盖 |
 | --- | --- | --- |
 | `crates/core/tests/lines.rs` | CORE-EDIT-25～31：Line/Arrow 工具创建与方向、零长度新建拒绝、水平/垂直线有效、最上层命中与 2 点细线容差、端点改长度/方向且可重合不删除、样式矩阵（同类型才改对象）、按下时样式快照、每会话默认、选区移动携带端点/调整不缩放 | 真实指针、端点控制点命中区域 |
-| `crates/core/tests/session_edit.rs` | CORE-SESSION-25：LineOption/ArrowOption 经权威会话修改选中同类对象与工具记忆、输出在途时忽略、版本栅栏一致 | 原生事件投递 |
+| `crates/core/tests/session_edit.rs` | CORE-SESSION-26：LineOption/ArrowOption 经权威会话修改选中同类对象与工具记忆、输出在途时忽略、版本栅栏一致 | 原生事件投递 |
 | `crates/image/tests/lines.rs` | IMAGE-COMPOSE-12～18：2/3/5 点实线物理线宽、2/3/5 点虚线间距随线宽缩放、Flat 等粗线身/平尾/实心三角头、Inward 尖细尾渐宽/凹后缘（三带横截面）且每种线宽都可区分、裁剪、任意 crop 一致、固定色板 | 原生显示观感、大图压力 |
 | `crates/app/tests/key_policy.rs` | APP-KEY-13～15：Line/Arrow 工具内双击不完成、区内创建/区外重选、对象命中仍创建、Esc 分层与输出期取消、选择工具下对象命中优先 | 真实焦点与 IME |
 | `scripts/e2e-agent-desktop.py` | MAC-E2E-18～21：四个工具可寻址且 checked 互换；悬停 Line/Arrow 出现各自选项；AX 改虚线/线宽/颜色与内凹箭头后 `capture_edit` 诊断与 checked 更新；切回 Rectangle 仍保留自己的样式记忆 | 选区绘制、对象创建/端点拖动、预览像素 |
@@ -299,7 +299,10 @@ E2E 的观察合同因此是**双通道**：
    --surface focused` 对它返回 `WINDOW_NOT_FOUND`）；带标题窗口用
    `snapshot --surface focused` 的 `app` 等于被测显示名。headless `press --app` 在
    无焦点 AX 元素时必然 `ACTION_FAILED`；`--headed` 坐标点击不属于稳定断言，不能用
-   于验收。这个前置只吸收焦点竞态，不放宽对产品行为的断言。
+   于验收。这个前置只吸收焦点竞态，不放宽对产品行为的断言。同一按键在焦点竞态下
+   最多重投 4 次，每次都重新确认前置（冻结层重新等 `app_active surface=frozen`，
+   带标题窗口重新读 `snapshot --surface focused`）；只有产品自己的诊断行出现才算送达，
+   未按到仍判失败，断言本身不放宽。
 5. **AX 语义**：`AXPress` **不会**触发 `on_click`，两条路径都必须显式注册
    `on_a11y_action(AccessibleAction::Click, …)`，且两条路径入同一个 `UiQueue`；每次
    AX 激活另写一行 `a11y_action=<surface>.<control> action=Click`，E2E 以该行证明
@@ -393,7 +396,7 @@ agent-desktop press escape --headed
   `snapshot --app` 可见、可驱动。#23 的“保存”控件在有效选区且输出空闲时注册为
   `button arcshot.overlay.save`，但打开保存面板需要有效选区，而选区本身尚无 AX
   节点（需先完成拖拽）。因此 MAC-RECOVERY 的保存面板显示/取消/覆盖写仍为
-  **Not tested**，不能用 `--headed` 拖拽补足。#25 另外标注了左侧工具坞
+  **Not tested**，不能用 `--headed` 拖拽补足。#25/#26 另外标注了左侧工具坞
   （`arcshot.overlay.tool.*`）、矩形/直线/箭头各自的悬停选项
   （`arcshot.overlay.option.rectangle.*`、`.line.*`、`.arrow.*`）与有选中对象时的删除
   按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX 暴露选中态
