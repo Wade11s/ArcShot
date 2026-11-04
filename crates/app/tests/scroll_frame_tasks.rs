@@ -4,7 +4,10 @@
 //! a region capture: at most one in-flight SCK request, an absolute deadline,
 //! terminal uncertainty, and admission through the named-sRGB neutral frame
 //! constructor against the fixed display/selection/scale.
-use arcshot_app::{ScrollFrameSubmitError, ScrollFrameTasks, admit_scroll_capture};
+use arcshot_app::{
+    MAX_RAW_FRAMES, ScrollFrameQueue, ScrollFrameQueueError, ScrollFrameSubmitError,
+    ScrollFrameTasks, admit_scroll_capture, may_submit_scroll_frame,
+};
 use arcshot_core::{
     CaptureAction, CaptureEffect, CaptureFailure, CaptureSession, CapturedFrame, PixelRect,
     ScreenGeometry, scroll_frame_geometry,
@@ -229,6 +232,67 @@ fn app_frame_04_scroll_admission_rejects_malformed_dimensions_stride_and_bytes()
         ),
         Err(CaptureFailure::InvalidFrame)
     );
+}
+
+// APP-ASYNC: the raw-frame queue applies backpressure instead of dropping.
+#[test]
+fn app_async_17_raw_frame_queue_caps_at_two_and_reports_backpressure() {
+    let mut queue = ScrollFrameQueue::new();
+    assert!(queue.is_empty());
+    assert!(!queue.is_full());
+    queue.push(admitted_frame()).expect("first frame queues");
+    queue.push(admitted_frame()).expect("second frame queues");
+    assert_eq!(queue.len(), MAX_RAW_FRAMES);
+    assert!(queue.is_full());
+    // A third frame is never silently dropped: the caller gets backpressure.
+    assert_eq!(
+        queue.push(admitted_frame()),
+        Err(ScrollFrameQueueError::Backpressure)
+    );
+    assert_eq!(queue.len(), MAX_RAW_FRAMES);
+    // FIFO order is preserved when verification drains the queue.
+    assert!(queue.pop().is_some());
+    assert!(queue.pop().is_some());
+    assert!(queue.pop().is_none());
+}
+
+#[test]
+fn app_async_18_submission_policy_requires_an_idle_gate_and_short_queue() {
+    assert!(may_submit_scroll_frame(false, 0));
+    assert!(may_submit_scroll_frame(false, 1));
+    assert!(!may_submit_scroll_frame(false, MAX_RAW_FRAMES));
+    assert!(!may_submit_scroll_frame(true, 0));
+    assert!(!may_submit_scroll_frame(true, MAX_RAW_FRAMES));
+}
+
+#[test]
+fn app_async_19_cancel_clears_the_queue_without_dropping_a_new_collection() {
+    let mut queue = ScrollFrameQueue::new();
+    queue.push(admitted_frame()).expect("queued");
+    queue.clear();
+    assert!(queue.is_empty());
+    queue
+        .push(admitted_frame())
+        .expect("a later collection may queue");
+    assert_eq!(queue.len(), 1);
+}
+
+#[test]
+fn app_async_20_gate_plus_queue_allow_at_most_three_outstanding_frames() {
+    let mut queue = ScrollFrameQueue::new();
+    let mut in_flight = false;
+    // One request occupies the single gate; two more may queue behind it.
+    assert!(may_submit_scroll_frame(in_flight, queue.len()));
+    in_flight = true;
+    assert!(!may_submit_scroll_frame(in_flight, queue.len()));
+    queue.push(admitted_frame()).expect("first queued");
+    queue.push(admitted_frame()).expect("second queued");
+    assert!(!may_submit_scroll_frame(in_flight, queue.len()));
+    // Backpressure releases only after verification consumes a queued frame.
+    assert!(queue.pop().is_some());
+    assert!(!may_submit_scroll_frame(in_flight, queue.len()));
+    in_flight = false;
+    assert!(may_submit_scroll_frame(in_flight, queue.len()));
 }
 
 #[test]

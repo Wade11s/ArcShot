@@ -216,6 +216,24 @@ pub enum ScrollFrameError {
     Worker,
 }
 
+/// Why one new frame could not extend the verified stitch history (I-11 §4).
+///
+/// Every variant is a known-state stop: collection ends without output and the
+/// verified result stays available behind the explicit partial-result seam.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ScrollStitchError {
+    /// The frame geometry differs from the fixed selection or scale.
+    Geometry,
+    /// More than one vertical displacement explains the overlap exactly.
+    Ambiguous,
+    /// The overlap is not fully consistent with verified history.
+    ContentChanged,
+    /// No overlap matches: the viewport jumped a gap.
+    Gap,
+    /// The extension would exceed V1's document budget.
+    ResourceLimit,
+}
+
 /// Why Scroll preparation or collection stopped without producing output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScrollRefusal {
@@ -233,6 +251,8 @@ pub enum ScrollRefusal {
     Input(ScrollInputError),
     /// The trusted first frame could not be captured or admitted.
     Frame(ScrollFrameError),
+    /// A later frame could not be verified against the stitched history.
+    Stitch(ScrollStitchError),
 }
 
 /// Observable Scroll lifecycle, independent of the region phase.
@@ -269,6 +289,10 @@ pub enum ScrollPrepOutcome {
     CaptureFrame,
     /// The trusted first frame was admitted; collection may open.
     Collecting,
+    /// A raw collection frame was admitted; the app must verify and extend it.
+    VerifyFrame,
+    /// A frame was strictly verified; the verified preview may refresh.
+    StitchUpdated,
     /// Preparation stopped with a known-state refusal; keep the region session.
     Refused(ScrollRefusal),
     /// Preparation was cancelled; keep the region session.
@@ -289,6 +313,15 @@ pub struct ScrollPreparation {
     refusal: Option<ScrollRefusal>,
     /// The one trusted initial frame; the single-frame loop never queues a second.
     frame: Option<CapturedFrame>,
+    /// Latest verified stitched document. It starts as the origin frame and is
+    /// replaced only after the image verifier proves a unique, contiguous,
+    /// fully overlapping extension; reverse passes leave it unchanged.
+    stitch: Option<CapturedFrame>,
+    /// A raw frame admitted by the app, awaiting image verification.
+    pending_frame: Option<CapturedFrame>,
+    /// Verified extensions and de-duplicated reverse passes, for diagnostics.
+    extensions: u64,
+    duplicates: u64,
     /// The region document, stashed while a completion output runs; restored on
     /// abandon or failure so Esc always returns the pre-scroll selection.
     region_document: Option<Box<Document>>,
@@ -311,6 +344,10 @@ impl ScrollPreparation {
             exclusion: None,
             refusal: None,
             frame: None,
+            stitch: None,
+            pending_frame: None,
+            extensions: 0,
+            duplicates: 0,
             region_document: None,
         }
     }
@@ -357,6 +394,25 @@ impl ScrollPreparation {
         self.frame.as_ref()
     }
 
+    /// The latest verified stitched document; the origin frame until a later
+    /// frame is strictly verified.
+    #[must_use]
+    pub fn stitch_frame(&self) -> Option<&CapturedFrame> {
+        self.stitch.as_ref()
+    }
+
+    /// Number of verified extensions since collection opened.
+    #[must_use]
+    pub const fn extensions(&self) -> u64 {
+        self.extensions
+    }
+
+    /// Number of de-duplicated reverse passes since collection opened.
+    #[must_use]
+    pub const fn duplicates(&self) -> u64 {
+        self.duplicates
+    }
+
     /// Applies the input-protection installation result.
     ///
     /// Only valid while prepared; a success asks the app for the trusted first
@@ -374,14 +430,56 @@ impl ScrollPreparation {
     /// Admits the trusted initial frame and opens collection.
     ///
     /// Only valid while prepared and awaiting the frame; a duplicate admission
-    /// (the single-frame loop never queues a second raw frame) is ignored.
+    /// (the single-frame loop never queues a second raw frame) is ignored. The
+    /// origin is the first verified stitch document.
     pub fn admit_frame(&mut self, frame: CapturedFrame) -> ScrollPrepOutcome {
         if self.phase != ScrollPhase::Prepared {
             return ScrollPrepOutcome::Ignored;
         }
+        self.stitch = Some(frame.clone());
         self.frame = Some(frame);
         self.phase = ScrollPhase::Collecting;
         ScrollPrepOutcome::Collecting
+    }
+
+    /// Accepts one raw frame captured during collection for verification.
+    ///
+    /// Only valid while collecting; the frame is held until the app runs the
+    /// image verifier and reports the decision.
+    pub fn collect_frame(&mut self, frame: CapturedFrame) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Collecting {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.pending_frame = Some(frame);
+        ScrollPrepOutcome::VerifyFrame
+    }
+
+    /// Takes the raw frame awaiting verification, if any.
+    #[must_use]
+    pub fn take_pending_frame(&mut self) -> Option<CapturedFrame> {
+        self.pending_frame.take()
+    }
+
+    /// Stores a strictly verified stitched document.
+    pub fn verify_stitch(&mut self, frame: CapturedFrame, extended: bool) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Collecting {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.stitch = Some(frame);
+        if extended {
+            self.extensions += 1;
+        } else {
+            self.duplicates += 1;
+        }
+        ScrollPrepOutcome::StitchUpdated
+    }
+
+    /// Stops collection because a frame could not be verified.
+    pub fn refuse_stitch(&mut self, error: ScrollStitchError) -> ScrollPrepOutcome {
+        if self.phase != ScrollPhase::Collecting {
+            return ScrollPrepOutcome::Ignored;
+        }
+        self.stop_with(ScrollRefusal::Stitch(error))
     }
 
     /// Stops with a known-state refusal from collection (protection or target loss).

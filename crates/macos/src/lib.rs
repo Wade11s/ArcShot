@@ -89,6 +89,32 @@ pub fn ns_window_number(ns_view: *mut core::ffi::c_void) -> Option<u32> {
     u32::try_from(number).ok().filter(|number| *number != 0)
 }
 
+/// Makes one owned borderless window transparent to mouse events (I-11 §5).
+///
+/// The fixed live preview is non-interactive: scroll over an inner placement
+/// must still be delivered by the system to the target underneath, and no
+/// click may leak through to it. Accessibility activation is unaffected.
+///
+/// # Safety
+/// `ns_view` must be null or a live `NSView` pointer on the main thread.
+#[must_use]
+pub fn set_scroll_preview_click_through(ns_view: *mut core::ffi::c_void) -> bool {
+    let Some(_marker) = MainThreadMarker::new() else {
+        return false;
+    };
+    if ns_view.is_null() {
+        return false;
+    }
+    // SAFETY: The caller guarantees a live NSView on the main thread; the
+    // borrowed window is retained only for this synchronous setter.
+    let view: &NSView = unsafe { &*ns_view.cast::<NSView>() };
+    let Some(window) = view.window() else {
+        return false;
+    };
+    window.setIgnoresMouseEvents(true);
+    window.ignoresMouseEvents()
+}
+
 /// Commands queued by native menu actions for later consumption by the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuCommand {

@@ -3,24 +3,24 @@ use crate::{
     MenuBarGlobal,
     ui::{
         CaptureView, HotkeyView, NoticeView, OverlayPreview, ScrollControlView,
-        ScrollPermissionView, TextEditMirror, UiCommand, UiQueue,
+        ScrollPermissionView, ScrollPreviewView, TextEditMirror, UiCommand, UiQueue,
     },
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, DensityWriteOutcome, GuideHistory, HotkeyAction,
     HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError,
     OutputTasks, PendingSave, PermissionAction, PermissionEffect, PermissionFlow,
-    PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice,
+    PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice, ScrollFrameQueue,
     ScrollFrameSubmitError, ScrollFrameTasks, ScrollPermissionAction, ScrollPermissionEffect,
     ScrollPermissionFlow, ScrollPermissionNotice, ScrollTapCommand, ScrollTargetTasks,
-    encode_document, scroll_tap_action,
+    encode_document, may_submit_scroll_frame, scroll_tap_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CaptureAction, CaptureEffect,
     CaptureFailure, CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, Density, Document,
     FrameError, LineStyle, OutputFailure, OutputJob, PixelRect, RectangleStyle, SavePanelResult,
-    ScreenGeometry, ScrollInputError, ScrollPhase, ScrollRefusal, ScrollTargetError,
-    ScrollWindowError, TextStyle, Tool,
+    ScreenGeometry, ScrollInputError, ScrollPhase, ScrollRefusal, ScrollStitchError,
+    ScrollTargetError, ScrollWindowError, Selection, TextStyle, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -63,12 +63,30 @@ const SCROLL_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 /// Cadence of the public target-integrity re-check during collection; not a
 /// performance assertion, just a slow poll of public window state.
 const SCROLL_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+/// Fixed live preview size in logical points (I-11 §5). The window is opened
+/// once during preparation and never moved or rebuilt during collection.
+const SCROLL_PREVIEW_WIDTH: f64 = 600.0;
+const SCROLL_PREVIEW_HEIGHT: f64 = 400.0;
+const SCROLL_PREVIEW_MARGIN: f64 = 12.0;
+/// V1 cap on the preview image itself, in physical pixels (I-13).
+const SCROLL_PREVIEW_MAX_PIXELS: usize = arcshot_image::MAX_PREVIEW_PIXELS;
+/// Presentation-only throttle for the fixed live preview refresh.
+const SCROLL_PREVIEW_THROTTLE: Duration = Duration::from_millis(80);
 
 /// One deferred input-protection installation after native preparation.
 #[derive(Debug)]
 struct PendingScrollInput {
     ticket: CaptureTicket,
     started: Instant,
+}
+
+/// Which core handshake owns a frame request and classifies its failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollFrameRoute {
+    /// The trusted initial frame, which opens collection.
+    Initial,
+    /// A later raw frame, which must be verified against history.
+    Collected,
 }
 
 struct Coordinator {
@@ -111,6 +129,21 @@ struct Coordinator {
     scroll_notice: Option<WindowHandle<ScrollPermissionView>>,
     /// The minimal control UI that stays visible during Scroll preparation.
     scroll_control: Option<WindowHandle<ScrollControlView>>,
+    /// The fixed live verified preview; it never moves or rebuilds during
+    /// collection, only its content updates in place (I-11 §5).
+    scroll_preview: Option<WindowHandle<ScrollPreviewView>>,
+    /// Strict vertical verifier/compositor for the current collection.
+    scroll_stitch: Option<arcshot_image::StitchBuilder>,
+    /// Bounded raw frames awaiting verification (backpressure, never drops).
+    scroll_raw_queue: ScrollFrameQueue,
+    /// Where the fixed preview was placed: right, left or inner bottom-right.
+    scroll_preview_place: &'static str,
+    /// Exact public window number of the fixed preview window, read from its
+    /// live NSView before collection opens.
+    scroll_preview_id: Rc<RefCell<Option<u32>>>,
+    /// Throttle for in-place preview refreshes; verification itself is never
+    /// throttled. This is presentation cadence, not a capture sampling rate.
+    scroll_preview_last: Option<Instant>,
     /// Bounded worker for the Scroll target probe.
     scroll_target_tasks: ScrollTargetTasks,
     /// Deferred own-window exclusion probe; gives the control window time to register.
@@ -202,6 +235,12 @@ pub(crate) fn launch(cx: &mut App) {
         scroll_permissions: ScrollPermissionFlow::default(),
         scroll_notice: None,
         scroll_control: None,
+        scroll_preview: None,
+        scroll_stitch: None,
+        scroll_raw_queue: ScrollFrameQueue::new(),
+        scroll_preview_place: "none",
+        scroll_preview_id: Rc::new(RefCell::new(None)),
+        scroll_preview_last: None,
         scroll_target_tasks: ScrollTargetTasks::default(),
         pending_scroll_exclusion: None,
         pending_scroll_input: None,
@@ -508,6 +547,7 @@ impl Coordinator {
             .as_ref()
             .and_then(|(ticket, tap)| tap.take_command().map(|command| (*ticket, command)));
         if let Some((ticket, command)) = tap_report {
+            log::info!("scroll_tap_command ticket={ticket:?} command={command:?}");
             match command {
                 native::TapGateCommand::ProtectionLost => {
                     log::warn!("scroll_input_protection_lost");
@@ -532,8 +572,18 @@ impl Coordinator {
             }
         }
         if let Some((ticket, result)) = self.scroll_frame_tasks.poll(Instant::now()) {
-            self.action(CaptureAction::ScrollFrameAdmitted { ticket, result }, cx);
+            if self.session.scroll_phase() == ScrollPhase::Prepared {
+                // The trusted initial frame opens collection; it never enters
+                // the raw queue or the verifier.
+                self.action(CaptureAction::ScrollFrameAdmitted { ticket, result }, cx);
+            } else {
+                self.handle_scroll_frame_result(ticket, result, cx);
+            }
         }
+        // One bounded request at a time, at most two raw frames queued. New
+        // requests are submitted only while collection is live and no output
+        // owns the completion snapshot (I-13 backpressure).
+        self.pump_scroll_frames(cx);
         // Slow public re-check of the locked target during collection: the
         // target must stay on screen, unchanged and in the foreground.
         if self.session.scroll_phase() == ScrollPhase::Collecting
@@ -645,9 +695,15 @@ impl Coordinator {
             && self.scroll_notice.is_none()
         {
             self.close_scroll_control(cx);
+            self.close_scroll_preview(cx);
             self.pending_scroll_input = None;
             self.pending_scroll_exclusion = None;
             self.scroll_target_checked = None;
+            self.scroll_raw_queue.clear();
+            self.scroll_stitch = None;
+            self.scroll_preview_place = "none";
+            self.scroll_preview_last = None;
+            self.scroll_preview_id.borrow_mut().take();
             self.retire_scroll_tap();
             // The status item was hidden for collection so no menu could open
             // behind the protection; it returns the moment Scroll is inactive.
@@ -1153,7 +1209,14 @@ impl Coordinator {
                     });
                 }
                 CaptureEffect::CaptureScrollFrame(ticket) => {
-                    self.submit_scroll_frame(ticket, cx);
+                    self.submit_scroll_frame(ticket, cx, ScrollFrameRoute::Initial);
+                }
+                CaptureEffect::VerifyScrollFrame(ticket) => {
+                    self.verify_pending_scroll_frame(ticket, cx);
+                }
+                CaptureEffect::ScrollPreviewUpdated(ticket) => {
+                    let _ = ticket;
+                    self.refresh_scroll_preview(cx);
                 }
                 CaptureEffect::ScrollCollecting(ticket) => {
                     self.open_scroll_collection(ticket, cx);
@@ -1574,6 +1637,11 @@ impl Coordinator {
         self.open_scroll_control(ticket, cx);
         let available = native::scroll_permissions();
         self.log_scroll_permissions(available);
+        // The fixed preview window must exist before the own-window exclusion
+        // set is mapped, so it opens during preparation, never mid-collection.
+        if available.all_available() {
+            self.open_scroll_preview(cx);
+        }
         self.action(
             CaptureAction::ScrollPermissionsChecked { ticket, available },
             cx,
@@ -1662,6 +1730,9 @@ impl Coordinator {
     ) {
         log::info!("scroll_refused reason={}", scroll_refusal_reason(&refusal));
         self.close_scroll_control(cx);
+        self.close_scroll_preview(cx);
+        self.scroll_stitch = None;
+        self.scroll_raw_queue.clear();
         match &refusal {
             ScrollRefusal::Permissions(_) => {
                 self.scroll_restore = Some(ticket);
@@ -1846,9 +1917,86 @@ impl Coordinator {
         }
     }
 
+    /// Opens the one fixed live preview window during preparation.
+    ///
+    /// Placement prefers the right of the selection, then the left, otherwise
+    /// the selection's inner bottom-right (I-11 §5). The window set is fixed
+    /// here; collection only updates the image it presents.
+    fn open_scroll_preview(&mut self, cx: &mut Context<Self>) {
+        if self.scroll_preview.is_some() {
+            return;
+        }
+        self.scroll_preview_id.borrow_mut().take();
+        let Some(selection) = self.session.scroll_selection() else {
+            return;
+        };
+        let Ok(display) = native::builtin_display() else {
+            log::error!("scroll_preview_display_unavailable");
+            return;
+        };
+        let placement = scroll_preview_placement(selection, &display);
+        let preview_id = Rc::clone(&self.scroll_preview_id);
+        let result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(placement.bounds)),
+                kind: WindowKind::PopUp,
+                titlebar: None,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                // The preview is non-interactive: mouse events must reach the
+                // target underneath, while accessibility activation is kept.
+                let ns_view = raw_window_handle::HasWindowHandle::window_handle(window)
+                    .ok()
+                    .and_then(|handle| match handle.as_raw() {
+                        raw_window_handle::RawWindowHandle::AppKit(handle) => {
+                            Some(handle.ns_view.as_ptr().cast::<core::ffi::c_void>())
+                        }
+                        _ => None,
+                    });
+                let click_through = ns_view
+                    .map(native::set_scroll_preview_click_through)
+                    .unwrap_or(false);
+                let number = ns_view.and_then(native::ns_window_number);
+                *preview_id.borrow_mut() = number;
+                log::info!("scroll_preview_window number={number:?} click_through={click_through}");
+                cx.new(|_| ScrollPreviewView { image: None })
+            },
+        );
+        match result {
+            Ok(handle) => {
+                self.scroll_preview = Some(handle);
+                self.scroll_preview_place = placement.place;
+                log::info!(
+                    "scroll_preview placed={} frame=[{:.0},{:.0},{:.0},{:.0}]",
+                    placement.place,
+                    f32::from(placement.bounds.origin.x),
+                    f32::from(placement.bounds.origin.y),
+                    f32::from(placement.bounds.size.width),
+                    f32::from(placement.bounds.size.height)
+                );
+            }
+            Err(error) => log::error!("scroll_preview_window_failure={error}"),
+        }
+    }
+
+    fn close_scroll_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.scroll_preview.take() {
+            let _ = handle.update(cx, |view, window, cx| {
+                view.set_image(None, window);
+                cx.notify();
+                window.remove_window();
+            });
+        }
+    }
+
     /// Closes every Scroll-owned window; the region session is untouched.
     fn close_scroll_ui(&mut self, cx: &mut Context<Self>) {
         self.close_scroll_control(cx);
+        self.close_scroll_preview(cx);
         self.close_scroll_notice(cx);
     }
 
@@ -1933,34 +2081,50 @@ impl Coordinator {
             refuse_input(self, ScrollInputError::TapUnavailable, cx);
             return;
         }
+        // A window from the preparation-time set (for example the dismissed
+        // region overlay) may still be leaving the WindowServer. That is not a
+        // reason to fail; wait until exactly the control + fixed preview set
+        // remains. An unknown live window was already refused above.
         let Some(control_id) = *self.scroll_control_id.borrow() else {
             log::error!("scroll_control_window_missing");
             refuse_input(self, ScrollInputError::TapUnavailable, cx);
             return;
         };
-        if ids.as_slice() != [control_id] {
+        let Some(preview_id) = *self.scroll_preview_id.borrow() else {
+            log::error!("scroll_preview_window_missing");
+            refuse_input(self, ScrollInputError::TapUnavailable, cx);
+            return;
+        };
+        if ids.len() != 2 || !ids.contains(&control_id) || !ids.contains(&preview_id) {
+            // A dismissed region overlay can take a few run-loop turns to
+            // leave the WindowServer. Wait under the same absolute deadline
+            // for exactly the control + fixed preview set; an unknown window
+            // is already refused above.
             log::info!(
-                "scroll_input_waiting_for_overlay_exit live={} control={control_id}",
+                "scroll_input_waiting_for_window_settle live={} control={control_id} preview={preview_id}",
                 ids.len()
             );
             self.pending_scroll_input = Some(pending);
             return;
         }
-        // The single still-visible own window is the exclusion array used for
-        // every collected frame, fixed here immediately before collection.
+        // These are the exclusion arrays used for every collected frame, fixed
+        // here immediately before collection: the control UI plus the fixed
+        // live preview, never a window created mid-collection.
         self.scroll_capture_exclusion = ids.clone();
         log::info!(
-            "scroll_exclusion_fixed prepared={} collecting={} control={control_id}",
+            "scroll_exclusion_fixed prepared={} collecting={} control={control_id} preview={preview_id}",
             self.scroll_exclusion.len(),
             ids.len()
         );
-        let control = match native::owned_visible_window_frames(&ids).as_deref() {
-            Ok([(_, frame)]) => *frame,
-            Ok(frames) => {
-                log::error!("scroll_input_owned_windows={}", frames.len());
-                refuse_input(self, ScrollInputError::TapUnavailable, cx);
-                return;
-            }
+        let control = match native::owned_visible_window_frames(&ids) {
+            Ok(frames) => match frames.iter().find(|(id, _)| *id == control_id) {
+                Some((_, frame)) => *frame,
+                None => {
+                    log::error!("scroll_input_owned_windows={}", frames.len());
+                    refuse_input(self, ScrollInputError::TapUnavailable, cx);
+                    return;
+                }
+            },
             Err(error) => {
                 log::error!("scroll_input_frame_failure={error:?}");
                 refuse_input(self, ScrollInputError::TapUnavailable, cx);
@@ -1993,8 +2157,29 @@ impl Coordinator {
         }
     }
 
-    /// Submits the one trusted-initial-frame request (I-12 admission contract).
-    fn submit_scroll_frame(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+    /// Submits one fixed-crop native frame request under the single gate.
+    ///
+    /// The route decides whether a pre-request failure stops preparation or
+    /// stops an open collection; the capture, admission and probe are shared.
+    fn submit_scroll_frame(
+        &mut self,
+        ticket: CaptureTicket,
+        cx: &mut Context<Self>,
+        route: ScrollFrameRoute,
+    ) {
+        let failure = |coordinator: &mut Self, failure: CaptureFailure, cx: &mut Context<Self>| {
+            let action = match route {
+                ScrollFrameRoute::Initial => CaptureAction::ScrollFrameAdmitted {
+                    ticket,
+                    result: Err(failure),
+                },
+                ScrollFrameRoute::Collected => CaptureAction::ScrollFrameCollected {
+                    ticket,
+                    result: Err(failure),
+                },
+            };
+            coordinator.action(action, cx);
+        };
         let Some(document) = self.session.document() else {
             return;
         };
@@ -2004,23 +2189,11 @@ impl Coordinator {
         let region = document.frame().geometry();
         let Ok(crop) = selection.pixel_rect(region) else {
             log::error!("scroll_frame_crop_invalid");
-            self.action(
-                CaptureAction::ScrollFrameAdmitted {
-                    ticket,
-                    result: Err(CaptureFailure::InvalidFrame),
-                },
-                cx,
-            );
+            failure(self, CaptureFailure::InvalidFrame, cx);
             return;
         };
         let Ok(display) = native::builtin_display() else {
-            self.action(
-                CaptureAction::ScrollFrameAdmitted {
-                    ticket,
-                    result: Err(CaptureFailure::DisplayInvalid),
-                },
-                cx,
-            );
+            failure(self, CaptureFailure::DisplayInvalid, cx);
             return;
         };
         let exclusion = self.scroll_capture_exclusion.clone();
@@ -2064,19 +2237,168 @@ impl Coordinator {
                 log::warn!("scroll_frame_submit_busy");
             }
             Err(ScrollFrameSubmitError::RelaunchRequired) => {
+                failure(self, CaptureFailure::NativeUncertain, cx);
+            }
+            Err(ScrollFrameSubmitError::WorkerUnavailable) => {
+                failure(self, CaptureFailure::WorkerUnavailable, cx);
+            }
+        }
+    }
+
+    /// Routes one finished native request into the bounded queue or the
+    /// authoritative collector.
+    fn handle_scroll_frame_result(
+        &mut self,
+        ticket: CaptureTicket,
+        result: Result<CapturedFrame, CaptureFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        let collecting = self.session.scroll_phase() == ScrollPhase::Collecting
+            && !self.session.output_busy()
+            && self
+                .scroll_tap
+                .as_ref()
+                .is_some_and(|(active, _)| *active == ticket);
+        if !collecting {
+            // Late results are fenced by the session version/ticket; they are
+            // discarded with a diagnostic, never queued into a new session.
+            log::info!("scroll_frame_stale ticket={ticket:?}");
+            return;
+        }
+        match result {
+            Ok(frame) => {
+                if let Err(error) = self.scroll_raw_queue.push(frame) {
+                    log::error!("scroll_frame_backpressure={error}");
+                    self.action(
+                        CaptureAction::ScrollFrameCollected {
+                            ticket,
+                            result: Err(CaptureFailure::ResourceLimit),
+                        },
+                        cx,
+                    );
+                }
+            }
+            Err(failure) => {
                 self.action(
-                    CaptureAction::ScrollFrameAdmitted {
+                    CaptureAction::ScrollFrameCollected {
                         ticket,
-                        result: Err(CaptureFailure::NativeUncertain),
+                        result: Err(failure),
                     },
                     cx,
                 );
             }
-            Err(ScrollFrameSubmitError::WorkerUnavailable) => {
+        }
+        self.drain_scroll_raw_queue(cx);
+    }
+
+    /// Verifies one queued raw frame at a time; stopping clears the rest.
+    fn drain_scroll_raw_queue(&mut self, cx: &mut Context<Self>) {
+        while self.session.scroll_phase() == ScrollPhase::Collecting && !self.session.output_busy()
+        {
+            let Some(ticket) = self.scroll_tap.as_ref().map(|(ticket, _)| *ticket) else {
+                break;
+            };
+            let Some(frame) = self.scroll_raw_queue.pop() else {
+                break;
+            };
+            self.action(
+                CaptureAction::ScrollFrameCollected {
+                    ticket,
+                    result: Ok(frame),
+                },
+                cx,
+            );
+        }
+        if self.session.scroll_phase() != ScrollPhase::Collecting || self.session.output_busy() {
+            self.scroll_raw_queue.clear();
+        }
+    }
+
+    /// Submits another request only while the gate is idle and the bounded
+    /// raw queue is not full (I-13 backpressure).
+    fn pump_scroll_frames(&mut self, cx: &mut Context<Self>) {
+        if self.session.scroll_phase() != ScrollPhase::Collecting || self.session.output_busy() {
+            return;
+        }
+        let Some(ticket) = self.scroll_tap.as_ref().map(|(ticket, _)| *ticket) else {
+            return;
+        };
+        if may_submit_scroll_frame(self.scroll_frame_tasks.busy(), self.scroll_raw_queue.len()) {
+            self.submit_scroll_frame(ticket, cx, ScrollFrameRoute::Collected);
+        }
+    }
+
+    /// Runs the strict image verifier on the held raw frame and reports the
+    /// decision to the authoritative session.
+    fn verify_pending_scroll_frame(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        let Some(frame) = self.session.take_scroll_pending_frame() else {
+            return;
+        };
+        let result = match self.scroll_stitch.as_mut() {
+            Some(builder) => builder.submit(&frame),
+            None => {
+                log::error!("scroll_stitch_missing");
                 self.action(
-                    CaptureAction::ScrollFrameAdmitted {
+                    CaptureAction::ScrollStitchRefused {
                         ticket,
-                        result: Err(CaptureFailure::WorkerUnavailable),
+                        error: ScrollStitchError::Geometry,
+                    },
+                    cx,
+                );
+                return;
+            }
+        };
+        match result {
+            Ok(arcshot_image::StitchDecision::Extended {
+                placement,
+                added_rows,
+            }) => {
+                let (top, bottom, extensions, duplicates) =
+                    self.scroll_stitch.as_ref().map_or((0, 0, 0, 0), |builder| {
+                        (
+                            builder.top(),
+                            builder.bottom(),
+                            builder.extensions(),
+                            builder.duplicates(),
+                        )
+                    });
+                log::info!(
+                    "scroll_stitch extended offset={} added_rows={} top={} bottom={} extensions={} duplicates={}",
+                    placement.offset,
+                    added_rows,
+                    top,
+                    bottom,
+                    extensions,
+                    duplicates
+                );
+                self.report_verified(ticket, true, cx);
+            }
+            Ok(arcshot_image::StitchDecision::Duplicate { placement }) => {
+                let (top, bottom, extensions, duplicates) =
+                    self.scroll_stitch.as_ref().map_or((0, 0, 0, 0), |builder| {
+                        (
+                            builder.top(),
+                            builder.bottom(),
+                            builder.extensions(),
+                            builder.duplicates(),
+                        )
+                    });
+                log::info!(
+                    "scroll_stitch duplicate offset={} top={} bottom={} extensions={} duplicates={}",
+                    placement.offset,
+                    top,
+                    bottom,
+                    extensions,
+                    duplicates
+                );
+                self.report_verified(ticket, false, cx);
+            }
+            Err(refusal) => {
+                log::info!("scroll_stitch_refused reason={refusal}");
+                self.action(
+                    CaptureAction::ScrollStitchRefused {
+                        ticket,
+                        error: map_stitch_refusal(refusal),
                     },
                     cx,
                 );
@@ -2084,9 +2406,101 @@ impl Coordinator {
         }
     }
 
-    /// Opens collection: raw scroll inside the fixed selection is released and
-    /// the control UI states the concise operation hint (I-11 §5).
+    /// Hands a verified stitched document to the session.
+    fn report_verified(&mut self, ticket: CaptureTicket, extended: bool, cx: &mut Context<Self>) {
+        let verified = self
+            .scroll_stitch
+            .as_ref()
+            .and_then(|builder| builder.current_frame().ok());
+        match verified {
+            Some(frame) => self.action(
+                CaptureAction::ScrollStitchVerified {
+                    ticket,
+                    frame,
+                    extended,
+                },
+                cx,
+            ),
+            None => self.action(
+                CaptureAction::ScrollStitchRefused {
+                    ticket,
+                    error: ScrollStitchError::ResourceLimit,
+                },
+                cx,
+            ),
+        }
+    }
+
+    /// Refreshes the fixed preview window in place from verified history.
+    fn refresh_scroll_preview(&mut self, cx: &mut Context<Self>) {
+        if self.session.scroll_phase() != ScrollPhase::Collecting {
+            return;
+        }
+        let Some(builder) = self.scroll_stitch.as_ref() else {
+            return;
+        };
+        let Some(preview) = builder.preview(SCROLL_PREVIEW_MAX_PIXELS) else {
+            return;
+        };
+        let Some(handle) = self.scroll_preview else {
+            return;
+        };
+        if self
+            .scroll_preview_last
+            .is_some_and(|last| last.elapsed() < SCROLL_PREVIEW_THROTTLE)
+        {
+            return;
+        }
+        self.scroll_preview_last = Some(Instant::now());
+        let image = image::RgbaImage::from_raw(preview.width, preview.height, preview.bgra.clone())
+            .map(|buffer| Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
+        let _ = handle.update(cx, |view, window, cx| {
+            view.set_image(image, window);
+            cx.notify();
+        });
+        log::info!(
+            "scroll_preview_updated place={} pixels={}x{} document={}x{} extensions={} duplicates={}",
+            self.scroll_preview_place,
+            preview.width,
+            preview.height,
+            builder.width(),
+            builder.height(),
+            builder.extensions(),
+            builder.duplicates()
+        );
+    }
+
+    /// Opens collection: raw scroll inside the fixed selection is released,
+    /// the strict verifier starts at the trusted origin, and the control UI
+    /// states the concise operation hint (I-11 §5).
     fn open_scroll_collection(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        match self.session.scroll_frame().cloned() {
+            Some(origin) => match arcshot_image::StitchBuilder::new(&origin) {
+                Ok(builder) => self.scroll_stitch = Some(builder),
+                Err(error) => {
+                    log::error!("scroll_stitch_origin_failure={error}");
+                    self.action(
+                        CaptureAction::ScrollStitchRefused {
+                            ticket,
+                            error: map_stitch_refusal(error),
+                        },
+                        cx,
+                    );
+                    return;
+                }
+            },
+            None => {
+                log::error!("scroll_stitch_origin_missing");
+                self.action(
+                    CaptureAction::ScrollStitchRefused {
+                        ticket,
+                        error: ScrollStitchError::Geometry,
+                    },
+                    cx,
+                );
+                return;
+            }
+        }
         if let Some(selection) = self.session.scroll_selection()
             && let Some(display) = native::builtin_display().ok()
             && let Some((_, tap)) = self.scroll_tap.as_ref()
@@ -2105,6 +2519,11 @@ impl Coordinator {
             cx,
         );
         log::info!("scroll_collecting ticket={ticket:?}");
+        // The origin is already verified: show it immediately, then start the
+        // bounded request loop (at most one in-flight request and two queued).
+        self.scroll_preview_last = None;
+        self.refresh_scroll_preview(cx);
+        self.pump_scroll_frames(cx);
     }
 
     /// Drains and retires the session tap once Scroll is inactive.
@@ -2461,6 +2880,7 @@ fn scroll_refusal_reason(refusal: &ScrollRefusal) -> String {
         ScrollRefusal::Windows(error) => format!("Windows {error:?}"),
         ScrollRefusal::Input(error) => format!("Input {error:?}"),
         ScrollRefusal::Frame(error) => format!("Frame {error:?}"),
+        ScrollRefusal::Stitch(error) => format!("Stitch {error:?}"),
     }
 }
 
@@ -2522,6 +2942,75 @@ fn scroll_refusal_message(refusal: &ScrollRefusal) -> &'static str {
         ScrollRefusal::Frame(arcshot_core::ScrollFrameError::Worker) => {
             "无法启动滚动截图工作线程，未产生输出；可重试。"
         }
+        ScrollRefusal::Stitch(ScrollStitchError::Geometry) => {
+            "拼接帧几何与选区不一致，已停止采集；未产生输出。"
+        }
+        ScrollRefusal::Stitch(ScrollStitchError::Ambiguous) => {
+            "滚动位移无法唯一确认，已停止采集；未产生输出。"
+        }
+        ScrollRefusal::Stitch(ScrollStitchError::ContentChanged) => {
+            "已采集内容在重叠区域发生变化，无法可靠拼接；未产生输出。"
+        }
+        ScrollRefusal::Stitch(ScrollStitchError::Gap) => {
+            "滚动出现无法验证的缺口，已停止采集；未产生输出。"
+        }
+        ScrollRefusal::Stitch(ScrollStitchError::ResourceLimit) => {
+            "滚动拼接超出尺寸/内存预算，已停止采集；未产生输出。"
+        }
+    }
+}
+
+/// The fixed preview window's resolved placement and bounds.
+struct ScrollPreviewPlacement {
+    bounds: Bounds<gpui::Pixels>,
+    place: &'static str,
+}
+
+/// Resolves the three documented preview positions against the selection and
+/// the built-in display. Right is preferred, then left, otherwise the
+/// selection's inner bottom-right; the result is clamped on screen.
+fn scroll_preview_placement(
+    selection: Selection,
+    display: &DisplaySnapshot,
+) -> ScrollPreviewPlacement {
+    let width = SCROLL_PREVIEW_WIDTH;
+    let height = SCROLL_PREVIEW_HEIGHT;
+    let right_x = selection.x() + selection.width() + SCROLL_PREVIEW_MARGIN;
+    let left_x = selection.x() - SCROLL_PREVIEW_MARGIN - width;
+    let (x, place) = if right_x + width <= display.width {
+        (right_x, "right")
+    } else if left_x >= 0.0 {
+        (left_x, "left")
+    } else {
+        (selection.x() + selection.width() - width, "inner")
+    };
+    let mut y = if place == "inner" {
+        selection.y() + selection.height() - height
+    } else {
+        selection.y()
+    };
+    if y + height > display.height {
+        y = display.height - height;
+    }
+    let y = y.max(0.0);
+    let x = x.max(0.0);
+    ScrollPreviewPlacement {
+        bounds: Bounds {
+            origin: Point::new(px(x as f32), px(y as f32)),
+            size: size(px(width as f32), px(height as f32)),
+        },
+        place,
+    }
+}
+
+/// Maps the image verifier's refusal onto the authoritative semantic error.
+fn map_stitch_refusal(refusal: arcshot_image::StitchRefusal) -> ScrollStitchError {
+    match refusal {
+        arcshot_image::StitchRefusal::Geometry => ScrollStitchError::Geometry,
+        arcshot_image::StitchRefusal::Ambiguous => ScrollStitchError::Ambiguous,
+        arcshot_image::StitchRefusal::ContentChanged => ScrollStitchError::ContentChanged,
+        arcshot_image::StitchRefusal::Gap => ScrollStitchError::Gap,
+        arcshot_image::StitchRefusal::ResourceLimit => ScrollStitchError::ResourceLimit,
     }
 }
 
@@ -2596,6 +3085,9 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::ScrollWindowsPrepared { .. } => "ScrollWindowsPrepared",
         CaptureAction::ScrollInputInstalled { .. } => "ScrollInputInstalled",
         CaptureAction::ScrollFrameAdmitted { .. } => "ScrollFrameAdmitted",
+        CaptureAction::ScrollFrameCollected { .. } => "ScrollFrameCollected",
+        CaptureAction::ScrollStitchVerified { .. } => "ScrollStitchVerified",
+        CaptureAction::ScrollStitchRefused { .. } => "ScrollStitchRefused",
         CaptureAction::ScrollInputLost { .. } => "ScrollInputLost",
         CaptureAction::ScrollTargetLost { .. } => "ScrollTargetLost",
         CaptureAction::CompleteScroll { .. } => "CompleteScroll",

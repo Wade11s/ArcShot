@@ -21,7 +21,10 @@ pub use scroll_flow::{
 mod scroll_target_tasks;
 pub use scroll_target_tasks::{ScrollTargetSubmitError, ScrollTargetTasks};
 mod scroll_frame_tasks;
-pub use scroll_frame_tasks::{ScrollFrameSubmitError, ScrollFrameTasks, admit_scroll_capture};
+pub use scroll_frame_tasks::{
+    MAX_RAW_FRAMES, ScrollFrameQueue, ScrollFrameQueueError, ScrollFrameSubmitError,
+    ScrollFrameTasks, admit_scroll_capture, may_submit_scroll_frame,
+};
 mod scroll_input_flow;
 pub use scroll_input_flow::{ScrollTapCommand, scroll_tap_action};
 mod output_publish;
