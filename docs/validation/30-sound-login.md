@@ -11,10 +11,10 @@
 
 - 基线：`spec/v1` = `52790c2`（含 #25 Rectangle 工具切片）；本票提交从 `9ba5641`
   起算，合并后实测。
-- 实测实现/脚本 SHA：`5c57bc9a3dcf4562e4aa15f9907b9b3608e11433`（本票功能 +
-  `scripts/check-startup.sh` + `scripts/e2e-agent-desktop.py` + `TEST.md` 合并提交）；
-  后续提交只增加本证据文档。
-- 时间：2026-11-04T05:58:15Z（Debug E2E 本轮启动）与 2026-11-04T06:00:09Z
+- 实测实现/脚本 SHA：`efa3b7a395080733a902d76bf583454ddaa248b3`（本票功能 +
+  `scripts/check-startup.sh` + `scripts/e2e-agent-desktop.py` + `TEST.md`，含合并
+  #25 后的焦点前置修正）；后续提交只增加本证据文档。
+- 时间：2026-11-04T06:07:07Z（Debug E2E 本轮完成）与 2026-11-04T06:09:10Z
   （`scripts/check-all.sh` 完成）。
 - 构建配置：Debug 与 Release。Debug 为 `dev.arcshot.app.debug` / `ArcShot Debug`，
   Release 为 `dev.arcshot.app` / `ArcShot`；均由 `scripts/build-app.sh` 重建，
@@ -88,14 +88,17 @@ CORE-SESSION-24～25、APP-EFFECT-27～32、MAC-START-30-02）、验证工具/�
 | ID | 前置/步骤 | 预期 | 实际 | 结果 |
 | --- | --- | --- | --- | --- |
 | MAC-E2E-01（更新） | 启动 Debug bundle 后 `snapshot --surface menu-bar-extras` | 状态项菜单六项，`native_id` 为 selector | `mac_e2e_01=pass menu_items=6 refs=7`；依次 `startCapture:`、`hotkeySettings:`、`screenRecordingPermissions:`、`toggleCompletionSound:`、`toggleLaunchAtLogin:`、`terminate:` | Pass |
+| MAC-E2E-05a/05b（前置更新） | 冻结后等产品报告 `app_active surface=frozen`，再 `press escape --headed` | 只有真正前台后才投递；Esc 后相位回 Resident | 日志出现 `capture_wake_window_submit_us=492281` 后 `app_active surface=frozen`，随后 `from=Frozen to=Resident action=CancelAttempt` | Pass |
 | MAC-E2E-15 | 读 `preferences_launch completion_sound=true`；headless 点击 完成音效 两次 | 每次写 `completion_sound enabled=… persisted=true`，值先翻转再还原 | `mac_e2e_15=pass sound=true->false->true selector=toggleCompletionSound:`；日志出现 `completion_sound enabled=false persisted=true` 与 `… enabled=true persisted=true` | Pass |
 | MAC-E2E-16 | 切到 false → 菜单退出 → 重启 → 读取 → 切回 true → 退出 → 重启 → 读取 | 两次重启分别恢复 false 与 true；结束时用户偏好还原；始终单实例 | `mac_e2e_16=pass restart_restored=false restart_restored=true preference=local`；重启日志首行分别为 `preferences_launch completion_sound=false`、`…=true` | Pass |
 | MAC-E2E-17 | MAC-E2E-01 打开状态菜单后读日志 | 出现 `login_item_status … source=menu`，与 `source=launch` 一致；全程没有 `login_item_set` | `mac_e2e_17=pass login_item_actual=Disabled source=menu source=launch read_only=true` | Pass |
-| MAC-E2E-02～12、13～14 | 既有驻留/捕获/取消/权限提示/热键/覆盖层与 #25 工具坞用例 | 原行为不变 | `mac_e2e_02…05b`、`07`、`10`、`06`、`11`、`13`、`14`、`12` 全部 `pass`；结尾 `mac_e2e=pass configuration=debug … cases=17` | Pass |
+| MAC-E2E-02～12、13～14 | 既有驻留/捕获/取消/权限提示/热键/覆盖层与 #25 工具坞用例；录制组合前要求 `snapshot --surface focused` 的 `app` 是被测显示名 | 原行为不变 | `mac_e2e_02…05b`、`07`、`10`、`06`、`11`、`13`、`14`、`12` 全部 `pass`；结尾 `mac_e2e=pass configuration=debug … cases=17` | Pass |
 
 被引用的产品 stderr 原文（同一轮，来自 `target/e2e-agent-desktop-debug*.log`）：
 
 ```text
+level=INFO target=arcshot::coordinator capture_wake_window_submit_us=492281 pixels=[2940, 1912]
+level=INFO target=arcshot::coordinator app_active surface=frozen
 level=INFO target=arcshot::coordinator preferences_launch completion_sound=true
 level=INFO target=arcshot_macos login_item_status state=Disabled source=menu
 level=INFO target=arcshot::coordinator completion_sound enabled=false persisted=true
@@ -115,6 +118,13 @@ level=INFO target=arcshot::coordinator preferences_launch completion_sound=true
 
 - “完成音效关闭”只证明 core 不再发出 `PlayCompletionSound` 效果：没有成功文字或
   通知，失败仍走 `ReportOutputFailure`。真实静音与音量属于实机观感，未测量。
+- 焦点前置是实跑中补出来的：同一份代码上曾有两轮 E2E 分别卡在 `press escape
+  --headed` 与录制组合没有被设置窗口接收，日志停在该会话的 `Frozen`/等待候选。
+  根因是 `--headed` 按键与 headless 录制键依赖前台焦点，而脚本只按日志顺序投递；
+  产品侧因此补了 `app_active surface=frozen` 一次性诊断行，脚本在覆盖层用它、
+  在带标题窗口用 `snapshot --surface focused` 挡在按键之前。补后同一提交连续两次
+  17/17 通过；这两次失败不是产品行为失败（覆盖层取消另有 MAC-E2E-12 的 AX 证据），
+  但也不能算 Pass，故记录在此。
 - 菜单打开时 `validateMenuItem:` 调用 `SMAppService` 只读状态；这解决了“显示意图
   而非实际值”，但 `SMAppService` 的读取本身没有错误返回值，生产路径总是得到
   Enabled/Disabled/RequiresApproval 之一。`None`（不可读）分支由 APP-EFFECT-31
