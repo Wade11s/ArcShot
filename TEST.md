@@ -69,8 +69,9 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 ## 3. Rust 自动化接缝（随功能落地）
 
 下表是固定测试组，不是允许用一个含大量断言的大测试代替子用例。#20 已实现无选区的权限/捕获/冻结/取消子集；#22 已实现拖拽选区、Finish/双击/完成入口、
-2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏。标注编辑、选区移动/调整/重选、
-显式保存、滚动截图与偏好设置仍未实现，状态仍为 **Not tested**。
+2x 裁剪、共享合成/编码、PNGf 剪贴板、完成音效与输出栅栏；#24 已实现选区移动、八向调整、
+重选、共享不可变底图的可撤销历史与八个可见控制点。标注对象/工具、显式保存、滚动截图与
+偏好设置仍未实现，状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -133,6 +134,22 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | `scripts/check-startup.sh` | MAC-COLOR-OUTPUT-22-01：真实进程内编码 PNG、私有命名 pasteboard PNGf 写入/回读、AppKit 内存解码尺寸；脚本同时断言该行 | 用户剪贴板、非 ArcShot 应用粘贴、颜色真值 |
 | `crates/macos/tests/native_preflight.rs` | MAC-COLOR-OUTPUT-22-02：worker 线程访问剪贴板/音效时在 AppKit 副作用前拒绝 | 主线程真实写入与播放已由启动冒烟/实机覆盖 |
 
+### #24 的稳定自动化入口
+
+选区移动/八向调整、重选与历史只覆盖 core 语义、文档/历史合同、app 输入路由与共享裁剪
+换算。真实指针拖动、控制点命中、`Cmd+Z` 与覆盖层视觉属于 MAC-REGION，仍为 **Not tested**。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/document.rs` | CORE-COORD-08～09：移动/调整后仍走唯一 2x 裁剪换算；八控制点逻辑命中与极小选区的移动区 | 真实指针坐标、显示缩放 |
+| `crates/core/tests/editor.rs` | CORE-EDIT-01～12：整次拖动一步、无变化不入历史、移动携带标注、调整不改标注、八向边缘/最小尺寸、重选替换并可撤销、越界标注保留/裁剪/重现、层叠顺序、同矩形重选不入历史、历史共享底图分配、屏幕边缘舍入余量不反转夹取 | 对象工具、样式、文字、渲染 |
+| `crates/core/tests/session_edit.rs` | CORE-SESSION-14～19：拖动实时预览与单步历史、重选、新会话清空历史、输出互斥与撤销后的版本栅栏、过期 ticket、空历史 | 真实按键/鼠标投递、剪贴板 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-01～08：拖动中忽略 Esc/Enter/撤销、输出期忽略 Enter/撤销但 Esc 可取消、`Cmd+Z` / `Cmd+Shift+Z` 映射、按下位置的移动/调整/重选路由、双击控制点优先调整 | 真实焦点、键盘布局、事件投递 |
+| `crates/image/tests/compose.rs` | IMAGE-COMPOSE-04：移动/调整后的选区经同一裁剪路径得到匹配的物理像素 | 原生显示缩放、大图压力 |
+
+移动/调整后的输出仍复用 `Document::crop` 与 `compose_crop`，没有第二条裁剪路径。实测记录见
+`docs/validation/24-selection-history.md`。这不是 MAC-REGION 指针手势或原生通过证据。
+
 实机步骤与预算口径见 `docs/output.md`；实测记录见
 `docs/validation/22-region-output.md`。这不是 MAC-REGION 其余必测项的替代。
 
@@ -183,10 +200,12 @@ E2E 的观察合同因此是**双通道**：
    或名字命中）。
 2. **状态**以产品 stderr 诊断行为准（`capture_phase from=… to=… action=…`、
    `capture_request_us=`、`capture_probe_grid`、`capture_wake_window_submit_us=`、
+   `capture_edit action=… version=… annotations=… selection=…`、
    `menu_hotkey_settings`、`hotkey_register …`）。`capture_phase` 是会话相位的唯一
    真相：开始、暂停、取消、重启与失败都各有一行，不打印帧内容。冻结覆盖层必须先在
    日志中出现 `capture_wake_window_submit_us=`，取消必须出现 `to=Resident` 的相位
-   行，才能声称会话真的离开了冻结态。
+   行，才能声称会话真的离开了冻结态。`capture_edit` 只在重选、拖动提交、撤销与重做
+   后打印版本、标注数量与选区逻辑几何，不打印像素。
 3. **窗口**断言只用 `list-windows --app`。驻留时它返回空列表，表示没有带标题的
    自有窗口；冻结覆盖层存在时它同样为空，因为该窗口无标题栏不被枚举。所以这个断言
    既不能证明覆盖层存在，也不能证明它已关闭，只能证明没有可捕获的自有窗口。
@@ -223,7 +242,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-09 | 启动前后 `agent-desktop list-apps --app "ArcShot"` | 只出现被测 `bundle_id` 与显示名（Debug/Release 各一） | 系统按 bundle ID 解析到哪一份拷贝 |
 | MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
 | MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
-| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区/标注（尚未实现） |
+| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区移动/调整/重选与撤销（控制点无 AX 节点，不能用 `--headed` 坐标） |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -263,9 +282,11 @@ agent-desktop press escape --headed
   证明“可寻址”，NSWindow 销毁级证据仍缺外部探针。
 - 已落地（#53/#54/#55）：权限提示、快捷键设置与冻结覆盖层的元素都有
   `id` + `role` + `aria_label` + `accessibility_id` + `on_a11y_action`，
-  `snapshot --app` 可见、可驱动。**尚未**标注的是未来的产品面：区域选区、标注工具、
-  文字编辑与滚动预览。它们落地时必须沿用 §4.2 的约定，否则 MAC-REGION /
-  MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 仍无法进入 E2E。
+  `snapshot --app` 可见、可驱动。**尚未**标注的是未来的产品面：区域选区与八个调整
+  控制点、标注工具、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，
+  但控制点不是 AX 节点，拖动与 `Cmd+Z` 也没有可驱动动作；这些产品面落地时必须沿用
+  §4.2 的约定，否则 MAC-REGION / MAC-ANNOTATION / MAC-TEXT / MAC-SCROLL-* 仍无法进入
+  E2E。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 
@@ -283,7 +304,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | --- | --- | --- |
 | MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出见 §4.3；热键录入与保存已可由 AX 驱动（MAC-E2E-11），冲突恢复与登录项仍不可驱动 |
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；TCC 授权与设置返回属 §4.4 |
-| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 否：选区尚无实现，落地时须按 §4.2 加 AX 标注才能进入 E2E |
+| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
 | MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 否：同 MAC-REGION（工具尚未实现） |
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
