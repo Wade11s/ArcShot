@@ -10,8 +10,8 @@ PNG。
 ## 实测来源与环境
 
 - 基线 SHA：`65343e5`（`spec/v1` = #22 区域捕获切片）。
-- 实测实现/脚本 SHA：`b170a667c7762a6328401dab7afb5dbca42736b5`。
-- 时间：2026-11-04T04:28:24Z / 2026-11-04T04:28:26Z（Debug/Release record-validation，同一提交）；
+- 实测实现/脚本 SHA：`fca0cbbe9e6e37e113e13fe629597bc4a0e89d5c`。
+- 时间：2026-11-04T04:30:46Z / 2026-11-04T04:30:47Z（Debug/Release record-validation，同一提交）；
   完整入口 `scripts/check-all.sh` 在同一提交上 exit 0。
 - 构建配置：Debug 与 Release。
 - Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
