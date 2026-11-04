@@ -4,9 +4,9 @@ use arcshot_app::{
     PermissionNotice, capture_key_action, capture_press_action,
 };
 use arcshot_core::{
-    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, CaptureTicket, Endpoint, Hotkey,
-    LineOption, LineStyle, PaletteColor, RectangleOption, RectangleStyle, ResizeHandle,
-    ScreenGeometry, Selection, Shape, StrokeWidth, Tool,
+    Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
+    CaptureTicket, Endpoint, Hotkey, LineOption, LineStyle, PaletteColor, RectangleOption,
+    RectangleStyle, ResizeHandle, ScreenGeometry, Selection, Shape, StrokeWidth, Tool,
 };
 use gpui::{
     AccessibleAction, Context, FocusHandle, Render, RenderImage, Role, Toggled, Window, WindowId,
@@ -59,6 +59,8 @@ pub(crate) enum UiCommand {
     LineOption(CaptureTicket, LineOption),
     /// One arrow option from the hover strip.
     ArrowOption(CaptureTicket, ArrowOption),
+    /// One blur level from the hover strip.
+    BlurOption(CaptureTicket, BlurOption),
     /// Delete the single selected object.
     DeleteObject(CaptureTicket),
     /// Esc layer one: clear the selected object.
@@ -106,6 +108,8 @@ pub(crate) struct CaptureView {
     pub(crate) line_style: LineStyle,
     /// Mirror of the session-scoped arrow tool style.
     pub(crate) arrow_style: ArrowStyle,
+    /// Mirror of the session-scoped blur tool style.
+    pub(crate) blur_style: BlurStyle,
     /// Composed selection pixels; the overlay draws only interaction chrome on top.
     pub(crate) preview: Option<OverlayPreview>,
     /// Hovered tool row, including its option strip, for the hover-only options.
@@ -124,6 +128,10 @@ const RESIZE_HANDLES: [ResizeHandle; 8] = [
     ResizeHandle::BottomLeft,
     ResizeHandle::Left,
 ];
+
+/// The blur tool's real tooltip: the effect is not a redaction guarantee.
+const BLUR_TOOLTIP: &str =
+    "模糊矩形：对选区内的画面做高斯模糊。模糊不保证敏感信息不可读，也不是可靠的信息遮盖方式。";
 
 fn key_modifiers(modifiers: &gpui::Modifiers) -> KeyModifiers {
     KeyModifiers {
@@ -182,6 +190,7 @@ impl CaptureView {
             Tool::Rectangle | Tool::Select => AnnotationStyle::Rectangle(self.rectangle_style),
             Tool::Line => AnnotationStyle::Line(self.line_style),
             Tool::Arrow => AnnotationStyle::Arrow(self.arrow_style),
+            Tool::Blur => AnnotationStyle::Blur(self.blur_style),
         };
         self.selected
             .and_then(|index| self.annotations.get(index))
@@ -194,12 +203,14 @@ impl CaptureView {
     ///
     /// The row owns the hover listener so moving from the tool into the strip
     /// keeps it open; leaving the row closes it. Hover never switches tools.
+    #[allow(clippy::too_many_arguments)]
     fn tool_row(
         &self,
         tool: Tool,
         row_id: &'static str,
         id: &'static str,
         label: &'static str,
+        tooltip: &'static str,
         glyph: &'static str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -228,6 +239,7 @@ impl CaptureView {
             tool,
             id,
             label,
+            tooltip,
             glyph,
             self.tool == tool,
             &queue,
@@ -247,6 +259,7 @@ impl CaptureView {
         let (strip_id, strip_label) = match tool {
             Tool::Line => ("line-options", "直线选项"),
             Tool::Arrow => ("arrow-options", "箭头选项"),
+            Tool::Blur => ("blur-options", "模糊选项"),
             Tool::Rectangle | Tool::Select => ("rectangle-options", "矩形选项"),
         };
         let mut strip = div()
@@ -262,6 +275,22 @@ impl CaptureView {
             .py_1()
             .rounded_lg()
             .bg(rgba(0x20242bee));
+        if tool == Tool::Blur {
+            // The blur strip has no width, palette or fill: only the three
+            // levels, so the effect itself stays the single variable.
+            for level in BlurLevel::ALL {
+                strip = strip.child(option_button(
+                    option_id(tool, level.label()),
+                    level_label(level),
+                    level_glyph(level),
+                    style.blur().is_some_and(|blur| blur.level() == level),
+                    None,
+                    UiCommand::BlurOption(ticket, BlurOption::Level(level)),
+                    &queue,
+                ));
+            }
+            return strip;
+        }
         for width in StrokeWidth::ALL {
             let command = match tool {
                 Tool::Line => UiCommand::LineOption(ticket, LineOption::Width(width)),
@@ -269,12 +298,15 @@ impl CaptureView {
                 Tool::Rectangle | Tool::Select => {
                     UiCommand::RectangleOption(ticket, RectangleOption::Width(width))
                 }
+                // The blur strip returned above; this arm only satisfies
+                // exhaustiveness for the shared colour/width loops.
+                Tool::Blur => return strip,
             };
             strip = strip.child(option_button(
                 option_id(tool, &format!("width.{}", width.label())),
                 width_label(width),
                 width.label(),
-                style.width() == width,
+                style.width() == Some(width),
                 None,
                 command,
                 &queue,
@@ -287,12 +319,13 @@ impl CaptureView {
                 Tool::Rectangle | Tool::Select => {
                     UiCommand::RectangleOption(ticket, RectangleOption::Stroke(color))
                 }
+                Tool::Blur => return strip,
             };
             strip = strip.child(option_button(
                 option_id(tool, &format!("color.{}", color_name(color))),
                 color_label(color),
                 "",
-                style.stroke() == color,
+                style.stroke() == Some(color),
                 Some(color.rgb()),
                 command,
                 &queue,
@@ -335,6 +368,7 @@ impl CaptureView {
                     &queue,
                 ))
             }
+            Tool::Blur => strip,
         }
     }
 }
@@ -344,6 +378,7 @@ fn option_id(tool: Tool, option: &str) -> String {
     let tool = match tool {
         Tool::Line => "line",
         Tool::Arrow => "arrow",
+        Tool::Blur => "blur",
         Tool::Rectangle | Tool::Select => "rectangle",
     };
     format!("arcshot.overlay.option.{tool}.{option}")
@@ -378,6 +413,22 @@ const fn color_label(color: PaletteColor) -> &'static str {
         PaletteColor::Blue => "蓝色 #007AFF",
         PaletteColor::White => "白色 #FFFFFF",
         PaletteColor::Black => "黑色 #000000",
+    }
+}
+
+const fn level_label(level: BlurLevel) -> &'static str {
+    match level {
+        BlurLevel::Weak => "弱模糊",
+        BlurLevel::Medium => "中模糊",
+        BlurLevel::Strong => "强模糊",
+    }
+}
+
+const fn level_glyph(level: BlurLevel) -> &'static str {
+    match level {
+        BlurLevel::Weak => "░",
+        BlurLevel::Medium => "▒",
+        BlurLevel::Strong => "▓",
     }
 }
 
@@ -438,11 +489,13 @@ fn option_button(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_button(
     ticket: CaptureTicket,
     tool: Tool,
     id: &'static str,
     label: &'static str,
+    tooltip: &'static str,
     glyph: &'static str,
     active: bool,
     queue: &UiQueue,
@@ -460,7 +513,7 @@ fn tool_button(
             Toggled::False
         })
         .accessibility_id(id)
-        .tooltip(move |_, cx| cx.new(|_| TooltipView { label }).into())
+        .tooltip(move |_, cx| cx.new(|_| TooltipView { label: tooltip }).into())
         .w(px(36.0))
         .h(px(36.0))
         .flex()
@@ -842,7 +895,12 @@ impl Render for CaptureView {
             if show_handles
                 && let Some(annotation) = self.selected.and_then(|i| self.annotations.get(i))
             {
-                let [red, green, blue] = annotation.style().stroke().rgb();
+                let [red, green, blue] = match annotation.style().stroke() {
+                    Some(color) => color.rgb(),
+                    // A blur rectangle has no stroke; its handles stay visible
+                    // with a neutral white instead of inventing a colour.
+                    None => [0xFF, 0xFF, 0xFF],
+                };
                 let color = rgb(u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue));
                 let centers: Vec<[f64; 2]> = match annotation.shape() {
                     Shape::Rectangle(_) => RESIZE_HANDLES
@@ -1008,6 +1066,7 @@ impl Render for CaptureView {
                 "select-tool-row",
                 "arcshot.overlay.tool.select",
                 "选择",
+                "选择",
                 "⌖",
                 cx,
             ));
@@ -1015,6 +1074,7 @@ impl Render for CaptureView {
                 Tool::Rectangle,
                 "rectangle-tool-row",
                 "arcshot.overlay.tool.rectangle",
+                "矩形",
                 "矩形",
                 "▭",
                 cx,
@@ -1024,6 +1084,7 @@ impl Render for CaptureView {
                 "line-tool-row",
                 "arcshot.overlay.tool.line",
                 "直线",
+                "直线",
                 "╱",
                 cx,
             ));
@@ -1032,7 +1093,17 @@ impl Render for CaptureView {
                 "arrow-tool-row",
                 "arcshot.overlay.tool.arrow",
                 "箭头",
+                "箭头",
                 "➤",
+                cx,
+            ));
+            dock = dock.child(self.tool_row(
+                Tool::Blur,
+                "blur-tool-row",
+                "arcshot.overlay.tool.blur",
+                "模糊矩形",
+                BLUR_TOOLTIP,
+                "▨",
                 cx,
             ));
             if self.selected.is_some() && !busy {

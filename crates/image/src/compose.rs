@@ -4,8 +4,8 @@
 //! The input frame is immutable and never modified; no intermediate image is
 //! written to disk.
 use arcshot_core::{
-    Annotation, AnnotationStyle, CapturedFrame, LineStyle, MAX_EDGE, MAX_PIXELS, MAX_PNG_BYTES,
-    PixelRect, RectangleStyle, Selection,
+    Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CapturedFrame, LineStyle, MAX_EDGE,
+    MAX_PIXELS, MAX_PNG_BYTES, PixelRect, RectangleStyle, Selection,
 };
 use std::{
     error::Error,
@@ -152,7 +152,12 @@ fn draw_annotation(image: &mut ComposedImage, crop: PixelRect, scale: f64, annot
                 draw_line(image, crop, scale, segment, style);
             }
         }
-        AnnotationStyle::Arrow(_) => draw_arrow(image, crop, scale, annotation),
+        AnnotationStyle::Arrow(style) => draw_arrow(image, crop, scale, annotation, style),
+        AnnotationStyle::Blur(style) => {
+            if let Some(bounds) = annotation.shape().rectangle_bounds() {
+                draw_blur(image, crop, scale, bounds, style);
+            }
+        }
     }
 }
 
@@ -200,6 +205,98 @@ fn draw_rectangle(
                 (y >= top && y < top + thickness) || (y >= bottom && y < bottom + thickness);
             if on_vertical || on_horizontal {
                 set_pixel(image, x as usize, y as usize, [red, green, blue]);
+            }
+        }
+    }
+}
+
+/// Normalized 1D gaussian weights for one blur radius in physical pixels.
+///
+/// The radius is the kernel support and sigma is half of it, so the three
+/// levels keep the same gaussian shape at their 4/8/12 logical-point radii.
+/// The weights sum to one, which leaves a uniform surface unchanged.
+fn gaussian_kernel(radius: i64) -> Vec<f64> {
+    let sigma = radius as f64 / 2.0;
+    let mut weights: Vec<f64> = (-radius..=radius)
+        .map(|offset| (-0.5 * (offset as f64 / sigma).powi(2)).exp())
+        .collect();
+    let sum: f64 = weights.iter().sum();
+    for weight in &mut weights {
+        *weight /= sum;
+    }
+    weights
+}
+
+/// Frosts the already-composited pixels inside one rectangle.
+///
+/// The separable gaussian reads the current surface (the base plus every
+/// lower layer) and writes only inside the rectangle, so objects created later
+/// stay crisp. Source coordinates clamp to the crop, which is the selection:
+/// sampling may leave the rectangle but never the selection, and the boundary
+/// pixel extends outward. There is no colour or alpha mask; only existing
+/// pixels are mixed.
+fn draw_blur(
+    image: &mut ComposedImage,
+    crop: PixelRect,
+    scale: f64,
+    bounds: Selection,
+    style: BlurStyle,
+) {
+    let radius = (style.level().points() * scale).round() as i64;
+    if radius <= 0 {
+        return;
+    }
+    let width = i64::from(image.width);
+    let height = i64::from(image.height);
+    let x0 = physical(bounds.x(), scale, crop.x()).max(0);
+    let y0 = physical(bounds.y(), scale, crop.y()).max(0);
+    let x1 = physical(bounds.x() + bounds.width(), scale, crop.x()).min(width);
+    let y1 = physical(bounds.y() + bounds.height(), scale, crop.y()).min(height);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    // The vertical pass needs the horizontal result for the rectangle rows
+    // plus the kernel support, clamped to the selection.
+    let y_min = y0.saturating_sub(radius).max(0);
+    let y_max = (y1 + radius).min(height);
+    let weights = gaussian_kernel(radius);
+    let temp_width = (x1 - x0) as usize;
+    let temp_height = (y_max - y_min) as usize;
+    let mut temp = vec![0_u8; temp_width * temp_height * 4];
+    for y in y_min..y_max {
+        let row = (y - y_min) as usize * temp_width * 4;
+        for x in x0..x1 {
+            let mut acc = [0.0_f64; 4];
+            for (index, weight) in weights.iter().enumerate() {
+                let offset = index as i64 - radius;
+                let sx = (x + offset).clamp(0, width - 1) as usize;
+                let source = (y as usize * width as usize + sx) * 4;
+                let pixel = &image.rgba[source..source + 4];
+                for (channel, value) in acc.iter_mut().enumerate() {
+                    *value += weight * f64::from(pixel[channel]);
+                }
+            }
+            let out = row + (x - x0) as usize * 4;
+            for (channel, value) in acc.into_iter().enumerate() {
+                temp[out + channel] = value.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let mut acc = [0.0_f64; 4];
+            for (index, weight) in weights.iter().enumerate() {
+                let offset = index as i64 - radius;
+                let sy = (y + offset).clamp(y_min, y_max - 1) - y_min;
+                let source = (sy as usize * temp_width + (x - x0) as usize) * 4;
+                let pixel = &temp[source..source + 4];
+                for (channel, value) in acc.iter_mut().enumerate() {
+                    *value += weight * f64::from(pixel[channel]);
+                }
+            }
+            let out = (y as usize * width as usize + x as usize) * 4;
+            for (channel, value) in acc.into_iter().enumerate() {
+                image.rgba[out + channel] = value.round().clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -331,11 +428,17 @@ fn clip_parameter(
 }
 
 /// Fills the arrow silhouette from the shared logical outline.
-fn draw_arrow(image: &mut ComposedImage, crop: PixelRect, scale: f64, annotation: Annotation) {
+fn draw_arrow(
+    image: &mut ComposedImage,
+    crop: PixelRect,
+    scale: f64,
+    annotation: Annotation,
+    style: ArrowStyle,
+) {
     let Some(outlines) = annotation.arrow_outlines() else {
         return;
     };
-    let [red, green, blue] = annotation.style().stroke().rgb();
+    let [red, green, blue] = style.stroke().rgb();
     for outline in outlines {
         let vertices: Vec<[f64; 2]> = outline
             .into_iter()

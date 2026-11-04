@@ -55,7 +55,7 @@ pub enum CaptureKeyAction {
 pub enum CapturePressAction {
     /// Double-click: the core finishes only when the point is inside the selection.
     FinishAt([f64; 2]),
-    /// Rectangle tool: start a new object inside the selection.
+    /// Annotation tool: start a new object inside the selection.
     Create,
     /// Select tool: a hit object starts its own move/resize in the core.
     ObjectDrag,
@@ -102,7 +102,7 @@ pub fn capture_key_action(
 
 /// Routes one primary-button press; the core still validates the exact target.
 ///
-/// With any annotation tool active (Rectangle, Line, Arrow) a press inside the
+/// With any annotation tool active (Rectangle, Line, Arrow, Blur) a press inside the
 /// selection always starts a new object and a double-click never finishes. With
 /// the select tool, an object body or control point wins over every selection
 /// gesture and over Finish.

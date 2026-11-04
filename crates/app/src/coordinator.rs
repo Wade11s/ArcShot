@@ -10,9 +10,10 @@ use arcshot_app::{
     PreferencesFlow, PreferencesNotice, encode_document,
 };
 use arcshot_core::{
-    Annotation, AnnotationStyle, ArrowStyle, CaptureAction, CaptureEffect, CaptureFailure,
-    CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, Document, FrameError, LineStyle,
-    OutputFailure, OutputJob, PixelRect, RectangleStyle, SavePanelResult, ScreenGeometry, Tool,
+    Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CaptureAction, CaptureEffect,
+    CaptureFailure, CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, Document,
+    FrameError, LineStyle, OutputFailure, OutputJob, PixelRect, RectangleStyle, SavePanelResult,
+    ScreenGeometry, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -215,6 +216,9 @@ impl Coordinator {
                 }
                 UiCommand::ArrowOption(ticket, option) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::ArrowOption { ticket, option }, cx);
+                }
+                UiCommand::BlurOption(ticket, option) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::BlurOption { ticket, option }, cx);
                 }
                 UiCommand::DeleteObject(ticket) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::DeleteSelected { ticket }, cx);
@@ -627,6 +631,7 @@ impl Coordinator {
                 | CaptureAction::RectangleOption { .. }
                 | CaptureAction::LineOption { .. }
                 | CaptureAction::ArrowOption { .. }
+                | CaptureAction::BlurOption { .. }
                 | CaptureAction::DeleteSelected { .. }
                 | CaptureAction::DeselectSelected { .. }
         );
@@ -982,6 +987,7 @@ impl Coordinator {
             document.map_or_else(RectangleStyle::default, Document::rectangle_style);
         let line_style = document.map_or_else(LineStyle::default, Document::line_style);
         let arrow_style = document.map_or_else(ArrowStyle::default, Document::arrow_style);
+        let blur_style = document.map_or_else(BlurStyle::default, Document::blur_style);
         let busy = self.session.output_busy();
         let error = self.overlay_error.take();
         let updated = handle.update(cx, |view, _, cx| {
@@ -992,6 +998,7 @@ impl Coordinator {
             view.rectangle_style = rectangle_style;
             view.line_style = line_style;
             view.arrow_style = arrow_style;
+            view.blur_style = blur_style;
             view.busy = busy;
             view.error = error;
             cx.notify();
@@ -1185,6 +1192,7 @@ impl Coordinator {
                     rectangle_style: RectangleStyle::default(),
                     line_style: LineStyle::default(),
                     arrow_style: ArrowStyle::default(),
+                    blur_style: BlurStyle::default(),
                     preview: None,
                     hovered_tool: None,
                     focus: focus.clone(),
@@ -1253,6 +1261,7 @@ impl Coordinator {
                     rectangle_style: RectangleStyle::default(),
                     line_style: LineStyle::default(),
                     arrow_style: ArrowStyle::default(),
+                    blur_style: BlurStyle::default(),
                     preview: None,
                     hovered_tool: None,
                     focus: focus.clone(),
@@ -1399,6 +1408,7 @@ fn format_style(style: AnnotationStyle) -> String {
             style.width().label(),
             style.inward()
         ),
+        AnnotationStyle::Blur(style) => format!("level={}", style.level().label()),
     }
 }
 
@@ -1428,6 +1438,7 @@ const fn action_style_tool(action: &CaptureAction) -> Option<Tool> {
         CaptureAction::RectangleOption { .. } => Some(Tool::Rectangle),
         CaptureAction::LineOption { .. } => Some(Tool::Line),
         CaptureAction::ArrowOption { .. } => Some(Tool::Arrow),
+        CaptureAction::BlurOption { .. } => Some(Tool::Blur),
         CaptureAction::SelectTool { tool, .. } => Some(*tool),
         _ => None,
     }
@@ -1452,6 +1463,7 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::RectangleOption { .. } => "RectangleOption",
         CaptureAction::LineOption { .. } => "LineOption",
         CaptureAction::ArrowOption { .. } => "ArrowOption",
+        CaptureAction::BlurOption { .. } => "BlurOption",
         CaptureAction::DeleteSelected { .. } => "DeleteSelected",
         CaptureAction::DeselectSelected { .. } => "DeselectSelected",
         CaptureAction::Undo { .. } => "Undo",

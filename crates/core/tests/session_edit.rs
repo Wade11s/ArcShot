@@ -1,8 +1,8 @@
 //! CORE-SESSION: selection drags, reselect, undo/redo and new-session history.
 use arcshot_core::{
-    ArrowOption, ArrowStyle, CaptureAction, CaptureEffect, CapturePhase, CaptureSession,
-    CaptureTicket, CapturedFrame, LineOption, LineStyle, OutputFailure, PaletteColor,
-    RectangleOption, ScreenGeometry, Selection, StrokeWidth, Tool,
+    ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle, CaptureAction, CaptureEffect,
+    CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, LineOption, LineStyle,
+    OutputFailure, PaletteColor, RectangleOption, ScreenGeometry, Selection, StrokeWidth, Tool,
 };
 
 fn screen() -> ScreenGeometry {
@@ -304,7 +304,7 @@ fn core_session_24_annotation_actions_share_the_edit_fence_and_history() {
         session.document().unwrap().annotations()[0]
             .style()
             .stroke(),
-        PaletteColor::Blue
+        Some(PaletteColor::Blue)
     );
     assert_eq!(session.document().unwrap().version(), version + 2);
 
@@ -472,4 +472,116 @@ fn core_session_26_line_and_arrow_actions_share_the_edit_fence() {
             CaptureEffect::PlayCompletionSound
         ]
     );
+}
+
+#[test]
+fn core_session_27_blur_actions_share_the_edit_fence() {
+    let (mut session, ticket) = frozen();
+    select(&mut session, ticket);
+    let version = session.document().unwrap().version();
+
+    session.dispatch(CaptureAction::SelectTool {
+        ticket,
+        tool: Tool::Blur,
+    });
+    session.dispatch(CaptureAction::PointerPressed {
+        ticket,
+        point: [12.0, 8.0],
+    });
+    session.dispatch(CaptureAction::PointerMoved {
+        ticket,
+        point: [38.0, 20.0],
+    });
+    session.dispatch(CaptureAction::PointerReleased { ticket });
+    assert_eq!(session.document().unwrap().version(), version + 1);
+    assert_eq!(
+        session.document().unwrap().annotations()[0].style(),
+        arcshot_core::AnnotationStyle::Blur(BlurStyle::default())
+    );
+
+    // A level option edits the selected blur object and the tool memory as one
+    // committed step each; the medium default is not sticky.
+    session.dispatch(CaptureAction::BlurOption {
+        ticket,
+        option: BlurOption::Level(BlurLevel::Strong),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.version(), version + 2);
+    assert_eq!(
+        document.annotations()[0].style().blur().unwrap().level(),
+        BlurLevel::Strong
+    );
+    assert_eq!(document.blur_style().level(), BlurLevel::Strong);
+
+    // Another tool's option only changes that tool's memory.
+    session.dispatch(CaptureAction::RectangleOption {
+        ticket,
+        option: RectangleOption::Stroke(PaletteColor::Blue),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.version(), version + 2);
+    assert_eq!(
+        document.annotations()[0].style().blur().unwrap().level(),
+        BlurLevel::Strong
+    );
+    assert_eq!(document.rectangle_style().stroke(), PaletteColor::Blue);
+
+    // Output ownership disables blur tool and style edits.
+    let job = match session
+        .dispatch(CaptureAction::Finish { ticket })
+        .into_iter()
+        .next()
+    {
+        Some(CaptureEffect::ComposeOutput(job)) => job,
+        _ => panic!("expected output job"),
+    };
+    let version = session.document().unwrap().version();
+    let annotations = session.document().unwrap().annotations().to_vec();
+    session.dispatch(CaptureAction::SelectTool {
+        ticket,
+        tool: Tool::Blur,
+    });
+    session.dispatch(CaptureAction::BlurOption {
+        ticket,
+        option: BlurOption::Level(BlurLevel::Weak),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.version(), version);
+    assert_eq!(document.annotations(), annotations.as_slice());
+    assert_eq!(document.blur_style().level(), BlurLevel::Strong);
+
+    // A stale ticket from the dismissed overlay never edits a newer attempt.
+    assert_eq!(
+        session.dispatch(CaptureAction::OutputCompleted {
+            job,
+            result: Ok(())
+        }),
+        vec![
+            CaptureEffect::DismissOverlay,
+            CaptureEffect::PlayCompletionSound
+        ]
+    );
+    let CaptureEffect::CheckPermission(next) = session.dispatch(CaptureAction::Start)[0] else {
+        panic!("expected permission check");
+    };
+    session.dispatch(CaptureAction::PermissionChecked {
+        ticket: next,
+        available: true,
+    });
+    session.dispatch(CaptureAction::Completed {
+        ticket: next,
+        result: Ok(frame()),
+    });
+    session.dispatch(CaptureAction::SelectRegion {
+        ticket: next,
+        from: [10.0, 5.0],
+        to: [40.0, 25.0],
+    });
+    session.dispatch(CaptureAction::BlurOption {
+        ticket,
+        option: BlurOption::Level(BlurLevel::Weak),
+    });
+    let document = session.document().unwrap();
+    assert_eq!(document.blur_style().level(), BlurLevel::Medium);
+    assert!(document.annotations().is_empty());
 }
