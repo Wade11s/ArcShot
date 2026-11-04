@@ -1,7 +1,7 @@
 //! Authority for capture preparation, cancellation and native uncertainty.
 use crate::{
     Annotation, ArrowOption, BlurOption, CapturedFrame, Density, Document, LineOption, PixelRect,
-    RectangleOption, Selection, Tool,
+    RectangleOption, Selection, TextOption, Tool,
 };
 use std::{error::Error, fmt};
 
@@ -112,6 +112,41 @@ pub enum CaptureAction {
         ticket: CaptureTicket,
         /// Style option the user selected.
         option: BlurOption,
+    },
+    /// Applies one text option to the tool memory, the in-progress text edit,
+    /// or any selected text object.
+    TextOption {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Style option the user selected.
+        option: TextOption,
+    },
+    /// Starts a text edit at a point: a new object with the text tool, or a
+    /// re-edit of the topmost text object under the select tool.
+    TextBegin {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Press point in display-local logical points.
+        point: [f64; 2],
+    },
+    /// Updates the live draft content and its measured bounds.
+    TextEdited {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Current draft content, including unconfirmed IME text.
+        content: String,
+        /// Measured logical bounds of the draft content.
+        bounds: Selection,
+    },
+    /// Commits the in-progress text edit as one history step.
+    TextCommit {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+    },
+    /// Discards the in-progress text edit without recording anything.
+    TextCancel {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
     },
     /// Deletes the single selected object as one undoable step.
     DeleteSelected {
@@ -612,6 +647,40 @@ impl CaptureSession {
                 }
                 vec![]
             }
+            CaptureAction::TextOption { ticket, option } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.apply_text_option(option);
+                }
+                vec![]
+            }
+            CaptureAction::TextBegin { ticket, point } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.begin_text_edit(point);
+                }
+                vec![]
+            }
+            CaptureAction::TextEdited {
+                ticket,
+                content,
+                bounds,
+            } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.update_text_edit(content, bounds);
+                }
+                vec![]
+            }
+            CaptureAction::TextCommit { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.commit_edits();
+                }
+                vec![]
+            }
+            CaptureAction::TextCancel { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.cancel_text_edit();
+                }
+                vec![]
+            }
             CaptureAction::DeleteSelected { ticket } => {
                 if let Some(document) = self.editable(ticket) {
                     let _ = document.delete_selected();
@@ -725,7 +794,9 @@ impl CaptureSession {
             }) {
                 return vec![]; // Double-click outside the selection is not Finish.
             }
-            document.commit_edits();
+            if document.commit_edits().is_err() {
+                return vec![]; // A failed commit must not publish a partial snapshot.
+            }
             let Ok(crop) = document.crop() else {
                 return vec![];
             };

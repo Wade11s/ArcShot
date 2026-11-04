@@ -2,10 +2,13 @@
 
 mod compose;
 mod preview;
+mod text;
 pub use compose::{
-    ComposeError, ComposedImage, compose_crop, compose_document, encode_png, preview_bgra,
+    ComposeError, ComposedImage, compose_crop, compose_document, compose_document_with_font,
+    encode_png, preview_bgra,
 };
 pub use preview::{CapturePreview, PreviewError, capture_preview};
+pub use text::{BitmapFont, TextFont, TextGlyphs, TextMetrics, measure_text, tint};
 
 use arcshot_core::StatusItemIcon;
 

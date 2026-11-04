@@ -76,8 +76,10 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 以及预览与最终输出共用的像素合成；#26 已实现 Line 的 Solid/Dash、Arrow 的 Flat/Inward、
 两端点编辑与像素合成；#30 已实现“完成音效”偏好（默认开、本地记忆、
 关闭后成功静默但失败照常报错）与“登录时启动”（真实 `SMAppService` 登录项、菜单
-打开读实际状态、切换失败重读并报错）。Text/Blur、滚动截图、选项密度与
-完整标注/文字产品面仍未实现，状态仍为 **Not tested**。
+打开读实际状态、切换失败重读并报错）；#27 已实现 Blur Rectangle 三档模糊与层叠编辑；
+#28 已实现 Text 多行编辑、中文 IME 输入、可复现字体栅格化与文字历史。滚动截图与
+完整标注/文字产品面（真实指针绘制、对象控制点拖动、原生系统字体/IME 候选框）仍未实现，
+状态仍为 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -196,6 +198,25 @@ GPUI tooltip/`aria_description`，`--headed` 坐标拖拽不能作为验收证�
 激活证据是 AX 行与产品诊断行；模糊对象绘制与拖拽仍不进入 E2E 通过范围。tooltip 文案
 是真实 GPUI tooltip 与 `aria_description`，并由 `ui::blur_tooltip_tests` 守护；
 `agent-desktop 1.1.0` 的 snapshot/find 不暴露该文本，因此 E2E 不断言它。
+
+### #28 的稳定自动化入口
+
+Text 只覆盖已确认接缝：core 的创建/重编/删除/字号取整/历史，固定文档的可复现字体
+栅格化，app 的编辑器/IME 键优先级与 Esc 分层，以及覆盖层第六个工具、色板与字号步进
+的真实 AX 激活。真实指针绘制、原生系统字体/IME 候选框/焦点、直接输入字号与预览观感仍属
+MAC-TEXT，保持 **Not tested**：系统字体适配与 IME 候选窗位置需原生验证，`--headed`
+坐标拖拽不能作为验收证据。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/text.rs` | CORE-EDIT-35～39：创建一步、空文本丢弃、重编一步、编辑变空删除且可撤销、字号 6–64/0.5 取整、命中/移动/层叠/工具切换提交；CORE-SESSION-28～29：TextBegin/TextEdited/TextCommit/TextOption 共用编辑栅栏、Finish 先提交、输出在途忽略、TextCancel 丢弃、过期 ticket 不改新会话 | 真实指针、IME 组合文字 |
+| `crates/image/tests/text.rs` | IMAGE-COMPOSE-26～34：可复现 5x7 字形的固定 golden、字号/颜色整对象生效、选区裁剪、文字位于模糊层之上、多行与未知字形确定、可插拔字体输入、预览与 PNG 字节一致、逻辑度量与物理位图一致 | 原生系统字体、中文/emoji 真实字形、大图压力 |
+| `crates/app/tests/key_policy.rs` | APP-KEY-17：编辑期间 Enter/Delete/Backspace/撤销/重做归编辑器与 IME，Esc 先结束编辑保留内容，拖动/输出期优先，双击文字对象重编 | 真实焦点与 IME 候选框 |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-24：第六个工具可寻址且 checked 互换；悬停出现色板与字号步进；默认红 16；AX 步进写 `capture_edit action=TextOption … size=16.5`、色板写 `stroke=#007AFF`；创建后文字输入可寻址，点击别处提交为一次创建 | 选区绘制、真实文字创建/拖动、直接输入字号、原生字体/IME |
+
+`docs/validation/28-text-ime.md` 记录实测。创建前置使用 `--headed` 拖拽/点击（选区与
+对象没有 AX 节点）；验收证据是 AX 激活行与产品诊断行。字号直接输入由 core 的
+`TextStyle::quantize_size` 与 UI 的草稿键处理实现，自动化入口为步进按钮与固定取整测试。
 
 ### #24 的稳定自动化入口
 
@@ -380,6 +401,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
 | MAC-E2E-22 | 读启动日志 `preferences_launch density=`；冻结后保持 Rectangle 与一个已改样式；状态菜单点击 选项密度 两次并重启一次 | 每次出现 `option_density density=… persisted=true`；工具坞 `arcshot.overlay.density` 的 AX `value` 变为对应密度；`arcshot.overlay.option.rectangle.*` 仍可寻址、工具与样式保持；重启后 `preferences_launch density=` 等于切换值；结束时还原用户原值 | 密度图标/间距的像素观感、悬停收起延迟、键盘单独访问选项 |
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
+| MAC-E2E-24 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -445,8 +467,11 @@ agent-desktop press escape --headed
   按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX 暴露选中态
   （`checked`）。#27 的模糊 tooltip 与 `aria_description` 是真实 GPUI 文本，但
   `agent-desktop 1.1.0` 的 snapshot/find 不暴露 tooltip 或 description，因此 E2E 只断言
-  AX id 与 `capture_edit` 诊断，tooltip 文案由 `ui::blur_tooltip_tests` 守护。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
-  （含线/箭头的两个端点）、文字编辑与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
+  AX id 与 `capture_edit` 诊断，tooltip 文案由 `ui::blur_tooltip_tests` 守护。#28 另外标注了
+  文字工具（`arcshot.overlay.tool.text`）、文字色板/字号步进
+  （`arcshot.overlay.option.text.*`）、字号值（`arcshot.overlay.text.size`）与文字输入
+  （`arcshot.overlay.text.input`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
+  （含线/箭头的两个端点）与滚动预览。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
   不是 AX 节点；#25/#27 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
   的删除按钮，而选中对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，
   否则 MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。

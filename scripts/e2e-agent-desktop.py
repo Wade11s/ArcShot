@@ -1061,6 +1061,132 @@ def main() -> int:
             "default=medium diagnostics=level"
         )
 
+        # MAC-E2E-24: the Text tool is addressable, its colour and size options
+        # are reachable through hover, the default is red 16 pt, the size
+        # steppers and colour swatch each write one text-only diagnostic, and a
+        # created editor is addressable. The selection drag and the creating
+        # click are --headed preconditions (there is no selection AX node); the
+        # acceptance evidence is the AX activations and the product diagnostics.
+        text_tool = wait_tool_state(app, "arcshot.overlay.tool.text", False, 10.0)
+        if not text_tool.get("ref_id"):
+            fail("the text tool button is not addressable")
+        mark = len(read_log(log))
+        agent("click", text_tool["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.tool.text action=Click", 10.0, after=mark)
+        select = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+        if "tool=Text" not in select:
+            fail(f"text tool diagnostic was {select!r}")
+        wait_tool_state(app, "arcshot.overlay.tool.text", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.tool.blur", False, 10.0)
+
+        # Creation precondition: a real selection and a text editor.
+        mark = len(read_log(log))
+        agent("drag", "--from-xy", "50,50", "--to-xy", "200,200", "--headed")
+        wait_log(log, "capture_edit action=SelectRegion", 10.0, after=mark)
+        agent("mouse-click", "--xy", "100,100", "--headed")
+        text_input = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.text.input", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not text_input.get("ref_id"):
+            fail("the text editor is not addressable after creation")
+
+        hover(text_tool["ref_id"])
+        size_field = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.text.size", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not size_field.get("ref_id"):
+            fail("the text size field is not addressable")
+        if str(size_field.get("value")) != "16":
+            fail(f"the default text size was {size_field.get('value')!r}, expected '16'")
+
+        size_up = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.text.size.up",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not size_up.get("ref_id"):
+            fail("the text size up stepper is not addressable")
+        mark = len(read_log(log))
+        agent("click", size_up["ref_id"])
+        wait_log(
+            log,
+            "a11y_action=arcshot.overlay.option.text.size.up action=Click",
+            10.0,
+            after=mark,
+        )
+        edit = wait_log_line(log, "capture_edit action=TextOption", 10.0, after=mark)
+        if "size=16.5" not in edit:
+            fail(f"text size diagnostic was {edit!r}")
+        wait_node(
+            app,
+            lambda tree: next(
+                (
+                    node
+                    for node in find_nodes(tree, native_id="arcshot.overlay.text.size")
+                    if str(node.get("value")) == "16.5"
+                ),
+                None,
+            ),
+            10.0,
+        )
+
+        blue = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.text.color.blue",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        if not blue.get("ref_id"):
+            fail("the text blue swatch is not addressable")
+        mark = len(read_log(log))
+        agent("click", blue["ref_id"])
+        wait_log(
+            log,
+            "a11y_action=arcshot.overlay.option.text.color.blue action=Click",
+            10.0,
+            after=mark,
+        )
+        edit = wait_log_line(log, "capture_edit action=TextOption", 10.0, after=mark)
+        if "stroke=#007AFF" not in edit:
+            fail(f"text colour diagnostic was {edit!r}")
+        wait_tool_state(app, "arcshot.overlay.option.text.color.blue", True, 10.0)
+
+        # Commit the editor by clicking elsewhere: one creation history step and
+        # the editor disappears.
+        mark = len(read_log(log))
+        agent("mouse-click", "--xy", "300,300", "--headed")
+        wait_log(log, "capture_edit action=TextCommit", 10.0, after=mark)
+        commit = wait_log_line(log, "capture_edit action=TextCommit", 10.0, after=mark)
+        if "annotations=1" not in commit:
+            fail(f"text commit diagnostic was {commit!r}")
+        note(
+            "mac_e2e_24=pass tool_dock=ax text_editor=ax size=16->16.5 "
+            "colour=#007AFF commit=1"
+        )
+
         root = wait_node(
             app,
             lambda tree: (
@@ -1243,7 +1369,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=23")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=24")
     return 0
 
 

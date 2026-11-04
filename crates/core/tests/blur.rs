@@ -42,7 +42,7 @@ fn draw(document: &mut Document, from: [f64; 2], to: [f64; 2]) {
     document.end_drag().unwrap();
 }
 
-fn bounds(annotation: arcshot_core::Annotation) -> (f64, f64, f64, f64) {
+fn bounds(annotation: &arcshot_core::Annotation) -> (f64, f64, f64, f64) {
     let bounds = annotation
         .shape()
         .rectangle_bounds()
@@ -50,7 +50,7 @@ fn bounds(annotation: arcshot_core::Annotation) -> (f64, f64, f64, f64) {
     (bounds.x(), bounds.y(), bounds.width(), bounds.height())
 }
 
-fn blur_style(annotation: arcshot_core::Annotation) -> BlurStyle {
+fn blur_style(annotation: &arcshot_core::Annotation) -> BlurStyle {
     annotation
         .style()
         .blur()
@@ -78,7 +78,7 @@ fn core_edit_32_the_blur_tool_creates_medium_rectangles_from_inside_the_selectio
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
     assert_eq!(document.annotations().len(), 1);
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 30.0, 12.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 30.0, 12.0));
     assert_eq!(
         document.annotations()[0].style(),
         AnnotationStyle::Blur(BlurStyle::default()),
@@ -149,7 +149,7 @@ fn core_edit_33_blur_options_edit_only_same_type_objects_and_remember_per_sessio
     document.update_drag([30.0, 20.0]);
     document.end_drag().unwrap();
     assert_eq!(
-        blur_style(document.annotations()[0]).level(),
+        blur_style(&document.annotations()[0]).level(),
         BlurLevel::Weak
     );
 
@@ -163,13 +163,13 @@ fn core_edit_33_blur_options_edit_only_same_type_objects_and_remember_per_sessio
     );
     assert_eq!(document.version(), version + 1);
     assert_eq!(
-        blur_style(document.annotations()[0]).level(),
+        blur_style(&document.annotations()[0]).level(),
         BlurLevel::Strong
     );
     assert_eq!(document.blur_style().level(), BlurLevel::Strong);
     assert!(document.undo().unwrap());
     assert_eq!(
-        blur_style(document.annotations()[0]).level(),
+        blur_style(&document.annotations()[0]).level(),
         BlurLevel::Weak
     );
     assert_eq!(document.blur_style().level(), BlurLevel::Strong);
@@ -205,7 +205,7 @@ fn core_edit_33_blur_options_edit_only_same_type_objects_and_remember_per_sessio
     );
     assert_eq!(document.version(), version);
     assert_eq!(
-        blur_style(document.annotations()[0]).level(),
+        blur_style(&document.annotations()[0]).level(),
         BlurLevel::Strong
     );
     // The rectangle/line tool memories changed; the blur memory did not.
@@ -258,9 +258,9 @@ fn core_edit_34_blur_geometry_editing_matches_the_rectangle_rules() {
     document.update_drag([26.0, 18.0]);
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
-    assert_eq!(bounds(document.annotations()[0]), (16.0, 11.0, 20.0, 14.0));
+    assert_eq!(bounds(&document.annotations()[0]), (16.0, 11.0, 20.0, 14.0));
     assert!(document.undo().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (12.0, 8.0, 20.0, 14.0));
+    assert_eq!(bounds(&document.annotations()[0]), (12.0, 8.0, 20.0, 14.0));
 
     // Eight control points with edge flip; zero extent keeps the last valid one.
     assert_eq!(
@@ -269,7 +269,7 @@ fn core_edit_34_blur_geometry_editing_matches_the_rectangle_rules() {
     );
     document.update_drag([4.0, 24.0]);
     assert!(document.end_drag().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (4.0, 22.0, 8.0, 2.0));
+    assert_eq!(bounds(&document.annotations()[0]), (4.0, 22.0, 8.0, 2.0));
 
     // Delete removes the object as one step and undo restores it.
     let version = document.version();
@@ -287,9 +287,9 @@ fn core_edit_34_blur_geometry_editing_matches_the_rectangle_rules() {
     document.update_drag([42.0, 13.0]);
     assert!(document.end_drag().unwrap());
     assert_eq!(document.version(), version + 1);
-    assert_eq!(bounds(document.annotations()[0]), (8.0, 25.0, 8.0, 2.0));
+    assert_eq!(bounds(&document.annotations()[0]), (8.0, 25.0, 8.0, 2.0));
     assert!(document.undo().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (4.0, 22.0, 8.0, 2.0));
+    assert_eq!(bounds(&document.annotations()[0]), (4.0, 22.0, 8.0, 2.0));
 
     // Resizing the selection never scales the retained blur rectangle.
     let selection = document.selection().unwrap();
@@ -302,5 +302,5 @@ fn core_edit_34_blur_geometry_editing_matches_the_rectangle_rules() {
     );
     document.update_drag([80.0, 45.0]);
     assert!(document.end_drag().unwrap());
-    assert_eq!(bounds(document.annotations()[0]), (4.0, 22.0, 8.0, 2.0));
+    assert_eq!(bounds(&document.annotations()[0]), (4.0, 22.0, 8.0, 2.0));
 }

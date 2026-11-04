@@ -1,7 +1,7 @@
 //! Connects the authoritative session to safe native operations and GPUI windows.
 use crate::{
     MenuBarGlobal,
-    ui::{CaptureView, HotkeyView, NoticeView, OverlayPreview, UiCommand, UiQueue},
+    ui::{CaptureView, HotkeyView, NoticeView, OverlayPreview, TextEditMirror, UiCommand, UiQueue},
 };
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, DensityWriteOutcome, GuideHistory, HotkeyAction,
@@ -13,7 +13,7 @@ use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CaptureAction, CaptureEffect,
     CaptureFailure, CapturePhase, CaptureSession, CaptureTicket, CapturedFrame, Density, Document,
     FrameError, LineStyle, OutputFailure, OutputJob, PixelRect, RectangleStyle, SavePanelResult,
-    ScreenGeometry, Tool,
+    ScreenGeometry, TextStyle, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -232,6 +232,29 @@ impl Coordinator {
                 }
                 UiCommand::BlurOption(ticket, option) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::BlurOption { ticket, option }, cx);
+                }
+                UiCommand::TextOption(ticket, option) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::TextOption { ticket, option }, cx);
+                }
+                UiCommand::BeginText { ticket, point } if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::TextBegin { ticket, point }, cx);
+                }
+                UiCommand::TextEdited {
+                    ticket,
+                    content,
+                    bounds,
+                } if self.session.may_present(ticket) => {
+                    self.action(
+                        CaptureAction::TextEdited {
+                            ticket,
+                            content,
+                            bounds,
+                        },
+                        cx,
+                    );
+                }
+                UiCommand::TextCommit(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::TextCommit { ticket }, cx);
                 }
                 UiCommand::DeleteObject(ticket) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::DeleteSelected { ticket }, cx);
@@ -678,6 +701,8 @@ impl Coordinator {
                 | CaptureAction::LineOption { .. }
                 | CaptureAction::ArrowOption { .. }
                 | CaptureAction::BlurOption { .. }
+                | CaptureAction::TextOption { .. }
+                | CaptureAction::TextCommit { .. }
                 | CaptureAction::DeleteSelected { .. }
                 | CaptureAction::DeselectSelected { .. }
         );
@@ -1034,10 +1059,20 @@ impl Coordinator {
         let line_style = document.map_or_else(LineStyle::default, Document::line_style);
         let arrow_style = document.map_or_else(ArrowStyle::default, Document::arrow_style);
         let blur_style = document.map_or_else(BlurStyle::default, Document::blur_style);
+        let text_style = document.map_or_else(TextStyle::default, Document::text_style);
+        let text_edit = document
+            .and_then(|document| document.text_edit())
+            .map(|edit| TextEditMirror {
+                anchor: edit.anchor(),
+                content: edit.content().to_owned(),
+                bounds: edit.bounds(),
+                style: edit.style(),
+                target: edit.target(),
+            });
         let density = self.session.density();
         let busy = self.session.output_busy();
         let error = self.overlay_error.take();
-        let updated = handle.update(cx, |view, _, cx| {
+        let updated = handle.update(cx, |view, window, cx| {
             view.selection = selection;
             view.tool = tool;
             view.selected = selected;
@@ -1046,6 +1081,9 @@ impl Coordinator {
             view.line_style = line_style;
             view.arrow_style = arrow_style;
             view.blur_style = blur_style;
+            view.text_style = text_style;
+            view.text_edit = text_edit;
+            view.sync_text_editor(window, cx);
             view.density = density;
             view.busy = busy;
             view.error = error;
@@ -1242,6 +1280,12 @@ impl Coordinator {
                     line_style: LineStyle::default(),
                     arrow_style: ArrowStyle::default(),
                     blur_style: BlurStyle::default(),
+                    text_style: TextStyle::default(),
+                    text_edit: None,
+                    text_input: None,
+                    text_focus: None,
+                    size_editing: false,
+                    size_draft: String::new(),
                     preview: None,
                     hovered_tool: None,
                     density,
@@ -1313,6 +1357,12 @@ impl Coordinator {
                     line_style: LineStyle::default(),
                     arrow_style: ArrowStyle::default(),
                     blur_style: BlurStyle::default(),
+                    text_style: TextStyle::default(),
+                    text_edit: None,
+                    text_input: None,
+                    text_focus: None,
+                    size_editing: false,
+                    size_draft: String::new(),
                     preview: None,
                     hovered_tool: None,
                     density,
@@ -1468,6 +1518,9 @@ fn format_style(style: AnnotationStyle) -> String {
             style.inward()
         ),
         AnnotationStyle::Blur(style) => format!("level={}", style.level().label()),
+        AnnotationStyle::Text(style) => {
+            format!("stroke={} size={}", style.color().hex(), style.size_label())
+        }
     }
 }
 
@@ -1498,6 +1551,7 @@ const fn action_style_tool(action: &CaptureAction) -> Option<Tool> {
         CaptureAction::LineOption { .. } => Some(Tool::Line),
         CaptureAction::ArrowOption { .. } => Some(Tool::Arrow),
         CaptureAction::BlurOption { .. } => Some(Tool::Blur),
+        CaptureAction::TextOption { .. } => Some(Tool::Text),
         CaptureAction::SelectTool { tool, .. } => Some(*tool),
         _ => None,
     }
@@ -1523,6 +1577,11 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::LineOption { .. } => "LineOption",
         CaptureAction::ArrowOption { .. } => "ArrowOption",
         CaptureAction::BlurOption { .. } => "BlurOption",
+        CaptureAction::TextOption { .. } => "TextOption",
+        CaptureAction::TextBegin { .. } => "TextBegin",
+        CaptureAction::TextEdited { .. } => "TextEdited",
+        CaptureAction::TextCommit { .. } => "TextCommit",
+        CaptureAction::TextCancel { .. } => "TextCancel",
         CaptureAction::DeleteSelected { .. } => "DeleteSelected",
         CaptureAction::DeselectSelected { .. } => "DeselectSelected",
         CaptureAction::Undo { .. } => "Undo",

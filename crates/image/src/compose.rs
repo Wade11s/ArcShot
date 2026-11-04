@@ -3,6 +3,7 @@
 //! Region capture and scroll output use this single crop/composite/encode path.
 //! The input frame is immutable and never modified; no intermediate image is
 //! written to disk.
+use crate::text::{BitmapFont, TextFont, tint};
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CapturedFrame, LineStyle, MAX_EDGE,
     MAX_PIXELS, MAX_PNG_BYTES, PixelRect, RectangleStyle, Selection,
@@ -106,10 +107,30 @@ pub fn compose_document(
     crop: PixelRect,
     annotations: &[Annotation],
 ) -> Result<ComposedImage, ComposeError> {
+    compose_document_with_font(frame, crop, annotations, &BitmapFont)
+}
+
+/// Crops the selected physical rectangle and rasterizes every visible annotation
+/// with an explicit font input.
+///
+/// The font input is the only text-rendering variable: preview and output pass
+/// the same font, so the same document version produces the same pixels. The
+/// built-in [`BitmapFont`] is the reproducible golden input; the native macOS
+/// system font can be supplied without a second rasterizer.
+///
+/// # Errors
+/// Returns [`ComposeError::Crop`] for an out-of-frame crop and the shared
+/// budget/encoding errors of [`compose_crop`].
+pub fn compose_document_with_font(
+    frame: &CapturedFrame,
+    crop: PixelRect,
+    annotations: &[Annotation],
+    font: &dyn TextFont,
+) -> Result<ComposedImage, ComposeError> {
     let mut image = compose_crop(frame, crop)?;
     let scale = frame.geometry().scale();
     for annotation in annotations {
-        draw_annotation(&mut image, crop, scale, *annotation);
+        draw_annotation(&mut image, crop, scale, annotation, font);
     }
     Ok(image)
 }
@@ -140,7 +161,13 @@ fn span(start: i64, end: i64, limit: u32) -> std::ops::Range<usize> {
 }
 
 /// Rasterizes one retained annotation in its creation order.
-fn draw_annotation(image: &mut ComposedImage, crop: PixelRect, scale: f64, annotation: Annotation) {
+fn draw_annotation(
+    image: &mut ComposedImage,
+    crop: PixelRect,
+    scale: f64,
+    annotation: &Annotation,
+    font: &dyn TextFont,
+) {
     match annotation.style() {
         AnnotationStyle::Rectangle(style) => {
             if let Some(bounds) = annotation.shape().rectangle_bounds() {
@@ -157,6 +184,54 @@ fn draw_annotation(image: &mut ComposedImage, crop: PixelRect, scale: f64, annot
             if let Some(bounds) = annotation.shape().rectangle_bounds() {
                 draw_blur(image, crop, scale, bounds, style);
             }
+        }
+        AnnotationStyle::Text(style) => {
+            if let Some(text) = annotation.shape().text() {
+                draw_text(image, crop, scale, text, style, font);
+            }
+        }
+    }
+}
+
+/// Draws one text object from the font input, clipped to the composed surface.
+///
+/// The anchor is the display-local top-left of the text box; the glyph bitmap
+/// already contains the line leading and baseline. Pixels outside the crop are
+/// dropped, so retained text may leave the selection without being resampled.
+fn draw_text(
+    image: &mut ComposedImage,
+    crop: PixelRect,
+    scale: f64,
+    text: &arcshot_core::TextGeometry,
+    style: arcshot_core::TextStyle,
+    font: &dyn TextFont,
+) {
+    let Some(glyphs) = font.rasterize(text.content(), style.size_points(), scale) else {
+        return;
+    };
+    let tinted = tint(&glyphs, style);
+    let origin_x = physical_f(text.anchor()[0], scale, crop.x()).round() as i64;
+    let origin_y = physical_f(text.anchor()[1], scale, crop.y()).round() as i64;
+    for row in 0..i64::from(glyphs.height()) {
+        let y = origin_y + row;
+        if y < 0 || y >= i64::from(image.height) {
+            continue;
+        }
+        for column in 0..i64::from(glyphs.width()) {
+            let index = (row as usize * glyphs.width() as usize + column as usize) * 4;
+            if tinted[index + 3] == 0 {
+                continue;
+            }
+            let x = origin_x + column;
+            if x < 0 || x >= i64::from(image.width) {
+                continue;
+            }
+            set_pixel(
+                image,
+                x as usize,
+                y as usize,
+                [tinted[index], tinted[index + 1], tinted[index + 2]],
+            );
         }
     }
 }
@@ -432,7 +507,7 @@ fn draw_arrow(
     image: &mut ComposedImage,
     crop: PixelRect,
     scale: f64,
-    annotation: Annotation,
+    annotation: &Annotation,
     style: ArrowStyle,
 ) {
     let Some(outlines) = annotation.arrow_outlines() else {

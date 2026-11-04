@@ -19,5 +19,5 @@ pub use output_publish::{PendingSave, encode_document, publish_output};
 mod key_policy;
 pub use key_policy::{
     CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, capture_key_action,
-    capture_press_action,
+    capture_press_action, capture_text_press_action,
 };

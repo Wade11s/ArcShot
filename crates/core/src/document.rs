@@ -2,7 +2,8 @@
 use crate::{
     Annotation, AnnotationStyle, ArrowOption, ArrowStyle, BlurLevel, BlurOption, BlurStyle,
     CapturedFrame, Endpoint, LineOption, LineStyle, RectangleOption, RectangleStyle,
-    ScreenGeometry, Segment, Tool, annotation::annotation_at, frame::MAX_EDGE, frame::MAX_PIXELS,
+    ScreenGeometry, Segment, TextGeometry, TextOption, TextStyle, Tool, annotation::annotation_at,
+    frame::MAX_EDGE, frame::MAX_PIXELS,
 };
 use std::{error::Error, fmt};
 
@@ -291,14 +292,61 @@ pub enum DragTarget {
     ResizeObject(ResizeHandle),
     /// Dragging one line or arrow endpoint changes length and direction.
     MoveEndpoint(Endpoint),
+    /// A text tool press starts an in-place editor; content arrives separately.
+    CreateText,
 }
 
 /// Resolves a press on an object to its own control point before its body.
-fn control_target(annotation: Annotation, point: [f64; 2]) -> Option<DragTarget> {
+fn control_target(annotation: &Annotation, point: [f64; 2]) -> Option<DragTarget> {
     annotation
         .resize_handle_at(point)
         .map(DragTarget::ResizeObject)
         .or_else(|| annotation.endpoint_at(point).map(DragTarget::MoveEndpoint))
+}
+
+/// One in-progress text edit: a new object or a re-edited existing one.
+///
+/// The editor owns the live content; the document keeps the draft so Finish,
+/// Save and tool changes can commit it through [`Document::commit_edits`] as
+/// exactly one history step.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextEdit {
+    /// Existing object index for a re-edit, or `None` for a creation.
+    target: Option<usize>,
+    anchor: [f64; 2],
+    content: String,
+    style: TextStyle,
+    bounds: Selection,
+    /// Content, style and bounds at the start of a re-edit, for change detection.
+    original: Option<(String, TextStyle, Selection)>,
+}
+
+impl TextEdit {
+    /// The existing object index for a re-edit, if any.
+    #[must_use]
+    pub const fn target(&self) -> Option<usize> {
+        self.target
+    }
+    /// Display-local top-left of the text box in logical points.
+    #[must_use]
+    pub const fn anchor(&self) -> [f64; 2] {
+        self.anchor
+    }
+    /// The current draft content, including any unconfirmed IME text.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+    /// The current draft style.
+    #[must_use]
+    pub const fn style(&self) -> TextStyle {
+        self.style
+    }
+    /// The measured logical bounds of the current draft content.
+    #[must_use]
+    pub fn bounds(&self) -> Selection {
+        self.bounds
+    }
 }
 
 /// A committed document change, kept as edit state so the base image is shared.
@@ -339,6 +387,10 @@ pub struct Document {
     arrow_style: ArrowStyle,
     /// Session-scoped appearance of the next blur rectangle, independent of history.
     blur_style: BlurStyle,
+    /// Session-scoped appearance of the next text object, independent of history.
+    text_style: TextStyle,
+    /// The in-progress text edit, if the user is creating or re-editing text.
+    text_edit: Option<TextEdit>,
     /// Session-scoped active pointer tool, independent of history.
     tool: Tool,
     /// Single selected object; history never promises to restore this state.
@@ -374,6 +426,8 @@ impl Document {
                 false,
             ),
             blur_style: BlurStyle::new(BlurLevel::Medium),
+            text_style: TextStyle::new(crate::PaletteColor::Red, crate::DEFAULT_TEXT_SIZE),
+            text_edit: None,
             tool: Tool::Select,
             selected: None,
             history: History {
@@ -435,6 +489,16 @@ impl Document {
     pub const fn blur_style(&self) -> BlurStyle {
         self.blur_style
     }
+    /// Returns the session-scoped appearance used by the next text object.
+    #[must_use]
+    pub const fn text_style(&self) -> TextStyle {
+        self.text_style
+    }
+    /// Returns the in-progress text edit, if any.
+    #[must_use]
+    pub const fn text_edit(&self) -> Option<&TextEdit> {
+        self.text_edit.as_ref()
+    }
     /// Returns the session-scoped appearance of one annotation tool.
     #[must_use]
     pub const fn tool_style(&self, tool: Tool) -> Option<AnnotationStyle> {
@@ -444,15 +508,20 @@ impl Document {
             Tool::Line => Some(AnnotationStyle::Line(self.line_style)),
             Tool::Arrow => Some(AnnotationStyle::Arrow(self.arrow_style)),
             Tool::Blur => Some(AnnotationStyle::Blur(self.blur_style)),
+            Tool::Text => Some(AnnotationStyle::Text(self.text_style)),
         }
     }
 
     /// Switches the active pointer tool; this is interaction state, not history.
     ///
     /// A tool change never clears objects, styles or the selection, and a held
-    /// drag keeps its original tool until release.
+    /// drag keeps its original tool until release. Leaving the text tool with a
+    /// pending edit commits that edit first, as one history step.
     pub fn set_tool(&mut self, tool: Tool) {
         if self.drag.is_none() {
+            if self.tool == Tool::Text && tool != Tool::Text {
+                let _ = self.commit_edits();
+            }
             self.tool = tool;
         }
     }
@@ -529,6 +598,29 @@ impl Document {
         self.apply_selected_option(|annotation| annotation.with_blur_option(option))
     }
 
+    /// Applies one text option to the tool memory and, when a text object is
+    /// selected outside an edit, to that object as one undoable step.
+    ///
+    /// While a text edit is in progress the option updates the draft style and
+    /// the tool memory; the commit then records one modification step. Other
+    /// object types are never touched and the tool is never switched.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn apply_text_option(&mut self, option: TextOption) -> Result<bool, DocumentError> {
+        if self.drag.is_some() {
+            return Ok(false);
+        }
+        self.text_style = self.text_style.with_option(option);
+        if self.text_edit.is_some() {
+            if let Some(edit) = self.text_edit.as_mut() {
+                edit.style = edit.style.with_option(option);
+            }
+            return Ok(false);
+        }
+        self.apply_selected_option(|annotation| annotation.with_text_option(option))
+    }
+
     /// Applies an option edit to the selected object when the tool type matches.
     fn apply_selected_option(
         &mut self,
@@ -537,11 +629,11 @@ impl Document {
         let Some(index) = self.selected else {
             return Ok(false);
         };
-        let Some(annotation) = self.annotations.get(index).copied() else {
+        let Some(annotation) = self.annotations.get(index).cloned() else {
             self.selected = None;
             return Ok(false);
         };
-        let Some(updated) = update(annotation) else {
+        let Some(updated) = update(annotation.clone()) else {
             return Ok(false);
         };
         if updated == annotation {
@@ -629,13 +721,36 @@ impl Document {
     /// Empty space clears the object selection but still starts a selection move.
     /// With an annotation tool (Rectangle, Line, Arrow, Blur), the press must start
     /// inside the valid selection and creates a new object; a press outside
-    /// starts no core drag so the overlay can begin a new selection band.
+    /// starts no core drag so the overlay can begin a new selection band. The
+    /// text tool instead starts an in-place editor at the press point.
     pub fn begin_pointer(&mut self, point: [f64; 2]) -> Option<DragTarget> {
         if self.drag.is_some() {
             return None;
         }
         let selection = self.selection?;
         let inside = selection.contains(point);
+        if self.tool == Tool::Text {
+            // A press while editing commits the draft; the overlay normally
+            // commits before starting a new gesture, so this is a safety net.
+            if self.text_edit.is_some() {
+                let _ = self.commit_edits();
+                return None;
+            }
+            if !inside {
+                return None;
+            }
+            let bounds = Selection::try_new(point[0], point[1], 1.0, 1.0).ok()?;
+            self.selected = None;
+            self.text_edit = Some(TextEdit {
+                target: None,
+                anchor: point,
+                content: String::new(),
+                style: self.text_style,
+                bounds,
+                original: None,
+            });
+            return Some(DragTarget::CreateText);
+        }
         if self.tool.is_annotation() {
             self.selected = None;
             if !inside {
@@ -655,7 +770,7 @@ impl Document {
         // object's body would otherwise win the hit test.
         if let Some(index) = self.selected
             && let Some(annotation) = self.annotations.get(index)
-            && let Some(target) = control_target(*annotation, point)
+            && let Some(target) = control_target(annotation, point)
         {
             self.drag = Some(Drag {
                 target,
@@ -667,8 +782,8 @@ impl Document {
             return Some(target);
         }
         if inside && let Some(index) = annotation_at(&self.annotations, point) {
-            let annotation = self.annotations[index];
-            let target = control_target(annotation, point).unwrap_or(DragTarget::MoveObject);
+            let annotation = self.annotations[index].clone();
+            let target = control_target(&annotation, point).unwrap_or(DragTarget::MoveObject);
             self.selected = Some(index);
             self.drag = Some(Drag {
                 target,
@@ -708,6 +823,7 @@ impl Document {
             return;
         }
         match drag.target {
+            DragTarget::CreateText => return,
             DragTarget::CreateObject => {
                 // The draft is the last layer; a zero extent or zero-length
                 // stroke removes it again so a release without a real object
@@ -728,6 +844,7 @@ impl Document {
                     AnnotationStyle::Blur(style) => Selection::from_drag(drag.start, point)
                         .ok()
                         .map(|bounds| Annotation::blur(bounds, style)),
+                    AnnotationStyle::Text(_) => None,
                 };
                 if let Some(draft) = draft {
                     let mut annotations = drag.baseline.annotations.clone();
@@ -744,7 +861,7 @@ impl Document {
                 let Some(index) = drag.object else {
                     return;
                 };
-                let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
+                let Some(annotation) = drag.baseline.annotations.get(index).cloned() else {
                     return;
                 };
                 let Some(moved) =
@@ -762,7 +879,7 @@ impl Document {
                 let Some(index) = drag.object else {
                     return;
                 };
-                let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
+                let Some(annotation) = drag.baseline.annotations.get(index).cloned() else {
                     return;
                 };
                 let Some(bounds) = annotation.shape().rectangle_bounds() else {
@@ -814,7 +931,7 @@ impl Document {
                 let Some(index) = drag.object else {
                     return;
                 };
-                let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
+                let Some(annotation) = drag.baseline.annotations.get(index).cloned() else {
                     return;
                 };
                 let Some(updated) = annotation.with_endpoint(endpoint, point) else {
@@ -916,6 +1033,7 @@ impl Document {
                 (resized, drag.baseline.annotations.clone())
             }
             DragTarget::CreateObject
+            | DragTarget::CreateText
             | DragTarget::MoveObject
             | DragTarget::ResizeObject(_)
             | DragTarget::MoveEndpoint(_) => {
@@ -1064,12 +1182,147 @@ impl Document {
         Ok(())
     }
 
-    /// Ends any in-progress edit so an output snapshot holds committed content.
+    /// Starts a new text edit at a display-local point.
     ///
-    /// This slice has no text tool, so nothing is pending yet. Both `Finish` and
-    /// `Save` call this hook before snapshotting version and crop; text/IME
-    /// commit extends it later instead of adding a second output pipeline (I-08).
-    pub fn commit_edits(&mut self) {}
+    /// With the text tool active this creates a new object at `point`; with the
+    /// select tool it re-edits the topmost text object under `point`. A press
+    /// while another edit is pending commits that edit first. Returns whether an
+    /// edit is now in progress.
+    pub fn begin_text_edit(&mut self, point: [f64; 2]) -> bool {
+        if self.text_edit.is_some() {
+            let _ = self.commit_edits();
+        }
+        if self.tool == Tool::Text {
+            let Some(selection) = self.selection else {
+                return false;
+            };
+            if !selection.contains(point) {
+                return false;
+            }
+            let Some(bounds) = Selection::try_new(point[0], point[1], 1.0, 1.0).ok() else {
+                return false;
+            };
+            self.selected = None;
+            self.text_edit = Some(TextEdit {
+                target: None,
+                anchor: point,
+                content: String::new(),
+                style: self.text_style,
+                bounds,
+                original: None,
+            });
+            return true;
+        }
+        let Some(index) = annotation_at(&self.annotations, point) else {
+            return false;
+        };
+        let Some(annotation) = self.annotations.get(index) else {
+            return false;
+        };
+        let Some(text) = annotation.shape().text() else {
+            return false;
+        };
+        let Some(style) = annotation.style().text() else {
+            return false;
+        };
+        let content = text.content().to_owned();
+        let bounds = text.bounds();
+        self.selected = Some(index);
+        self.text_style = style;
+        self.text_edit = Some(TextEdit {
+            target: Some(index),
+            anchor: text.anchor(),
+            content: content.clone(),
+            style,
+            bounds,
+            original: Some((content, style, bounds)),
+        });
+        true
+    }
+
+    /// Updates the live draft content and its measured bounds; no history step.
+    pub fn update_text_edit(&mut self, content: impl Into<String>, bounds: Selection) {
+        if let Some(edit) = self.text_edit.as_mut() {
+            edit.content = content.into();
+            edit.bounds = bounds;
+        }
+    }
+
+    /// Discards the in-progress text edit without recording anything.
+    pub fn cancel_text_edit(&mut self) {
+        self.text_edit = None;
+    }
+
+    /// Ends any in-progress text edit so an output snapshot holds committed content.
+    ///
+    /// A new object is one creation step; re-editing an existing object is one
+    /// modification step; editing an existing object to empty deletes it as one
+    /// step. Empty new content leaves no object and no history. Returns whether a
+    /// history step was recorded.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn commit_edits(&mut self) -> Result<bool, DocumentError> {
+        let Some(edit) = self.text_edit.take() else {
+            return Ok(false);
+        };
+        let content = edit.content;
+        if content.trim().is_empty() {
+            let Some(index) = edit.target else {
+                return Ok(false);
+            };
+            let Some((original, _, _)) = edit.original.as_ref() else {
+                return Ok(false);
+            };
+            if original.trim().is_empty() || index >= self.annotations.len() {
+                return Ok(false);
+            }
+            let version = self.next_version()?;
+            let previous = self.edit_state();
+            self.annotations.remove(index);
+            self.selected = None;
+            self.commit(previous, version);
+            return Ok(true);
+        }
+        let Some(index) = edit.target else {
+            let version = self.next_version()?;
+            let previous = self.edit_state();
+            self.annotations.push(Annotation::text(
+                TextGeometry::new(edit.anchor, content, edit.bounds),
+                edit.style,
+            ));
+            self.selected = Some(self.annotations.len() - 1);
+            self.commit(previous, version);
+            return Ok(true);
+        };
+        if index >= self.annotations.len() {
+            return Ok(false);
+        }
+        let Some(annotation) = self.annotations.get(index) else {
+            return Ok(false);
+        };
+        let unchanged = annotation.style() == AnnotationStyle::Text(edit.style)
+            && annotation
+                .shape()
+                .text()
+                .is_some_and(|text| text.content() == content && text.bounds() == edit.bounds);
+        if unchanged {
+            return Ok(false);
+        }
+        let version = self.next_version()?;
+        let previous = self.edit_state();
+        let Some(old) = self.annotations.get(index) else {
+            return Ok(false);
+        };
+        let Some(text) = old.shape().text() else {
+            return Ok(false);
+        };
+        self.annotations[index] =
+            Annotation::text(text.with_content(content, edit.bounds), edit.style);
+        self.selected = Some(index);
+        self.commit(previous, version);
+        Ok(true)
+    }
 
     /// Converts the current selection to the physical crop used by image output.
     ///

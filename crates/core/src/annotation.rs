@@ -44,6 +44,8 @@ pub enum Tool {
     Arrow,
     /// Create frosted-glass blur rectangles by dragging inside the selection.
     Blur,
+    /// Create multi-line text objects by clicking inside the selection.
+    Text,
 }
 
 impl Tool {
@@ -53,6 +55,15 @@ impl Tool {
         !matches!(self, Self::Select)
     }
 }
+
+/// Smallest selectable text size in logical points.
+pub const MIN_TEXT_SIZE: f64 = 6.0;
+/// Largest selectable text size in logical points.
+pub const MAX_TEXT_SIZE: f64 = 64.0;
+/// Text sizes quantize to this logical-point step.
+pub const TEXT_SIZE_STEP: f64 = 0.5;
+/// Default text size in logical points.
+pub const DEFAULT_TEXT_SIZE: f64 = 16.0;
 
 /// The opaque sRGB palette shared by every annotation tool.
 ///
@@ -410,6 +421,88 @@ pub enum BlurOption {
     Level(BlurLevel),
 }
 
+/// The complete text appearance: one palette colour and one font size.
+///
+/// Text has no font, weight, background or alignment options; the size applies
+/// to the whole object and is quantized to [`TEXT_SIZE_STEP`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyle {
+    color: PaletteColor,
+    size: f64,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            color: PaletteColor::Red,
+            size: DEFAULT_TEXT_SIZE,
+        }
+    }
+}
+
+impl TextStyle {
+    /// Builds one text style from its colour and logical-point size.
+    #[must_use]
+    pub const fn new(color: PaletteColor, size: f64) -> Self {
+        Self { color, size }
+    }
+
+    /// The opaque palette colour of the glyphs.
+    #[must_use]
+    pub const fn color(self) -> PaletteColor {
+        self.color
+    }
+
+    /// Font size in logical points, already quantized.
+    #[must_use]
+    pub const fn size_points(self) -> f64 {
+        self.size
+    }
+
+    /// Applies one option, returning the resulting style.
+    #[must_use]
+    pub fn with_option(self, option: TextOption) -> Self {
+        match option {
+            TextOption::Stroke(color) => Self { color, ..self },
+            TextOption::Size(size) => Self {
+                size: Self::quantize_size(size),
+                ..self
+            },
+        }
+    }
+
+    /// Clamps a requested size to 6–64 pt and rounds it to the 0.5 pt step.
+    /// Non-finite input falls back to the default size.
+    #[must_use]
+    pub fn quantize_size(size: f64) -> f64 {
+        if size.is_nan() {
+            return DEFAULT_TEXT_SIZE;
+        }
+        let clamped = size.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
+        (clamped / TEXT_SIZE_STEP).round() * TEXT_SIZE_STEP
+    }
+
+    /// Stable label used by tooltips and text diagnostics.
+    #[must_use]
+    pub fn size_label(self) -> String {
+        if self.size.fract() == 0.0 {
+            format!("{}", self.size as i64)
+        } else {
+            format!("{}", self.size)
+        }
+    }
+}
+
+/// One selectable text option; clicking it updates the tool memory and,
+/// when a text object is selected, that object.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TextOption {
+    /// Glyph colour from the fixed palette.
+    Stroke(PaletteColor),
+    /// Font size in logical points; quantized to the 0.5 pt step.
+    Size(f64),
+}
+
 /// The appearance of one annotation, tagged by the tool that owns it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnnotationStyle {
@@ -421,6 +514,8 @@ pub enum AnnotationStyle {
     Arrow(ArrowStyle),
     /// Blur rectangle level; no colour mask is involved.
     Blur(BlurStyle),
+    /// Text colour and font size; no font, weight, background or alignment.
+    Text(TextStyle),
 }
 
 impl AnnotationStyle {
@@ -432,6 +527,7 @@ impl AnnotationStyle {
             Self::Line(_) => Tool::Line,
             Self::Arrow(_) => Tool::Arrow,
             Self::Blur(_) => Tool::Blur,
+            Self::Text(_) => Tool::Text,
         }
     }
 
@@ -443,18 +539,19 @@ impl AnnotationStyle {
             Self::Line(style) => Some(style.stroke()),
             Self::Arrow(style) => Some(style.stroke()),
             Self::Blur(_) => None,
+            Self::Text(style) => Some(style.color()),
         }
     }
 
     /// Stroke width in logical points of the coloured tools; a blur
-    /// rectangle has no stroke.
+    /// rectangle and text have no stroke.
     #[must_use]
     pub const fn width(self) -> Option<StrokeWidth> {
         match self {
             Self::Rectangle(style) => Some(style.width()),
             Self::Line(style) => Some(style.width()),
             Self::Arrow(style) => Some(style.width()),
-            Self::Blur(_) => None,
+            Self::Blur(_) | Self::Text(_) => None,
         }
     }
 
@@ -463,7 +560,7 @@ impl AnnotationStyle {
     pub const fn rectangle(self) -> Option<RectangleStyle> {
         match self {
             Self::Rectangle(style) => Some(style),
-            Self::Line(_) | Self::Arrow(_) | Self::Blur(_) => None,
+            Self::Line(_) | Self::Arrow(_) | Self::Blur(_) | Self::Text(_) => None,
         }
     }
 
@@ -472,7 +569,7 @@ impl AnnotationStyle {
     pub const fn line(self) -> Option<LineStyle> {
         match self {
             Self::Line(style) => Some(style),
-            Self::Rectangle(_) | Self::Arrow(_) | Self::Blur(_) => None,
+            Self::Rectangle(_) | Self::Arrow(_) | Self::Blur(_) | Self::Text(_) => None,
         }
     }
 
@@ -481,7 +578,7 @@ impl AnnotationStyle {
     pub const fn arrow(self) -> Option<ArrowStyle> {
         match self {
             Self::Arrow(style) => Some(style),
-            Self::Rectangle(_) | Self::Line(_) | Self::Blur(_) => None,
+            Self::Rectangle(_) | Self::Line(_) | Self::Blur(_) | Self::Text(_) => None,
         }
     }
 
@@ -490,7 +587,16 @@ impl AnnotationStyle {
     pub const fn blur(self) -> Option<BlurStyle> {
         match self {
             Self::Blur(style) => Some(style),
-            Self::Rectangle(_) | Self::Line(_) | Self::Arrow(_) => None,
+            Self::Rectangle(_) | Self::Line(_) | Self::Arrow(_) | Self::Text(_) => None,
+        }
+    }
+
+    /// The text appearance when this is a text style.
+    #[must_use]
+    pub const fn text(self) -> Option<TextStyle> {
+        match self {
+            Self::Text(style) => Some(style),
+            Self::Rectangle(_) | Self::Line(_) | Self::Arrow(_) | Self::Blur(_) => None,
         }
     }
 }
@@ -643,37 +749,118 @@ impl Segment {
     }
 }
 
-/// The retained geometry of one annotation.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Shape {
-    /// A rectangle, possibly leaving the selection.
-    Rectangle(Selection),
-    /// A directed line or arrow segment, possibly leaving the selection.
-    Line(Segment),
+/// The retained geometry of one text object.
+///
+/// The anchor is the display-local top-left of the text box. The bounds are
+/// the measured logical extent of the current content at the current size;
+/// the app recomputes them with the same font input the compositor uses so hit
+/// testing and clipping agree with the rasterized pixels. The text never wraps.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextGeometry {
+    anchor: [f64; 2],
+    content: String,
+    bounds: Selection,
 }
 
-impl Shape {
-    /// The rectangle bounds when this shape is a rectangle.
+impl TextGeometry {
+    /// Builds one text geometry from its anchor, content and measured bounds.
     #[must_use]
-    pub const fn rectangle_bounds(self) -> Option<Selection> {
-        match self {
-            Self::Rectangle(bounds) => Some(bounds),
-            Self::Line(_) => None,
+    pub fn new(anchor: [f64; 2], content: impl Into<String>, bounds: Selection) -> Self {
+        Self {
+            anchor,
+            content: content.into(),
+            bounds,
         }
     }
 
-    /// The directed segment when this shape is a line or arrow.
+    /// Display-local top-left of the text box in logical points.
     #[must_use]
-    pub const fn segment(self) -> Option<Segment> {
-        match self {
-            Self::Line(segment) => Some(segment),
-            Self::Rectangle(_) => None,
+    pub const fn anchor(&self) -> [f64; 2] {
+        self.anchor
+    }
+
+    /// The retained multi-line content; newlines are part of the string.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// The measured logical bounds of the current content.
+    #[must_use]
+    pub fn bounds(&self) -> Selection {
+        self.bounds
+    }
+
+    /// Returns a copy with new content and bounds, keeping the anchor.
+    #[must_use]
+    pub fn with_content(&self, content: impl Into<String>, bounds: Selection) -> Self {
+        Self {
+            anchor: self.anchor,
+            content: content.into(),
+            bounds,
         }
     }
 
     /// Returns a copy translated by a logical delta, rejecting non-finite results.
     #[must_use]
-    pub fn translated(self, dx: f64, dy: f64) -> Option<Self> {
+    pub fn translated(&self, dx: f64, dy: f64) -> Option<Self> {
+        let bounds = Selection::try_new(
+            self.bounds.x() + dx,
+            self.bounds.y() + dy,
+            self.bounds.width(),
+            self.bounds.height(),
+        )
+        .ok()?;
+        Some(Self {
+            anchor: [self.anchor[0] + dx, self.anchor[1] + dy],
+            content: self.content.clone(),
+            bounds,
+        })
+    }
+}
+
+/// The retained geometry of one annotation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Shape {
+    /// A rectangle, possibly leaving the selection.
+    Rectangle(Selection),
+    /// A directed line or arrow segment, possibly leaving the selection.
+    Line(Segment),
+    /// A multi-line text object, possibly leaving the selection.
+    Text(TextGeometry),
+}
+
+impl Shape {
+    /// The rectangle bounds when this shape is a rectangle.
+    #[must_use]
+    pub const fn rectangle_bounds(&self) -> Option<Selection> {
+        match self {
+            Self::Rectangle(bounds) => Some(*bounds),
+            Self::Line(_) | Self::Text(_) => None,
+        }
+    }
+
+    /// The directed segment when this shape is a line or arrow.
+    #[must_use]
+    pub const fn segment(&self) -> Option<Segment> {
+        match self {
+            Self::Line(segment) => Some(*segment),
+            Self::Rectangle(_) | Self::Text(_) => None,
+        }
+    }
+
+    /// The text geometry when this shape is a text object.
+    #[must_use]
+    pub const fn text(&self) -> Option<&TextGeometry> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Rectangle(_) | Self::Line(_) => None,
+        }
+    }
+
+    /// Returns a copy translated by a logical delta, rejecting non-finite results.
+    #[must_use]
+    pub fn translated(&self, dx: f64, dy: f64) -> Option<Self> {
         match self {
             Self::Rectangle(bounds) => Selection::try_new(
                 bounds.x() + dx,
@@ -684,6 +871,7 @@ impl Shape {
             .ok()
             .map(Self::Rectangle),
             Self::Line(segment) => segment.translated(dx, dy).map(Self::Line),
+            Self::Text(text) => text.translated(dx, dy).map(Self::Text),
         }
     }
 }
@@ -692,7 +880,7 @@ impl Shape {
 ///
 /// Bounds and segments may leave the selection; preview and output clip them
 /// per frame instead of discarding the retained data.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Annotation {
     shape: Shape,
     style: AnnotationStyle,
@@ -735,49 +923,64 @@ impl Annotation {
         }
     }
 
+    /// Creates one text object with its retained geometry and style.
+    #[must_use]
+    pub fn text(geometry: TextGeometry, style: TextStyle) -> Self {
+        Self {
+            shape: Shape::Text(geometry),
+            style: AnnotationStyle::Text(style),
+        }
+    }
+
     /// Returns the retained display-local geometry.
     #[must_use]
-    pub const fn shape(self) -> Shape {
-        self.shape
+    pub const fn shape(&self) -> &Shape {
+        &self.shape
     }
 
     /// Returns the appearance tagged by its owning tool.
     #[must_use]
-    pub const fn style(self) -> AnnotationStyle {
+    pub const fn style(&self) -> AnnotationStyle {
         self.style
     }
 
-    /// Clips a retained rectangle to one selection for preview or output.
+    /// Clips a retained rectangle or text box to one selection for preview or output.
     #[must_use]
-    pub fn visible_rectangle(self, selection: Selection) -> Option<Selection> {
-        self.shape
-            .rectangle_bounds()
-            .and_then(|bounds| bounds.intersection(selection))
+    pub fn visible_rectangle(&self, selection: Selection) -> Option<Selection> {
+        match &self.shape {
+            Shape::Rectangle(bounds) => bounds.intersection(selection),
+            Shape::Text(text) => text.bounds().intersection(selection),
+            Shape::Line(_) => None,
+        }
     }
 
     /// Returns a copy translated by a logical delta, rejecting non-finite results.
     #[must_use]
-    pub fn translated(self, dx: f64, dy: f64) -> Option<Self> {
-        self.shape
-            .translated(dx, dy)
-            .map(|shape| Self { shape, ..self })
+    pub fn translated(&self, dx: f64, dy: f64) -> Option<Self> {
+        self.shape.translated(dx, dy).map(|shape| Self {
+            shape,
+            style: self.style,
+        })
     }
 
     /// Returns a copy with one rectangle option applied, or `None` for other types.
     #[must_use]
-    pub const fn with_rectangle_option(self, option: RectangleOption) -> Option<Self> {
+    pub fn with_rectangle_option(self, option: RectangleOption) -> Option<Self> {
         match self.style {
             AnnotationStyle::Rectangle(style) => Some(Self {
                 style: AnnotationStyle::Rectangle(style.with_option(option)),
                 ..self
             }),
-            AnnotationStyle::Line(_) | AnnotationStyle::Arrow(_) | AnnotationStyle::Blur(_) => None,
+            AnnotationStyle::Line(_)
+            | AnnotationStyle::Arrow(_)
+            | AnnotationStyle::Blur(_)
+            | AnnotationStyle::Text(_) => None,
         }
     }
 
     /// Returns a copy with one line option applied, or `None` for other types.
     #[must_use]
-    pub const fn with_line_option(self, option: LineOption) -> Option<Self> {
+    pub fn with_line_option(self, option: LineOption) -> Option<Self> {
         match self.style {
             AnnotationStyle::Line(style) => Some(Self {
                 style: AnnotationStyle::Line(style.with_option(option)),
@@ -785,27 +988,29 @@ impl Annotation {
             }),
             AnnotationStyle::Rectangle(_)
             | AnnotationStyle::Arrow(_)
-            | AnnotationStyle::Blur(_) => None,
+            | AnnotationStyle::Blur(_)
+            | AnnotationStyle::Text(_) => None,
         }
     }
 
     /// Returns a copy with one arrow option applied, or `None` for other types.
     #[must_use]
-    pub const fn with_arrow_option(self, option: ArrowOption) -> Option<Self> {
+    pub fn with_arrow_option(self, option: ArrowOption) -> Option<Self> {
         match self.style {
             AnnotationStyle::Arrow(style) => Some(Self {
                 style: AnnotationStyle::Arrow(style.with_option(option)),
                 ..self
             }),
-            AnnotationStyle::Rectangle(_) | AnnotationStyle::Line(_) | AnnotationStyle::Blur(_) => {
-                None
-            }
+            AnnotationStyle::Rectangle(_)
+            | AnnotationStyle::Line(_)
+            | AnnotationStyle::Blur(_)
+            | AnnotationStyle::Text(_) => None,
         }
     }
 
     /// Returns a copy with one blur option applied, or `None` for other types.
     #[must_use]
-    pub const fn with_blur_option(self, option: BlurOption) -> Option<Self> {
+    pub fn with_blur_option(self, option: BlurOption) -> Option<Self> {
         match self.style {
             AnnotationStyle::Blur(style) => Some(Self {
                 style: AnnotationStyle::Blur(style.with_option(option)),
@@ -813,36 +1018,52 @@ impl Annotation {
             }),
             AnnotationStyle::Rectangle(_)
             | AnnotationStyle::Line(_)
-            | AnnotationStyle::Arrow(_) => None,
+            | AnnotationStyle::Arrow(_)
+            | AnnotationStyle::Text(_) => None,
+        }
+    }
+
+    /// Returns a copy with one text option applied, or `None` for other types.
+    #[must_use]
+    pub fn with_text_option(self, option: TextOption) -> Option<Self> {
+        match self.style {
+            AnnotationStyle::Text(style) => Some(Self {
+                style: AnnotationStyle::Text(style.with_option(option)),
+                ..self
+            }),
+            AnnotationStyle::Rectangle(_)
+            | AnnotationStyle::Line(_)
+            | AnnotationStyle::Arrow(_)
+            | AnnotationStyle::Blur(_) => None,
         }
     }
 
     /// Returns a copy with one endpoint moved; only line and arrow shapes have
     /// endpoints, and the two may coincide without deleting the object.
     #[must_use]
-    pub fn with_endpoint(self, endpoint: Endpoint, point: [f64; 2]) -> Option<Self> {
+    pub fn with_endpoint(&self, endpoint: Endpoint, point: [f64; 2]) -> Option<Self> {
         let segment = self.shape.segment()?;
         segment.with_endpoint(endpoint, point).map(|segment| Self {
             shape: Shape::Line(segment),
-            ..self
+            style: self.style,
         })
     }
 
     /// Returns a copy with a new rectangle shape, keeping its style.
     #[must_use]
-    pub const fn with_rectangle_bounds(self, bounds: Selection) -> Option<Self> {
+    pub fn with_rectangle_bounds(self, bounds: Selection) -> Option<Self> {
         match self.shape {
             Shape::Rectangle(_) => Some(Self {
                 shape: Shape::Rectangle(bounds),
                 ..self
             }),
-            Shape::Line(_) => None,
+            Shape::Line(_) | Shape::Text(_) => None,
         }
     }
 
     /// Returns the display-local center of one rectangle control point.
     #[must_use]
-    pub fn handle_center(self, handle: ResizeHandle) -> Option<[f64; 2]> {
+    pub fn handle_center(&self, handle: ResizeHandle) -> Option<[f64; 2]> {
         self.shape
             .rectangle_bounds()
             .map(|bounds| bounds.handle_center(handle))
@@ -850,7 +1071,7 @@ impl Annotation {
 
     /// Finds the rectangle control point whose logical hit area contains `point`.
     #[must_use]
-    pub fn resize_handle_at(self, point: [f64; 2]) -> Option<ResizeHandle> {
+    pub fn resize_handle_at(&self, point: [f64; 2]) -> Option<ResizeHandle> {
         let bounds = self.shape.rectangle_bounds()?;
         let radius = OBJECT_HANDLE_HIT_RADIUS
             .min(bounds.width() / 3.0)
@@ -873,18 +1094,20 @@ impl Annotation {
 
     /// Finds the line or arrow endpoint whose logical hit area contains `point`.
     #[must_use]
-    pub fn endpoint_at(self, point: [f64; 2]) -> Option<Endpoint> {
+    pub fn endpoint_at(&self, point: [f64; 2]) -> Option<Endpoint> {
         self.shape.segment()?.endpoint_at(point)
     }
 
     /// Whether a display-local point hits this object's body.
     ///
-    /// A rectangle body is its filled area. A line is selectable within a small
-    /// tolerance around its path, and an arrow's head is part of its body.
+    /// A rectangle body is its filled area, a text body is its measured box,
+    /// and a line is selectable within a small tolerance around its path; an
+    /// arrow's head is part of its body.
     #[must_use]
-    pub fn contains(self, point: [f64; 2]) -> bool {
-        match self.shape {
+    pub fn contains(&self, point: [f64; 2]) -> bool {
+        match &self.shape {
             Shape::Rectangle(bounds) => bounds.contains(point),
+            Shape::Text(text) => text.bounds().contains(point),
             Shape::Line(segment) => {
                 let tolerance = self.style.width().map_or(LINE_HIT_TOLERANCE, |width| {
                     (width.points() / 2.0).max(LINE_HIT_TOLERANCE)
@@ -910,7 +1133,7 @@ impl Annotation {
     /// The direction always runs from the start tail to the end tip; a
     /// coincident segment has no outline and draws nothing.
     #[must_use]
-    pub fn arrow_outlines(self) -> Option<Vec<Vec<[f64; 2]>>> {
+    pub fn arrow_outlines(&self) -> Option<Vec<Vec<[f64; 2]>>> {
         let AnnotationStyle::Arrow(style) = self.style else {
             return None;
         };
