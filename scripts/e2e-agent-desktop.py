@@ -315,8 +315,9 @@ def wait_node(app: str, predicate, timeout: float) -> dict:
             last = snapshot_tree(app)
         except Failure as error:
             # A window closing between two commands yields WINDOW_NOT_FOUND;
-            # that is a race in the observation, not a product failure.
-            if "WINDOW_NOT_FOUND" not in str(error):
+            # that is a race in the observation, not a product failure. An
+            # ambiguous snapshot while the overlay settles is the same class.
+            if "WINDOW_NOT_FOUND" not in str(error) and "AMBIGUOUS_TARGET" not in str(error):
                 raise
             last = {}
         else:
@@ -1078,6 +1079,154 @@ def main() -> int:
             fail(f"AX-cancelled session left own windows: {windows(app)}")
         note("mac_e2e_12=pass overlay_cancel=ax phase=Resident")
 
+        # MAC-E2E-24: the Scroll entry gate is addressable, is not activatable
+        # without a selection, and after a selection drives the three-permission
+        # preflight. The selection drag is a --headed precondition; the
+        # acceptance evidence is the product's AX state and text diagnostics.
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        scroll = find_nodes(root, native_id="arcshot.overlay.scroll")
+        if not scroll:
+            fail("the Scroll entry is not addressable")
+        if scroll[0].get("role") != "button":
+            fail("the Scroll entry is not exposed as a button")
+        # Without a selection the entry is present but performs no action.
+        try:
+            agent("click", scroll[0]["ref_id"])
+        except Failure as error:
+            if "POLICY_DENIED" not in str(error):
+                raise
+        else:
+            fail("the Scroll entry was actionable without a valid selection")
+        if count_log(log, "a11y_action=arcshot.overlay.scroll") != 0:
+            fail("the Scroll entry produced an action without a valid selection")
+        # Create a selection as a precondition for the entry gate.
+        agent("drag", "--from-xy", "400,300", "--to-xy", "700,500", "--headed")
+        wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+        scroll = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.scroll",
+                    role="button",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", scroll["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
+        preflight = wait_log_line(log, "scroll_permission ", 10.0, after=mark)
+        missing = [
+            key
+            for key, token in (
+                ("screen_recording", "screen_recording=false"),
+                ("input_monitoring", "input_monitoring=false"),
+                ("accessibility", "accessibility=false"),
+            )
+            if token in preflight
+        ]
+        if missing:
+            notice = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 滚动截图权限") or [None]
+                )[0],
+                10.0,
+            )
+            for key in missing:
+                if not find_nodes(
+                    notice,
+                    native_id=f"arcshot.scroll.permission.{key}",
+                    require_ref=True,
+                ):
+                    fail(f"missing permission {key} has no settings button")
+            recheck = find_nodes(
+                notice, native_id="arcshot.scroll.recheck", require_ref=True
+            )
+            if not recheck:
+                fail("the Scroll permission notice has no recheck button")
+            agent("click", recheck[0]["ref_id"])
+            wait_log(
+                log,
+                "a11y_action=arcshot.scroll.recheck action=Click",
+                10.0,
+                after=mark,
+            )
+            cancel = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(
+                        tree,
+                        native_id="arcshot.scroll.cancel",
+                        require_ref=True,
+                    )
+                    or [None]
+                )[0],
+                10.0,
+            )
+            agent("click", cancel["ref_id"])
+            wait_log(
+                log,
+                "a11y_action=arcshot.scroll.cancel action=Click",
+                10.0,
+                after=mark,
+            )
+            wait_windows(app, 0, 10.0)
+        else:
+            # All three permissions are available: the target probe runs. It
+            # either locks the target or reports a known refusal; both keep the
+            # region session and never claim a completed Scroll capture.
+            prepared = False
+            try:
+                wait_log(log, "scroll_prepared", 5.0, after=mark)
+                prepared = True
+            except Failure:
+                wait_log(log, "scroll_refused reason=Target", 5.0, after=mark)
+            if prepared:
+                control = wait_node(
+                    app,
+                    lambda tree: (
+                        find_nodes(
+                            tree,
+                            native_id="arcshot.scroll.control.cancel",
+                            require_ref=True,
+                        )
+                        or [None]
+                    )[0],
+                    10.0,
+                )
+                agent("click", control["ref_id"])
+                wait_log(
+                    log,
+                    "a11y_action=arcshot.scroll.control.cancel action=Click",
+                    10.0,
+                    after=mark,
+                )
+        # The region session and its selection are preserved.
+        wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        note(
+            f"mac_e2e_24=pass entry_gate=ax selection_precondition=headed_drag "
+            f"missing={','.join(missing) or 'none'}"
+        )
+
         # MAC-E2E-15: the 完成音效 preference toggles through AX and is persisted.
         original_sound = next(
             line.split("completion_sound=", 1)[1].split(" ", 1)[0]
@@ -1243,7 +1392,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=23")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=24")
     return 0
 
 

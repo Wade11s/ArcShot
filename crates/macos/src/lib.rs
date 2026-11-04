@@ -7,6 +7,7 @@ mod login_item;
 mod permission;
 mod preferences;
 mod save;
+mod scroll;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
@@ -30,6 +31,10 @@ pub use preferences::{
 pub use save::{
     PngSavePanel, SaveFileError, SavePanelError, SavePanelOutcome, cancel_save_panel,
     take_save_panel_outcome, write_png_to_file,
+};
+pub use scroll::{
+    frontmost_pid, open_scroll_permission_settings, pointer_location_cg, probe_scroll_target,
+    request_scroll_permission, scroll_exclusion_set, scroll_permissions,
 };
 
 use std::{cell::RefCell, error::Error, fmt};
