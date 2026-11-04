@@ -249,6 +249,13 @@ impl Document {
         Ok(())
     }
 
+    /// Ends any in-progress edit so an output snapshot holds committed content.
+    ///
+    /// This slice has no text tool, so nothing is pending yet. Both `Finish` and
+    /// `Save` call this hook before snapshotting version and crop; text/IME
+    /// commit extends it later instead of adding a second output pipeline (I-08).
+    pub fn commit_edits(&mut self) {}
+
     /// Converts the current selection to the physical crop used by image output.
     ///
     /// # Errors

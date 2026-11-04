@@ -28,6 +28,8 @@ pub(crate) enum UiCommand {
         ticket: CaptureTicket,
         point: Option<[f64; 2]>,
     },
+    /// The toolbar Save button: explicit PNG file output for this attempt.
+    SaveCapture(CaptureTicket),
 }
 pub(crate) type UiQueue = Rc<RefCell<Vec<UiCommand>>>;
 
@@ -111,6 +113,7 @@ impl Render for CaptureView {
             .and_then(|(selection, screen)| selection.pixel_rect(screen).ok())
             .map(|crop| format!("{} × {}", crop.width(), crop.height()));
         let finish_enabled = frozen && self.selection.is_some() && !busy;
+        let save_enabled = finish_enabled;
         let error = self.error.clone();
         let image = self
             .image
@@ -289,6 +292,38 @@ impl Render for CaptureView {
                     .flex()
                     .gap_2()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child({
+                        let queue = Rc::clone(&self.queue);
+                        let a11y_queue = Rc::clone(&self.queue);
+                        let mut button = div()
+                            .id("save-capture")
+                            .aria_label("保存 PNG")
+                            .accessibility_id("arcshot.overlay.save")
+                            .px_4()
+                            .py_2()
+                            .rounded_md()
+                            .text_color(rgb(0xffffff))
+                            .bg(if save_enabled {
+                                rgb(0x3b465b)
+                            } else {
+                                rgb(0x2a2f3a)
+                            })
+                            .child("保存");
+                        if save_enabled {
+                            button = button
+                                .role(Role::Button)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x52617b)))
+                                .on_click(move |_, _, _| {
+                                    queue.borrow_mut().push(UiCommand::SaveCapture(ticket));
+                                })
+                                .on_a11y_action(AccessibleAction::Click, move |_, _, _| {
+                                    log::info!("a11y_action=arcshot.overlay.save action=Click");
+                                    a11y_queue.borrow_mut().push(UiCommand::SaveCapture(ticket));
+                                });
+                        }
+                        button
+                    })
                     .child({
                         let queue = Rc::clone(&self.queue);
                         let a11y_queue = Rc::clone(&self.queue);

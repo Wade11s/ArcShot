@@ -68,6 +68,22 @@ pub enum CaptureAction {
         /// Double-click point in display-local logical points.
         point: [f64; 2],
     },
+    /// Opens the native PNG save panel for the current selection.
+    ///
+    /// Like `Finish`, this runs the shared pre-output commit/snapshot hook and
+    /// takes the output mutex, so editing, repeated finish and repeated save are
+    /// disabled while the panel is open. The user's destination stays in the app.
+    Save {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+    },
+    /// Reports how the native save panel ended for exactly one fenced job.
+    SavePanelResolved {
+        /// Snapshot the panel was opened for.
+        job: OutputJob,
+        /// Chosen, cancelled or failed; a cancel is not an error.
+        result: SavePanelResult,
+    },
     /// Reports the result of one fenced composition/encode/clipboard job.
     OutputCompleted {
         /// Exact document version and crop the job was composed from.
@@ -77,13 +93,6 @@ pub enum CaptureAction {
     },
     /// Invalidates the built-in screen; never migrates to another display.
     DisplayInvalidated,
-    /// The shared output/save mutex contract (I-10): while busy with output
-    /// processing or an open save dialog, `Start` from the capture hotkey or
-    /// menu is ignored. Output slices own setting and releasing it.
-    SetOutputBusy {
-        /// Whether an output action or save dialog is currently in flight.
-        busy: bool,
-    },
 }
 
 /// Tasks to execute outside the pure core, guarded by their attempt ticket.
@@ -103,10 +112,36 @@ pub enum CaptureEffect {
     ReportFailure(CaptureFailure),
     /// Compose and encode exactly this document snapshot outside the UI thread.
     ComposeOutput(OutputJob),
-    /// Play the short completion sound after successful clipboard output.
+    /// Show the native PNG save panel for a fenced explicit-save snapshot.
+    RequestSavePanel(OutputJob),
+    /// Play the short completion sound after successful clipboard or file output.
     PlayCompletionSound,
     /// Report an output failure without discarding the document.
     ReportOutputFailure(OutputFailure),
+}
+
+/// Where one fenced output action publishes its encoded PNG.
+///
+/// Finish and explicit Save share the compose/encode result for a document
+/// version but never trigger each other's side effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputTarget {
+    /// Finish: copy to the pasteboard, never write a file.
+    Clipboard,
+    /// Explicit Save: write the chosen file, never copy to the pasteboard.
+    SaveFile,
+}
+
+/// How the native PNG save panel ended for one fenced output job.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SavePanelResult {
+    /// The user chose a destination; compose and encode for the file write.
+    Chosen,
+    /// The user cancelled; the untouched document stays editable and this is
+    /// not an error.
+    Cancelled,
+    /// The panel could not be shown or yielded no local file URL.
+    Failed,
 }
 
 /// One version-fenced output job: the document may not change before publishing.
@@ -115,6 +150,7 @@ pub struct OutputJob {
     ticket: CaptureTicket,
     version: u64,
     crop: PixelRect,
+    target: OutputTarget,
 }
 impl OutputJob {
     /// Overlay attempt that owns the document.
@@ -132,6 +168,11 @@ impl OutputJob {
     pub const fn crop(self) -> PixelRect {
         self.crop
     }
+    /// The one side effect this job may perform after encoding.
+    #[must_use]
+    pub const fn target(self) -> OutputTarget {
+        self.target
+    }
 }
 
 /// Output failures that keep the frozen document available for retry.
@@ -143,6 +184,10 @@ pub enum OutputFailure {
     Encode,
     /// The clipboard rejected the PNG or did not expose the PNG type.
     Clipboard,
+    /// The native save panel could not be shown or produced no file URL.
+    SavePanel,
+    /// The chosen PNG file was not confirmed written.
+    SaveFile,
     /// The encode worker could not run or unwound.
     Worker,
     /// A previous encode job still owns the single slot.
@@ -154,6 +199,8 @@ impl OutputFailure {
             Self::ResourceLimit => "所选区域超出导出尺寸/内存预算，未产生输出，可缩小选区后重试",
             Self::Encode => "合成或 PNG 编码失败，未产生输出，可重试或取消",
             Self::Clipboard => "剪贴板未确认写入 PNG，未报告成功；选区已保留，可重试",
+            Self::SavePanel => "无法打开 PNG 保存对话框，未产生输出；选区已保留，可重试",
+            Self::SaveFile => "PNG 未确认写入所选文件，未报告成功；选区已保留，可重试",
             Self::Worker => "编码工作线程未能完成，未产生输出，可重试",
             Self::Busy => "上一个合成/编码任务仍在结束，未产生输出，请稍后重试",
         }
@@ -220,19 +267,28 @@ enum State {
     Relaunch,
 }
 
+/// The one fenced output operation that owns the shared output/save mutex.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputStage {
+    /// A native save panel is open; no encoded bytes exist yet.
+    Panel(OutputJob),
+    /// The fixed snapshot is being composed/encoded before one side effect.
+    Encoding(OutputJob),
+}
+
 /// The sole capture authority; contains no system handles, clocks or I/O.
 #[derive(Debug)]
 pub struct CaptureSession {
     epoch: u64,
     state: State,
-    output_mutex: bool,
+    output: Option<OutputStage>,
 }
 impl Default for CaptureSession {
     fn default() -> Self {
         Self {
             epoch: 0,
             state: State::Resident,
-            output_mutex: false,
+            output: None,
         }
     }
 }
@@ -254,7 +310,7 @@ impl CaptureSession {
     /// Whether the shared output/save mutex currently suppresses `Start`.
     #[must_use]
     pub const fn output_busy(&self) -> bool {
-        self.output_mutex
+        self.output.is_some()
     }
 
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.
@@ -272,16 +328,18 @@ impl CaptureSession {
         }
     }
 
-    /// Fences publishing encoded output immediately before the clipboard side effect.
+    /// Fences publishing encoded output immediately before either side effect.
     ///
-    /// The job must belong to the current attempt, match the current document
-    /// version and crop, and remain inside an active output operation.
+    /// The job must be the exact snapshot the session is encoding, still belong
+    /// to the current attempt, and match the current document version and crop.
+    /// A save panel that is still open has no encoded bytes and publishes nothing.
     #[must_use]
     pub fn may_publish(&self, job: OutputJob) -> bool {
         let State::Frozen { ticket, document } = &self.state else {
             return false;
         };
-        self.output_mutex && job_matches(*ticket, document, job)
+        matches!(self.output, Some(OutputStage::Encoding(active)) if active == job)
+            && job_matches(*ticket, document, job)
     }
 
     /// Fences window presentation immediately before a UI side effect.
@@ -301,7 +359,7 @@ impl CaptureSession {
         match action {
             // The shared output/save mutex ignores the capture hotkey and the
             // menu Start alike; output slices release it explicitly.
-            CaptureAction::Start if self.output_mutex => vec![],
+            CaptureAction::Start if self.output.is_some() => vec![],
             CaptureAction::Start => match self.state {
                 State::Relaunch => vec![CaptureEffect::ReportFailure(
                     CaptureFailure::NativeUncertain,
@@ -359,7 +417,7 @@ impl CaptureSession {
                 else {
                     return vec![];
                 };
-                if *current != ticket || self.output_mutex {
+                if *current != ticket || self.output.is_some() {
                     return vec![];
                 }
                 let Ok(selection) = Selection::from_drag(from, to) else {
@@ -369,18 +427,28 @@ impl CaptureSession {
                 let _ = document.select(selection);
                 vec![]
             }
-            CaptureAction::Finish { ticket } => self.finish(ticket, None),
-            CaptureAction::FinishAt { ticket, point } => self.finish(ticket, Some(point)),
+            CaptureAction::Finish { ticket } => {
+                self.begin_output(ticket, OutputTarget::Clipboard, None)
+            }
+            CaptureAction::FinishAt { ticket, point } => {
+                self.begin_output(ticket, OutputTarget::Clipboard, Some(point))
+            }
+            CaptureAction::Save { ticket } => {
+                self.begin_output(ticket, OutputTarget::SaveFile, None)
+            }
+            CaptureAction::SavePanelResolved { job, result } => self.resolve_panel(job, result),
             CaptureAction::OutputCompleted { job, result } => {
                 let matches_job = match &self.state {
                     State::Frozen { ticket, document } => job_matches(*ticket, document, job),
                     _ => false,
                 };
+                let publishing =
+                    matches!(self.output, Some(OutputStage::Encoding(active)) if active == job);
                 // Stale or duplicated results never publish or end another session.
-                if !matches_job || !self.output_mutex {
+                if !matches_job || !publishing {
                     return vec![];
                 }
-                self.output_mutex = false;
+                self.output = None;
                 match result {
                     Ok(()) => {
                         self.state = State::Resident;
@@ -394,7 +462,7 @@ impl CaptureSession {
             }
             CaptureAction::Cancel | CaptureAction::DisplayInvalidated => {
                 // A cancelled output job may still finish; its fence must fail.
-                self.output_mutex = false;
+                self.output = None;
                 let invalid = matches!(action, CaptureAction::DisplayInvalidated);
                 self.state = match self.state {
                     State::Preparing(ticket) | State::Draining { ticket, .. } => State::Draining {
@@ -410,22 +478,29 @@ impl CaptureSession {
                 }
                 effects
             }
-            CaptureAction::SetOutputBusy { busy } => {
-                self.output_mutex = busy;
-                vec![]
-            }
         }
     }
 
-    fn finish(&mut self, ticket: CaptureTicket, point: Option<[f64; 2]>) -> Vec<CaptureEffect> {
-        if self.output_mutex {
-            return vec![]; // Editing, duplicate Finish and save are disabled.
+    /// Runs the shared pre-output contract, then fences one output snapshot.
+    ///
+    /// Finish and Save both pass through here: pending edits are committed first
+    /// (no text tool in this slice), then ticket, selection and the pre-output
+    /// snapshot (document version and physical crop) are fixed before any side
+    /// effect. The target only decides which single side effect may follow.
+    fn begin_output(
+        &mut self,
+        ticket: CaptureTicket,
+        target: OutputTarget,
+        point: Option<[f64; 2]>,
+    ) -> Vec<CaptureEffect> {
+        if self.output.is_some() {
+            return vec![]; // Editing, duplicate Finish and repeated Save stay disabled.
         }
         let job = {
             let State::Frozen {
                 ticket: current,
                 document,
-            } = &self.state
+            } = &mut self.state
             else {
                 return vec![];
             };
@@ -439,6 +514,7 @@ impl CaptureSession {
             }) {
                 return vec![]; // Double-click outside the selection is not Finish.
             }
+            document.commit_edits();
             let Ok(crop) = document.crop() else {
                 return vec![];
             };
@@ -446,10 +522,48 @@ impl CaptureSession {
                 ticket,
                 version: document.version(),
                 crop,
+                target,
             }
         };
-        self.output_mutex = true;
-        vec![CaptureEffect::ComposeOutput(job)]
+        match target {
+            OutputTarget::Clipboard => {
+                self.output = Some(OutputStage::Encoding(job));
+                vec![CaptureEffect::ComposeOutput(job)]
+            }
+            OutputTarget::SaveFile => {
+                self.output = Some(OutputStage::Panel(job));
+                vec![CaptureEffect::RequestSavePanel(job)]
+            }
+        }
+    }
+
+    /// Applies one native save-panel outcome under the same snapshot fence.
+    fn resolve_panel(&mut self, job: OutputJob, result: SavePanelResult) -> Vec<CaptureEffect> {
+        if !matches!(self.output, Some(OutputStage::Panel(active)) if active == job) {
+            return vec![]; // Closed, stale or duplicated panel results change nothing.
+        }
+        let matches_document = match &self.state {
+            State::Frozen { ticket, document } => job_matches(*ticket, document, job),
+            _ => false,
+        };
+        if !matches_document {
+            self.output = None;
+            return vec![];
+        }
+        match result {
+            SavePanelResult::Chosen => {
+                self.output = Some(OutputStage::Encoding(job));
+                vec![CaptureEffect::ComposeOutput(job)]
+            }
+            SavePanelResult::Cancelled => {
+                self.output = None;
+                vec![]
+            }
+            SavePanelResult::Failed => {
+                self.output = None;
+                vec![CaptureEffect::ReportOutputFailure(OutputFailure::SavePanel)]
+            }
+        }
     }
 
     fn begin(&mut self) -> Vec<CaptureEffect> {
