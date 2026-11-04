@@ -99,7 +99,7 @@ startup_smoke=pass activation_policy=Accessory quit_action=terminate:
 | CORE-SESSION-31 | 三权限缺失（输入监控/辅助功能） | 停止并保留区域会话与选区，无输出 | `test core_session_31_missing_scroll_permissions_stop_and_keep_the_region_session … ok` | Pass |
 | CORE-SESSION-32 | 三权限均可用 | 进入目标识别 | `test core_session_32_all_permissions_proceed_to_target_identification … ok` | Pass |
 | CORE-SESSION-33 | 目标窗口不包含选区 / 完整包含选区 | 前者 `Target(Geometry)` 拒绝；后者锁定并进入排除集准备 | `test core_session_33_target_lock_requires_the_selection_inside_the_window … ok` | Pass |
-| CORE-SESSION-34 | 目标 `NoTarget`/`AmbiguousTarget`/`Offscreen`/`NotFrontmost`/`PointerMismatch` | 各自已知失败停止并保留区域会话 | `test core_session_34_known_target_failures_stop_and_keep_the_region_session … ok` | Pass |
+| CORE-SESSION-34 | 目标 `NoTarget`/`AmbiguousTarget`/`NotFrontmost`/`PointerMismatch` | 各自已知失败停止并保留区域会话 | `test core_session_34_known_target_failures_stop_and_keep_the_region_session … ok` | Pass |
 | CORE-SESSION-35 | 自有窗口映射失败 | `Windows(MappingFailed)` 拒绝，无输出 | `test core_session_35_window_exclusion_mapping_failure_refuses_without_output … ok` | Pass |
 | CORE-SESSION-36 | 目标锁定 + 排除集映射成功 | `ScrollPrepared`，排除集固定 | `test core_session_36_successful_preparation_fixes_the_exclusion_set … ok` | Pass |
 | CORE-SESSION-37 | 准备中 `CancelScroll` | 保留选区，区域会话保持 Frozen | `test core_session_37_cancel_scroll_keeps_the_region_selection … ok` | Pass |

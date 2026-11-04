@@ -1954,7 +1954,6 @@ fn scroll_refusal_message(refusal: &ScrollRefusal) -> &'static str {
         ScrollRefusal::Target(ScrollTargetError::AmbiguousTarget) => {
             "选区跨越多个窗口，无法确定唯一目标。"
         }
-        ScrollRefusal::Target(ScrollTargetError::Offscreen) => "目标窗口不在屏幕上。",
         ScrollRefusal::Target(ScrollTargetError::NotFrontmost) => {
             "目标应用未在前台，请先切换到目标窗口。"
         }
@@ -1962,8 +1961,7 @@ fn scroll_refusal_message(refusal: &ScrollRefusal) -> &'static str {
             "指针下的窗口与目标不一致，请将指针移到目标窗口内。"
         }
         ScrollRefusal::Target(ScrollTargetError::Geometry) => "目标几何无法确认。",
-        ScrollRefusal::Target(ScrollTargetError::NativeUncertain)
-        | ScrollRefusal::Target(ScrollTargetError::NotMainThread) => {
+        ScrollRefusal::Target(ScrollTargetError::NativeUncertain) => {
             "无法确认目标窗口的公开状态，未产生输出。"
         }
         ScrollRefusal::Windows(ScrollWindowError::MappingFailed) => {

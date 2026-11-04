@@ -250,7 +250,6 @@ fn core_session_34_known_target_failures_stop_and_keep_the_region_session() {
     for error in [
         ScrollTargetError::NoTarget,
         ScrollTargetError::AmbiguousTarget,
-        ScrollTargetError::Offscreen,
         ScrollTargetError::NotFrontmost,
         ScrollTargetError::PointerMismatch,
     ] {

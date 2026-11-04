@@ -155,8 +155,6 @@ pub enum ScrollTargetError {
     NoTarget,
     /// More than one window contains the whole selection.
     AmbiguousTarget,
-    /// The candidate window is not on screen.
-    Offscreen,
     /// The owning application is not frontmost.
     NotFrontmost,
     /// The pointer's public hit-test window differs from the locked target.
@@ -165,8 +163,6 @@ pub enum ScrollTargetError {
     Geometry,
     /// The native query itself could not be confirmed.
     NativeUncertain,
-    /// The query was made away from the main thread.
-    NotMainThread,
 }
 
 /// Why ArcShot's own visible window set could not be fixed.
