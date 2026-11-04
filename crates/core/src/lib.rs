@@ -1,13 +1,16 @@
 //! Platform-neutral data shared by ArcShot's product crates.
 
+mod annotation;
 mod document;
 mod frame;
 mod hotkey;
 mod session;
 
+pub use annotation::{
+    Annotation, PaletteColor, RectangleOption, RectangleStyle, StrokeWidth, Tool, annotation_at,
+};
 pub use document::{
-    Annotation, Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle,
-    Selection,
+    Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle, Selection,
 };
 pub use frame::{CapturedFrame, FrameError, MAX_EDGE, MAX_PIXELS, ScreenGeometry};
 pub use hotkey::Hotkey;

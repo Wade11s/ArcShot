@@ -1,5 +1,8 @@
 //! Immutable capture document, logical region selection and physical output geometry.
-use crate::{CapturedFrame, ScreenGeometry, frame::MAX_EDGE, frame::MAX_PIXELS};
+use crate::{
+    Annotation, CapturedFrame, RectangleOption, RectangleStyle, ScreenGeometry, Tool,
+    annotation::annotation_at, frame::MAX_EDGE, frame::MAX_PIXELS,
+};
 use std::{error::Error, fmt};
 
 /// V1 maximum encoded PNG size, checked before any clipboard or file side effect.
@@ -272,50 +275,19 @@ impl PixelRect {
     }
 }
 
-/// The logical footprint of one layer-ordered annotation.
-///
-/// This slice carries geometry only so moving or resizing the selection already
-/// has defined annotation semantics; drawing tools and their styling arrive with
-/// the first object slice. Retained bounds may leave the selection; preview and
-/// output clip them per frame instead of discarding the data.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Annotation {
-    bounds: Selection,
-}
-
-impl Annotation {
-    const fn from_bounds(bounds: Selection) -> Self {
-        Self { bounds }
-    }
-    /// Returns the retained display-local geometry, even when it leaves the selection.
-    #[must_use]
-    pub const fn bounds(self) -> Selection {
-        self.bounds
-    }
-    /// Clips the retained geometry to one selection for preview or output.
-    #[must_use]
-    pub fn visible_bounds(self, selection: Selection) -> Option<Selection> {
-        self.bounds.intersection(selection)
-    }
-    fn translated(self, dx: f64, dy: f64) -> Option<Self> {
-        Selection::try_new(
-            self.bounds.x() + dx,
-            self.bounds.y() + dy,
-            self.bounds.width(),
-            self.bounds.height(),
-        )
-        .ok()
-        .map(Self::from_bounds)
-    }
-}
-
-/// The edit a pointer drag performs on the single active selection.
+/// The edit a pointer drag performs on the selection or one object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DragTarget {
     /// Dragging inside the selection moves it and every annotation.
     Move,
-    /// Dragging one control point resizes the selection only.
+    /// Dragging one selection control point resizes the selection only.
     Resize(ResizeHandle),
+    /// Dragging with the rectangle tool creates one object from the press point.
+    CreateObject,
+    /// Dragging an object body moves that object only.
+    MoveObject,
+    /// Dragging one object control point resizes that object; edges may flip.
+    ResizeObject(ResizeHandle),
 }
 
 /// A committed document change, kept as edit state so the base image is shared.
@@ -331,6 +303,10 @@ struct Drag {
     target: DragTarget,
     start: [f64; 2],
     baseline: EditState,
+    /// Object index for move/resize drags; the layer order does not change mid-drag.
+    object: Option<usize>,
+    /// Tool style captured at press so a creation keeps one appearance.
+    style: Option<RectangleStyle>,
 }
 
 /// The single immutable-base document shared by region and scroll output.
@@ -344,6 +320,12 @@ pub struct Document {
     selection: Option<Selection>,
     /// Bottom-to-top layer order: later entries draw above earlier ones.
     annotations: Vec<Annotation>,
+    /// Session-scoped appearance of the next rectangle, independent of history.
+    rectangle_style: RectangleStyle,
+    /// Session-scoped active pointer tool, independent of history.
+    tool: Tool,
+    /// Single selected object; history never promises to restore this state.
+    selected: Option<usize>,
     history: History,
     drag: Option<Drag>,
     version: u64,
@@ -363,6 +345,13 @@ impl Document {
             frame,
             selection: None,
             annotations: Vec::new(),
+            rectangle_style: RectangleStyle::new(
+                crate::PaletteColor::Red,
+                crate::StrokeWidth::Three,
+                false,
+            ),
+            tool: Tool::Select,
+            selected: None,
             history: History {
                 undo: Vec::new(),
                 redo: Vec::new(),
@@ -392,6 +381,96 @@ impl Document {
     pub fn annotations(&self) -> &[Annotation] {
         &self.annotations
     }
+    /// Returns the single selected object index, if any.
+    #[must_use]
+    pub const fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+    /// Returns the session-scoped active pointer tool.
+    #[must_use]
+    pub const fn tool(&self) -> Tool {
+        self.tool
+    }
+    /// Returns the session-scoped appearance used by the next rectangle.
+    #[must_use]
+    pub const fn rectangle_style(&self) -> RectangleStyle {
+        self.rectangle_style
+    }
+
+    /// Switches the active pointer tool; this is interaction state, not history.
+    ///
+    /// A tool change never clears objects, styles or the selection, and a held
+    /// drag keeps its original tool until release.
+    pub fn set_tool(&mut self, tool: Tool) {
+        if self.drag.is_none() {
+            self.tool = tool;
+        }
+    }
+
+    /// Clears the single object selection without touching the document.
+    ///
+    /// Returns whether an object was selected. This is interaction state and
+    /// never enters history or bumps the version.
+    pub fn deselect(&mut self) -> bool {
+        self.selected.take().is_some()
+    }
+
+    /// Applies one rectangle option to the tool memory and, when a rectangle
+    /// object is selected, to that object as one undoable step.
+    ///
+    /// Other objects are never touched and the tool is never switched. A value
+    /// that does not change the selected object records no history entry.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn apply_rectangle_option(
+        &mut self,
+        option: RectangleOption,
+    ) -> Result<bool, DocumentError> {
+        if self.drag.is_some() {
+            return Ok(false);
+        }
+        self.rectangle_style = self.rectangle_style.with_option(option);
+        let Some(index) = self.selected else {
+            return Ok(false);
+        };
+        let Some(annotation) = self.annotations.get(index).copied() else {
+            self.selected = None;
+            return Ok(false);
+        };
+        let updated = annotation.with_option(option);
+        if updated == annotation {
+            return Ok(false);
+        }
+        let version = self.next_version()?;
+        let previous = self.edit_state();
+        self.annotations[index] = updated;
+        self.commit(previous, version);
+        Ok(true)
+    }
+
+    /// Deletes the selected object as one undoable step.
+    ///
+    /// # Errors
+    /// Returns [`DocumentError::VersionExhausted`] when the change cannot be recorded.
+    pub fn delete_selected(&mut self) -> Result<bool, DocumentError> {
+        if self.drag.is_some() {
+            return Ok(false);
+        }
+        let Some(index) = self.selected else {
+            return Ok(false);
+        };
+        if index >= self.annotations.len() {
+            self.selected = None;
+            return Ok(false);
+        }
+        let version = self.next_version()?;
+        let previous = self.edit_state();
+        self.annotations.remove(index);
+        self.selected = None;
+        self.commit(previous, version);
+        Ok(true)
+    }
 
     /// Adds one annotation above the existing layers as a single undoable step.
     ///
@@ -407,16 +486,17 @@ impl Document {
         }
         let version = self.next_version()?;
         let previous = self.edit_state();
-        self.annotations.push(Annotation::from_bounds(bounds));
+        self.annotations
+            .push(Annotation::new(bounds, self.rectangle_style));
         self.commit(previous, version);
         Ok(())
     }
 
-    /// Starts one selection drag at a display-local point.
+    /// Starts one selection-only drag at a display-local point.
     ///
-    /// Only the select tool exists in this slice, so a press inside the single
-    /// selection starts moving it and all annotations. A press outside starts no
-    /// core drag; the overlay treats it as a new selection band.
+    /// This is the pre-object entry kept for selection gestures; the overlay
+    /// routes pointer presses through [`Document::begin_pointer`], which also
+    /// resolves object hits and the active tool.
     pub fn begin_drag(&mut self, point: [f64; 2]) -> Option<DragTarget> {
         if self.drag.is_some() {
             return None;
@@ -431,6 +511,88 @@ impl Document {
             target,
             start: point,
             baseline: self.edit_state(),
+            object: None,
+            style: None,
+        });
+        Some(target)
+    }
+
+    /// Starts the drag the active tool performs at a display-local point.
+    ///
+    /// With the select tool, the topmost visible object wins over the selection
+    /// and its body/control points resolve to an object move/resize. Empty space
+    /// clears the object selection but still starts a selection move. With the
+    /// rectangle tool, the press must start inside the valid selection and
+    /// creates a new object; a press outside starts no core drag so the overlay
+    /// can begin a new selection band.
+    pub fn begin_pointer(&mut self, point: [f64; 2]) -> Option<DragTarget> {
+        if self.drag.is_some() {
+            return None;
+        }
+        let selection = self.selection?;
+        let inside = selection.contains(point);
+        if self.tool == Tool::Rectangle {
+            self.selected = None;
+            if !inside {
+                return None;
+            }
+            let target = DragTarget::CreateObject;
+            self.drag = Some(Drag {
+                target,
+                start: point,
+                baseline: self.edit_state(),
+                object: None,
+                style: Some(self.rectangle_style),
+            });
+            return Some(target);
+        }
+        // The selected object's own handles stay grabbable even where another
+        // object's body would otherwise win the hit test.
+        if let Some(index) = self.selected
+            && let Some(annotation) = self.annotations.get(index)
+            && let Some(handle) = annotation.resize_handle_at(point)
+        {
+            self.drag = Some(Drag {
+                target: DragTarget::ResizeObject(handle),
+                start: point,
+                baseline: self.edit_state(),
+                object: Some(index),
+                style: None,
+            });
+            return Some(DragTarget::ResizeObject(handle));
+        }
+        if inside && let Some(index) = annotation_at(&self.annotations, point) {
+            let annotation = self.annotations[index];
+            let target = match annotation.resize_handle_at(point) {
+                Some(handle) => DragTarget::ResizeObject(handle),
+                None => DragTarget::MoveObject,
+            };
+            self.selected = Some(index);
+            self.drag = Some(Drag {
+                target,
+                start: point,
+                baseline: self.edit_state(),
+                object: Some(index),
+                style: None,
+            });
+            return Some(target);
+        }
+        let handle = selection.resize_handle_at(point);
+        if handle.is_none() {
+            // A press on empty space or outside clears the single object selection.
+            self.selected = None;
+        }
+        let target = match handle {
+            Some(handle) => DragTarget::Resize(handle),
+            None if inside => DragTarget::Move,
+            None => return None,
+        };
+        self.drag = Some(Drag {
+            target,
+            start: point,
+            baseline: self.edit_state(),
+            object: None,
+            style: None,
         });
         Some(target)
     }
@@ -442,6 +604,92 @@ impl Document {
         };
         if !point.iter().all(|value| value.is_finite()) {
             return;
+        }
+        match drag.target {
+            DragTarget::CreateObject => {
+                // The draft is the last layer; a zero extent removes it again so
+                // a release without a real rectangle records no history entry.
+                let style = drag.style.unwrap_or_default();
+                match Selection::from_drag(drag.start, point) {
+                    Ok(bounds) => {
+                        let mut annotations = drag.baseline.annotations.clone();
+                        annotations.push(Annotation::new(bounds, style));
+                        self.selected = Some(annotations.len() - 1);
+                        self.annotations = annotations;
+                    }
+                    Err(_) => {
+                        self.annotations = drag.baseline.annotations.clone();
+                        self.selected = None;
+                    }
+                }
+                return;
+            }
+            DragTarget::MoveObject => {
+                let Some(index) = drag.object else {
+                    return;
+                };
+                let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
+                    return;
+                };
+                let Some(moved) =
+                    annotation.translated(point[0] - drag.start[0], point[1] - drag.start[1])
+                else {
+                    return;
+                };
+                let mut annotations = drag.baseline.annotations.clone();
+                annotations[index] = moved;
+                self.annotations = annotations;
+                self.selected = Some(index);
+                return;
+            }
+            DragTarget::ResizeObject(handle) => {
+                let Some(index) = drag.object else {
+                    return;
+                };
+                let Some(annotation) = drag.baseline.annotations.get(index).copied() else {
+                    return;
+                };
+                let bounds = annotation.bounds();
+                let (mut left, mut right) = (bounds.x(), bounds.x() + bounds.width());
+                let (mut top, mut bottom) = (bounds.y(), bounds.y() + bounds.height());
+                match handle {
+                    ResizeHandle::TopLeft => {
+                        left = point[0];
+                        top = point[1];
+                    }
+                    ResizeHandle::Top => top = point[1],
+                    ResizeHandle::TopRight => {
+                        right = point[0];
+                        top = point[1];
+                    }
+                    ResizeHandle::Right => right = point[0],
+                    ResizeHandle::BottomRight => {
+                        right = point[0];
+                        bottom = point[1];
+                    }
+                    ResizeHandle::Bottom => bottom = point[1],
+                    ResizeHandle::BottomLeft => {
+                        left = point[0];
+                        bottom = point[1];
+                    }
+                    ResizeHandle::Left => left = point[0],
+                }
+                // Crossing the opposite edge flips the object instead of
+                // inverting it; an exactly zero extent keeps the last valid one.
+                let x = left.min(right);
+                let y = top.min(bottom);
+                let Ok(resized) =
+                    Selection::try_new(x, y, (right - left).abs(), (bottom - top).abs())
+                else {
+                    return;
+                };
+                let mut annotations = drag.baseline.annotations.clone();
+                annotations[index] = Annotation::new(resized, annotation.style());
+                self.annotations = annotations;
+                self.selected = Some(index);
+                return;
+            }
+            DragTarget::Move | DragTarget::Resize(_) => {}
         }
         let Some(baseline) = drag.baseline.selection else {
             return;
@@ -530,6 +778,9 @@ impl Document {
                 };
                 (resized, drag.baseline.annotations.clone())
             }
+            DragTarget::CreateObject | DragTarget::MoveObject | DragTarget::ResizeObject(_) => {
+                return;
+            }
         };
         // The single document limit check stays ahead of every applied resize/move.
         if candidate.pixel_rect(self.frame.geometry()).is_err() {
@@ -588,6 +839,8 @@ impl Document {
         };
         let current = self.edit_state();
         self.restore(previous);
+        // History restores content, style and layering; selection is not promised.
+        self.selected = None;
         self.history.redo.push(current);
         self.version = version;
         Ok(true)
@@ -613,6 +866,7 @@ impl Document {
         };
         let current = self.edit_state();
         self.restore(next);
+        self.selected = None;
         self.history.undo.push(current);
         self.version = version;
         Ok(true)
@@ -665,6 +919,7 @@ impl Document {
         let previous = self.edit_state();
         self.selection = Some(selection);
         self.annotations.clear();
+        self.selected = None;
         self.commit(previous, version);
         Ok(())
     }

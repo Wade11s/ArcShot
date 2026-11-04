@@ -1,5 +1,5 @@
 //! Authority for capture preparation, cancellation and native uncertainty.
-use crate::{CapturedFrame, Document, PixelRect, Selection};
+use crate::{Annotation, CapturedFrame, Document, PixelRect, RectangleOption, Selection, Tool};
 use std::{error::Error, fmt};
 
 /// Identifies one capture attempt across permission, worker and window effects.
@@ -56,23 +56,47 @@ pub enum CaptureAction {
         /// Drag end in display-local logical points.
         to: [f64; 2],
     },
-    /// Starts one selection drag at a display-local point.
-    SelectionDragStarted {
+    /// Starts the pointer drag the active tool performs at a point.
+    PointerPressed {
         /// Attempt whose overlay produced the press.
         ticket: CaptureTicket,
         /// Press point in display-local logical points.
         point: [f64; 2],
     },
-    /// Updates the live preview of the active selection drag.
-    SelectionDragUpdated {
+    /// Updates the live preview of the active pointer drag.
+    PointerMoved {
         /// Attempt whose overlay produced the move.
         ticket: CaptureTicket,
         /// Current pointer position in display-local logical points.
         point: [f64; 2],
     },
     /// Ends the active drag; changed state enters history as exactly one step.
-    SelectionDragEnded {
+    PointerReleased {
         /// Attempt whose overlay produced the release.
+        ticket: CaptureTicket,
+    },
+    /// Switches the active pointer tool; interaction state, never history.
+    SelectTool {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Tool the user selected.
+        tool: Tool,
+    },
+    /// Applies one rectangle option to the tool memory and any selected object.
+    RectangleOption {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+        /// Style option the user selected.
+        option: RectangleOption,
+    },
+    /// Deletes the single selected object as one undoable step.
+    DeleteSelected {
+        /// Attempt whose overlay produced the action.
+        ticket: CaptureTicket,
+    },
+    /// Clears the single object selection without touching content.
+    DeselectSelected {
+        /// Attempt whose overlay produced the action.
         ticket: CaptureTicket,
     },
     /// Undoes the most recent committed document edit.
@@ -116,7 +140,7 @@ pub enum CaptureAction {
 }
 
 /// Tasks to execute outside the pure core, guarded by their attempt ticket.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CaptureEffect {
     /// Preflight only Screen Recording.
     CheckPermission(CaptureTicket),
@@ -139,27 +163,36 @@ pub enum CaptureEffect {
 }
 
 /// One version-fenced output job: the document may not change before publishing.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// The annotation snapshot belongs to the fenced version so the worker never
+/// reads mutable document state and preview/output share one rasterizer.
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutputJob {
     ticket: CaptureTicket,
     version: u64,
     crop: PixelRect,
+    annotations: Vec<Annotation>,
 }
 impl OutputJob {
     /// Overlay attempt that owns the document.
     #[must_use]
-    pub const fn ticket(self) -> CaptureTicket {
+    pub const fn ticket(&self) -> CaptureTicket {
         self.ticket
     }
     /// Document version the job was composed from.
     #[must_use]
-    pub const fn version(self) -> u64 {
+    pub const fn version(&self) -> u64 {
         self.version
     }
     /// Physical crop inside the immutable base image.
     #[must_use]
-    pub const fn crop(self) -> PixelRect {
+    pub const fn crop(&self) -> PixelRect {
         self.crop
+    }
+    /// Layer-ordered annotation snapshot this job was composed from.
+    #[must_use]
+    pub fn annotations(&self) -> &[Annotation] {
+        &self.annotations
     }
 }
 
@@ -307,7 +340,7 @@ impl CaptureSession {
     /// The job must belong to the current attempt, match the current document
     /// version and crop, and remain inside an active output operation.
     #[must_use]
-    pub fn may_publish(&self, job: OutputJob) -> bool {
+    pub fn may_publish(&self, job: &OutputJob) -> bool {
         let State::Frozen { ticket, document } = &self.state else {
             return false;
         };
@@ -413,21 +446,45 @@ impl CaptureSession {
                 let _ = document.select(selection);
                 vec![]
             }
-            CaptureAction::SelectionDragStarted { ticket, point } => {
+            CaptureAction::PointerPressed { ticket, point } => {
                 if let Some(document) = self.editable(ticket) {
-                    document.begin_drag(point);
+                    document.begin_pointer(point);
                 }
                 vec![]
             }
-            CaptureAction::SelectionDragUpdated { ticket, point } => {
+            CaptureAction::PointerMoved { ticket, point } => {
                 if let Some(document) = self.editable(ticket) {
                     document.update_drag(point);
                 }
                 vec![]
             }
-            CaptureAction::SelectionDragEnded { ticket } => {
+            CaptureAction::PointerReleased { ticket } => {
                 if let Some(document) = self.editable(ticket) {
                     let _ = document.end_drag();
+                }
+                vec![]
+            }
+            CaptureAction::SelectTool { ticket, tool } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.set_tool(tool);
+                }
+                vec![]
+            }
+            CaptureAction::RectangleOption { ticket, option } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.apply_rectangle_option(option);
+                }
+                vec![]
+            }
+            CaptureAction::DeleteSelected { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    let _ = document.delete_selected();
+                }
+                vec![]
+            }
+            CaptureAction::DeselectSelected { ticket } => {
+                if let Some(document) = self.editable(ticket) {
+                    document.deselect();
                 }
                 vec![]
             }
@@ -447,7 +504,7 @@ impl CaptureSession {
             CaptureAction::FinishAt { ticket, point } => self.finish(ticket, Some(point)),
             CaptureAction::OutputCompleted { job, result } => {
                 let matches_job = match &self.state {
-                    State::Frozen { ticket, document } => job_matches(*ticket, document, job),
+                    State::Frozen { ticket, document } => job_matches(*ticket, document, &job),
                     _ => false,
                 };
                 // Stale or duplicated results never publish or end another session.
@@ -520,6 +577,7 @@ impl CaptureSession {
                 ticket,
                 version: document.version(),
                 crop,
+                annotations: document.annotations().to_vec(),
             }
         };
         self.output_mutex = true;
@@ -582,7 +640,7 @@ impl CaptureSession {
 }
 
 /// One fence definition shared by publish and completion: ticket, version and crop.
-fn job_matches(ticket: CaptureTicket, document: &Document, job: OutputJob) -> bool {
+fn job_matches(ticket: CaptureTicket, document: &Document, job: &OutputJob) -> bool {
     ticket == job.ticket
         && document.version() == job.version
         && document.crop().is_ok_and(|crop| crop == job.crop)

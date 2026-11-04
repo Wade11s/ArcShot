@@ -50,10 +50,10 @@ fn select(session: &mut CaptureSession, ticket: CaptureTicket) {
 
 fn finish(session: &mut CaptureSession, ticket: CaptureTicket) -> OutputJob {
     let effects = session.dispatch(CaptureAction::Finish { ticket });
-    let CaptureEffect::ComposeOutput(job) = effects[0] else {
-        panic!("expected output job");
-    };
-    job
+    match effects.into_iter().next() {
+        Some(CaptureEffect::ComposeOutput(job)) => job,
+        _ => panic!("expected output job"),
+    }
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn core_session_09_valid_selection_then_finish_emits_one_2x_job_and_busy_mutex()
     assert_eq!((job.crop().x(), job.crop().y()), (20, 10));
     assert_eq!((job.crop().width(), job.crop().height()), (60, 40));
     assert!(session.output_busy());
-    assert!(session.may_publish(job));
+    assert!(session.may_publish(&job));
     assert!(session.frame().is_some());
     assert_eq!(session.phase(), CapturePhase::Frozen);
 
@@ -115,7 +115,7 @@ fn app_effect_12_successful_clipboard_result_ends_session_after_fenced_publish()
     let job = finish(&mut session, ticket);
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job,
+            job: job.clone(),
             result: Ok(())
         }),
         vec![
@@ -126,7 +126,7 @@ fn app_effect_12_successful_clipboard_result_ends_session_after_fenced_publish()
     assert_eq!(session.phase(), CapturePhase::Resident);
     assert!(session.frame().is_none());
     assert!(!session.output_busy());
-    assert!(!session.may_publish(job));
+    assert!(!session.may_publish(&job));
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn app_effect_13_failed_clipboard_keeps_document_and_allows_the_same_version_ret
     let job = finish(&mut session, ticket);
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job,
+            job: job.clone(),
             result: Err(OutputFailure::Clipboard)
         }),
         vec![CaptureEffect::ReportOutputFailure(OutputFailure::Clipboard)]
@@ -145,7 +145,7 @@ fn app_effect_13_failed_clipboard_keeps_document_and_allows_the_same_version_ret
     assert!(!session.output_busy());
     assert!(session.frame().is_some());
     assert!(session.document().unwrap().selection().is_some());
-    assert!(!session.may_publish(job));
+    assert!(!session.may_publish(&job));
 
     let retry = finish(&mut session, ticket);
     assert_eq!(retry.version(), job.version());
@@ -159,7 +159,7 @@ fn app_effect_14_changed_document_or_cancelled_session_rejects_stale_output() {
     let stale = finish(&mut session, ticket);
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job: stale,
+            job: stale.clone(),
             result: Err(OutputFailure::Encode)
         }),
         vec![CaptureEffect::ReportOutputFailure(OutputFailure::Encode)]
@@ -174,10 +174,10 @@ fn app_effect_14_changed_document_or_cancelled_session_rejects_stale_output() {
     assert_eq!(session.document().unwrap().version(), 2);
     let newer = finish(&mut session, ticket);
     assert_ne!(newer, stale);
-    assert!(!session.may_publish(stale));
+    assert!(!session.may_publish(&stale));
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job: stale,
+            job: stale.clone(),
             result: Ok(())
         }),
         vec![]
@@ -189,10 +189,10 @@ fn app_effect_14_changed_document_or_cancelled_session_rejects_stale_output() {
         session.dispatch(CaptureAction::CancelAttempt(ticket)),
         vec![CaptureEffect::DismissOverlay]
     );
-    assert!(!session.may_publish(newer));
+    assert!(!session.may_publish(&newer));
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job: newer,
+            job: newer.clone(),
             result: Ok(())
         }),
         vec![]
@@ -249,15 +249,15 @@ fn core_session_12_cancel_during_output_prevents_the_late_clipboard_side_effect(
     let (mut session, ticket) = frozen();
     select(&mut session, ticket);
     let job = finish(&mut session, ticket);
-    assert!(session.may_publish(job));
+    assert!(session.may_publish(&job));
     assert_eq!(
         session.dispatch(CaptureAction::Cancel),
         vec![CaptureEffect::DismissOverlay]
     );
-    assert!(!session.may_publish(job));
+    assert!(!session.may_publish(&job));
     assert_eq!(
         session.dispatch(CaptureAction::OutputCompleted {
-            job,
+            job: job.clone(),
             result: Ok(())
         }),
         vec![]
