@@ -4,15 +4,15 @@ use crate::{
     ui::{CaptureView, HotkeyView, NoticeView, OverlayPreview, UiCommand, UiQueue},
 };
 use arcshot_app::{
-    CaptureSubmitError, CaptureTasks, GuideHistory, HotkeyAction, HotkeyEffect, HotkeyFlow,
-    HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError, OutputTasks, PendingSave,
-    PermissionAction, PermissionEffect, PermissionFlow, PreferencesAction, PreferencesEffect,
-    PreferencesFlow, PreferencesNotice, encode_document,
+    CaptureSubmitError, CaptureTasks, DensityWriteOutcome, GuideHistory, HotkeyAction,
+    HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError,
+    OutputTasks, PendingSave, PermissionAction, PermissionEffect, PermissionFlow,
+    PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice, encode_document,
 };
 use arcshot_core::{
     Annotation, CaptureAction, CaptureEffect, CaptureFailure, CapturePhase, CaptureSession,
-    CaptureTicket, CapturedFrame, Document, FrameError, OutputFailure, OutputJob, PixelRect,
-    RectangleStyle, SavePanelResult, ScreenGeometry, Tool,
+    CaptureTicket, CapturedFrame, Density, Document, FrameError, OutputFailure, OutputJob,
+    PixelRect, RectangleStyle, SavePanelResult, ScreenGeometry, Tool,
 };
 use arcshot_macos::{self as native, DisplaySnapshot, MenuCommand};
 use gpui::{
@@ -33,8 +33,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const PREPARE_SETTLE: Duration = Duration::from_millis(80);
 /// Heading of a capture failure notice; it is not a settings problem.
 const CAPTURE_ERROR_HEADING: &str = "无法继续截图";
-/// Heading of a menu-preference failure notice.
-const PREFERENCE_ERROR_HEADING: &str = "无法更新登录项设置";
+/// Heading of a menu-preference failure notice; neutral to the failing setting.
+const PREFERENCE_ERROR_HEADING: &str = "无法更新偏好设置";
 
 struct Coordinator {
     session: CaptureSession,
@@ -82,13 +82,21 @@ pub(crate) fn launch(cx: &mut App) {
     let hotkeys = native::GlobalHotkeys::install().ok();
     let hotkey_flow = HotkeyFlow::new(native::hotkey_settings_load());
     let completion_sound = native::completion_sound_enabled();
+    // A launch read failure has no user intent to protect: the documented
+    // Compact default is used and reported. An interactive toggle whose read
+    // fails goes through the in-product notice path instead.
+    let density = native::density().unwrap_or_else(|error| {
+        log::warn!("density_launch_read_failure={error}");
+        Density::Compact
+    });
     log::info!(
         "hotkey_launch config={} adapter={:?}",
         hotkey_flow.config(),
         hotkeys.is_some()
     );
-    // The persisted menu preference is the only authority for a silent success.
-    log::info!("preferences_launch completion_sound={completion_sound}");
+    // The persisted menu preferences are the only authority for a silent
+    // success and for the toolbar density.
+    log::info!("preferences_launch completion_sound={completion_sound} density={density:?}");
     let coordinator = cx.new(|_| Coordinator {
         session: CaptureSession::default(),
         tasks: CaptureTasks::default(),
@@ -105,7 +113,7 @@ pub(crate) fn launch(cx: &mut App) {
         hotkey_settings: None,
         hotkey_view_error: None,
         hotkey_error: None,
-        preferences: PreferencesFlow::new(completion_sound),
+        preferences: PreferencesFlow::new(completion_sound, density),
         preferences_error: None,
         settings_notice: false,
         queue: Rc::new(RefCell::new(Vec::new())),
@@ -124,6 +132,10 @@ pub(crate) fn launch(cx: &mut App) {
         state
             .session
             .set_completion_sound(state.preferences.completion_sound());
+        state.session.set_density(state.preferences.density());
+        cx.global::<MenuBarGlobal>()
+            .0
+            .set_density_state(state.preferences.density());
         state.permission(PermissionAction::Launch, cx);
         state.hotkey(HotkeyAction::Launch, cx);
         state.preference(PreferencesAction::Launch, cx);
@@ -165,6 +177,7 @@ impl Coordinator {
                     self.action(CaptureAction::Cancel, cx);
                     self.permission(PermissionAction::Check, cx);
                 }
+                MenuCommand::ToggleDensity => self.preference(PreferencesAction::ToggleDensity, cx),
                 MenuCommand::ToggleCompletionSound => {
                     self.preference(PreferencesAction::ToggleCompletionSound, cx)
                 }
@@ -467,6 +480,39 @@ impl Coordinator {
                 PreferencesEffect::Notice(notice) => {
                     log::warn!("preference_notice={notice:?}");
                     self.preferences_error = Some(preferences_notice_text(notice));
+                }
+                PreferencesEffect::ReadDensity => {
+                    let read = native::density();
+                    if let Err(error) = &read {
+                        log::error!("density_read_failure={error}");
+                    }
+                    effects.extend(
+                        self.preferences
+                            .dispatch(PreferencesAction::DensityRead(read.ok())),
+                    );
+                }
+                PreferencesEffect::StoreDensity(density) => {
+                    let outcome = match native::store_density(density) {
+                        Ok(()) => DensityWriteOutcome::Applied,
+                        Err(error) => {
+                            log::error!("density_write_failure={error}");
+                            DensityWriteOutcome::Failed
+                        }
+                    };
+                    effects.extend(
+                        self.preferences
+                            .dispatch(PreferencesAction::DensityWriteResult(outcome)),
+                    );
+                }
+                PreferencesEffect::ReflectDensity(density) => {
+                    // A confirmed change: mirror it in the authoritative session,
+                    // the real menu state and one text diagnostic, then refresh
+                    // any open overlay. No CaptureAction is dispatched, so the
+                    // document (tool, styles, selection, objects, text) is kept.
+                    self.session.set_density(density);
+                    cx.global::<MenuBarGlobal>().0.set_density_state(density);
+                    self.refresh_capture_view(cx);
+                    log::info!("option_density density={density:?} persisted=true");
                 }
             }
         }
@@ -971,6 +1017,7 @@ impl Coordinator {
             document.map_or_else(Vec::new, |document| document.annotations().to_vec());
         let rectangle_style =
             document.map_or_else(RectangleStyle::default, Document::rectangle_style);
+        let density = self.session.density();
         let busy = self.session.output_busy();
         let error = self.overlay_error.take();
         let updated = handle.update(cx, |view, _, cx| {
@@ -979,6 +1026,7 @@ impl Coordinator {
             view.selected = selected;
             view.annotations = annotations;
             view.rectangle_style = rectangle_style;
+            view.density = density;
             view.busy = busy;
             view.error = error;
             cx.notify();
@@ -1138,6 +1186,7 @@ impl Coordinator {
     ) -> anyhow::Result<()> {
         self.close_overlay(cx);
         let queue = Rc::clone(&self.queue);
+        let density = self.session.density();
         let bounds = WindowBounds::centered(size(px(420.0), px(110.0)), cx);
         self.overlay = Some(cx.open_window(
             WindowOptions {
@@ -1172,6 +1221,7 @@ impl Coordinator {
                     rectangle_style: RectangleStyle::default(),
                     preview: None,
                     hovered_tool: None,
+                    density,
                     focus: focus.clone(),
                     queue,
                 });
@@ -1199,6 +1249,7 @@ impl Coordinator {
             .ok_or_else(|| anyhow::anyhow!("built-in display absent from GPUI"))?
             .id();
         let queue = Rc::clone(&self.queue);
+        let density = self.session.density();
         self.overlay = Some(cx.open_window(
             WindowOptions {
                 // GPUI macOS window bounds are display-local, unlike ScreenGeometry's
@@ -1238,6 +1289,7 @@ impl Coordinator {
                     rectangle_style: RectangleStyle::default(),
                     preview: None,
                     hovered_tool: None,
+                    density,
                     focus: focus.clone(),
                     queue,
                 });
@@ -1357,6 +1409,13 @@ fn preferences_notice_text(notice: PreferencesNotice) -> String {
         }
         PreferencesNotice::LoginItemApprovalRequired => {
             "已在系统登录项中登记，但还需要在“系统设置 › 通用 › 登录项”中允许；当前不会随登录启动。"
+                .to_owned()
+        }
+        PreferencesNotice::DensityUnreadable => {
+            "无法读取“选项密度”的当前设置，本次未做任何更改；可再次切换重试。".to_owned()
+        }
+        PreferencesNotice::DensityWriteFailed => {
+            "“选项密度”没能保存成功。已重新读取实际设置，当前显示的是真实值；可再次切换重试。"
                 .to_owned()
         }
     }

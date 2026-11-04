@@ -1,5 +1,7 @@
 //! Authority for capture preparation, cancellation and native uncertainty.
-use crate::{Annotation, CapturedFrame, Document, PixelRect, RectangleOption, Selection, Tool};
+use crate::{
+    Annotation, CapturedFrame, Density, Document, PixelRect, RectangleOption, Selection, Tool,
+};
 use std::{error::Error, fmt};
 
 /// Identifies one capture attempt across permission, worker and window effects.
@@ -347,6 +349,9 @@ pub struct CaptureSession {
     output: Option<OutputStage>,
     /// Persisted menu preference; off makes a successful output silent.
     completion_sound: bool,
+    /// I-09 option density. Session-scoped (outside the replaceable `Document`),
+    /// so switching it never clears the tool, styles, selection or objects.
+    density: Density,
 }
 impl Default for CaptureSession {
     fn default() -> Self {
@@ -356,6 +361,8 @@ impl Default for CaptureSession {
             output: None,
             // I-04: the completion sound is on unless the user turns it off.
             completion_sound: true,
+            // I-09: Compact is the documented default.
+            density: Density::Compact,
         }
     }
 }
@@ -391,6 +398,20 @@ impl CaptureSession {
     /// Silence only affects a successful output. Failures are always reported.
     pub const fn set_completion_sound(&mut self, enabled: bool) {
         self.completion_sound = enabled;
+    }
+
+    /// The current option density; it survives new captures and cancellations.
+    #[must_use]
+    pub const fn density(&self) -> Density {
+        self.density
+    }
+
+    /// Applies the option density without touching the authoritative document.
+    ///
+    /// This is a view preference, not a semantic edit: no [`CaptureEffect`] is
+    /// produced and the frozen document is left byte-for-byte unchanged.
+    pub const fn set_density(&mut self, density: Density) {
+        self.density = density;
     }
 
     /// Borrows the accepted immutable frame; cancelled/terminal sessions expose none.

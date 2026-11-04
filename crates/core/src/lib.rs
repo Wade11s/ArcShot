@@ -1,6 +1,7 @@
 //! Platform-neutral data shared by ArcShot's product crates.
 
 mod annotation;
+mod density;
 mod document;
 mod frame;
 mod hotkey;
@@ -9,6 +10,7 @@ mod session;
 pub use annotation::{
     Annotation, PaletteColor, RectangleOption, RectangleStyle, StrokeWidth, Tool, annotation_at,
 };
+pub use density::Density;
 pub use document::{
     Document, DocumentError, DragTarget, MAX_PNG_BYTES, PixelRect, ResizeHandle, Selection,
 };

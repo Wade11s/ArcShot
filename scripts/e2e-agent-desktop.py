@@ -27,10 +27,31 @@ MENU = [
     ("开始截图", "startCapture:"),
     ("截图快捷键…", "hotkeySettings:"),
     ("屏幕录制权限…", "screenRecordingPermissions:"),
+    ("选项密度", "toggleDensity:"),
     ("完成音效", "toggleCompletionSound:"),
     ("登录时启动", "toggleLaunchAtLogin:"),
     ("退出 ArcShot", "terminate:"),
 ]
+
+DENSITIES = ("Standard", "Compact")
+
+
+def launch_density(log: pathlib.Path) -> str:
+    """Reads the density the product restored at launch (text diagnostic)."""
+    line = wait_line(
+        log,
+        lambda text: "preferences_launch " in text and "density=" in text,
+        10.0,
+    )
+    value = line.split("density=", 1)[1].split(" ", 1)[0]
+    if value not in DENSITIES:
+        fail(f"unexpected persisted density: {value!r}")
+    return value
+
+
+def density_node_matches(node: dict, density: str) -> bool:
+    """The dock exposes the real density as an AX name/value, without pixels."""
+    return density in str(node.get("value")) or density in str(node.get("name"))
 
 MODIFIERS = [("⌘", "cmd"), ("⌃", "ctrl"), ("⌥", "alt"), ("⇧", "shift")]
 
@@ -405,7 +426,8 @@ def main() -> int:
     process = start(executable, log)
     restart_logs = [
         ROOT / "target" / f"e2e-agent-desktop-{configuration}-restart-{index}.log"
-        for index in (1, 2)
+        # 1-2: MAC-E2E-16 completion-sound restarts; 3-5: MAC-E2E-18 density.
+        for index in (1, 2, 3, 4, 5)
     ]
     try:
         wait_log(log, "hotkey_launch config=", 10.0)
@@ -417,7 +439,7 @@ def main() -> int:
             fail(f"unexpected running instances: {identities}")
         note(f"mac_e2e_09=pass bundle_id={identifier} name={app}")
 
-        # MAC-E2E-01: status item and the four menu commands, without taking focus.
+        # MAC-E2E-01: status item and the seven menu commands, without taking focus.
         surface = agent("snapshot", "--surface", "menu-bar-extras", "--app", app, "--compact")
         item = (surface.get("tree", {}).get("children") or [None])[0]
         if not item or item.get("role") != "menuitem" or item.get("name") != "ArcShot":
@@ -594,7 +616,9 @@ def main() -> int:
             if "hotkey_launch config=" in line
         )
         temporary = "⌃⌥9" if original != "⌃⌥9" else "⌃⌥8"
-        press(hotkey_combo(temporary), headed=False)
+        # Keys meant for one of our windows use --headed after the product has
+        # activated that window (TEST.md §4.2); global combos above stay headless.
+        press(hotkey_combo(temporary), headed=True)
         wait_log(log, f"candidate={temporary}", 10.0)
         save = wait_node(
             app,
@@ -615,7 +639,7 @@ def main() -> int:
         agent("click", recorder["ref_id"])
         wait_log(log, "a11y_action=arcshot.hotkey.recorder action=Click", 10.0)
         wait_frontmost(app, 5.0)
-        press(hotkey_combo(original), headed=False)
+        press(hotkey_combo(original), headed=True)
         wait_log(log, f"candidate={original}", 10.0)
         save = wait_node(
             app,
@@ -781,6 +805,118 @@ def main() -> int:
             f"mac_e2e_16=pass restart_restored={flipped_sound} "
             f"restart_restored={original_sound} preference=local"
         )
+
+        # MAC-E2E-18: 选项密度 switches through AX, keeps the same option set
+        # and the active tool/styles, survives a restart, and is restored to the
+        # value the user had before this run. No pixels, no coordinate clicks.
+        process = start(executable, restart_logs[2])
+        original_density = launch_density(restart_logs[2])
+        flipped_density = "Standard" if original_density == "Compact" else "Compact"
+
+        # Freeze at the original density and set up a tool plus a per-tool style.
+        click(app, "开始截图")
+        wait_log(restart_logs[2], "capture_wake_window_submit_us=", 15.0)
+        wait_frozen_active(restart_logs[2], 0)
+        rectangle_tool = wait_tool_state(
+            app, "arcshot.overlay.tool.rectangle", False, 10.0
+        )
+        agent("click", rectangle_tool["ref_id"])
+        wait_log(restart_logs[2], "capture_edit action=SelectTool", 10.0)
+        hover(rectangle_tool["ref_id"])
+        width_five = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.rectangle.width.5",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        blue = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.rectangle.color.blue",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        agent("click", width_five["ref_id"])
+        wait_log(restart_logs[2], "width=5", 10.0)
+        agent("click", blue["ref_id"])
+        wait_log(restart_logs[2], "style=stroke=#007AFF width=5", 10.0)
+
+        # Switch density through the status menu while the session is frozen.
+        click(app, "选项密度")
+        wait_log(
+            restart_logs[2],
+            f"option_density density={flipped_density} persisted=true",
+            10.0,
+        )
+        # The dock still exposes the real density as an AX value.
+        density_node = wait_node(
+            app,
+            lambda tree: next(
+                (
+                    node
+                    for node in find_nodes(tree, native_id="arcshot.overlay.density")
+                    if density_node_matches(node, flipped_density)
+                ),
+                None,
+            ),
+            10.0,
+        )
+        if not density_node_matches(density_node, flipped_density):
+            fail(f"dock does not report {flipped_density}: {density_node}")
+        # The switch cleared neither the tool nor the per-tool styles, and the
+        # same option ids remain reachable at the new density.
+        preserved_tool = wait_tool_state(
+            app, "arcshot.overlay.tool.rectangle", True, 10.0
+        )
+        if not preserved_tool.get("ref_id"):
+            fail("the rectangle tool is not addressable after a density switch")
+        hover(preserved_tool["ref_id"])
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.width.5", True, 10.0)
+        wait_tool_state(app, "arcshot.overlay.option.rectangle.color.blue", True, 10.0)
+        # Finish the session through AX cancel.
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        cancel = find_nodes(root, native_id="arcshot.overlay.cancel", require_ref=True)
+        agent("click", cancel[0]["ref_id"])
+        wait_log(restart_logs[2], "from=Frozen to=Resident action=CancelAttempt", 10.0)
+
+        # The flipped value survives a real restart, then is restored through
+        # the same AX path; a final restart confirms the user's original value.
+        quit_app(app, process, expect_status_item_removed=False)
+        process = start(executable, restart_logs[3])
+        if launch_density(restart_logs[3]) != flipped_density:
+            fail("option density did not survive a real restart")
+        click(app, "选项密度")
+        wait_log(
+            restart_logs[3],
+            f"option_density density={original_density} persisted=true",
+            10.0,
+        )
+        quit_app(app, process, expect_status_item_removed=False)
+        process = start(executable, restart_logs[4])
+        if launch_density(restart_logs[4]) != original_density:
+            fail("the user's original option density was not restored")
+        quit_app(app, process, expect_status_item_removed=False)
+        note(
+            f"mac_e2e_18=pass density={original_density}->{flipped_density}->{original_density} "
+            "option_set=reachable tool_and_style=preserved restart=restored ax=dock_value"
+        )
     finally:
         if process.poll() is None:
             process.terminate()
@@ -789,7 +925,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=17")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=18")
     return 0
 
 
