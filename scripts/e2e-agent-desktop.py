@@ -2907,7 +2907,19 @@ def main() -> int:
                 )
                 if not find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
                     fail("Esc did not return the pre-scroll selection")
-                note("mac_e2e_26_esc=pass abandon=true selection_returned=true")
+                # The overlay is presented a second time here (after the Scroll
+                # cancel). The per-capture wake latency is the PERF-REGION
+                # sample, so it must be reported once per capture, not re-timed
+                # from the original start when the overlay comes back.
+                wake_lines = count_log_after(
+                    log, "capture_wake_window_submit_us=", log_mark
+                )
+                if wake_lines != 1:
+                    fail(f"one capture reported {wake_lines} wake latencies")
+                note(
+                    "mac_e2e_26_esc=pass abandon=true selection_returned=true "
+                    "wake_reported=1"
+                )
             finally:
                 stop(fixture)
             unit_done("scroll_fixture")

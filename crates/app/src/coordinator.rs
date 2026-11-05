@@ -190,6 +190,14 @@ struct Coordinator {
     /// Receipt instant of the newest scroll event passed to the target, for
     /// PERF-EVENT-PREVIEW.
     scroll_event_started: Option<Instant>,
+    /// Scroll event already reported, so one event is never timed twice.
+    scroll_event_reported: Option<Instant>,
+    /// Whether this capture already reported its first overlay presentation.
+    ///
+    /// A frozen overlay is presented again when Scroll returns to the region
+    /// session; timing that second presentation from the original start would
+    /// report the whole intervening session as capture latency.
+    wake_reported: bool,
     scroll_visiting_settings: bool,
     scroll_settings_departed: bool,
 }
@@ -279,6 +287,8 @@ pub(crate) fn launch(cx: &mut App) {
         scroll_frame_submitted: None,
         scroll_frame_latency: None,
         scroll_event_started: None,
+        scroll_event_reported: None,
+        wake_reported: false,
         completion_preview: None,
         completion_preview_deadline: None,
         completion_preview_png: None,
@@ -606,7 +616,7 @@ impl Coordinator {
         }
         if let Some((_, tap)) = self.scroll_tap.as_ref()
             && let Some(scrolled) = tap.last_scroll()
-            && self.scroll_event_started != Some(scrolled)
+            && self.scroll_event_reported != Some(scrolled)
         {
             self.scroll_event_started = Some(scrolled);
         }
@@ -809,6 +819,7 @@ impl Coordinator {
         self.completion_preview_png = None;
         self.permission(PermissionAction::Cancel, cx);
         self.started = Some(Instant::now());
+        self.wake_reported = false;
         self.action(CaptureAction::Start, cx);
     }
 
@@ -1730,12 +1741,14 @@ impl Coordinator {
     }
 
     fn prepare_preview(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
-        log::info!(
-            "capture_prepare_submit_us={}",
-            self.started
-                .map(|s| s.elapsed().as_micros())
-                .unwrap_or_default()
-        );
+        if !self.wake_reported {
+            log::info!(
+                "capture_prepare_submit_us={}",
+                self.started
+                    .map(|s| s.elapsed().as_micros())
+                    .unwrap_or_default()
+            );
+        }
         let Some(frame) = self.session.frame().cloned() else {
             return;
         };
@@ -1785,14 +1798,17 @@ impl Coordinator {
                                 // mirror the authoritative document so the
                                 // pre-scroll selection and its buttons return.
                                 state.refresh_capture_view(cx);
-                                log::info!(
-                                    "capture_wake_window_submit_us={} pixels={:?}",
-                                    state
-                                        .started
-                                        .map(|s| s.elapsed().as_micros())
-                                        .unwrap_or_default(),
-                                    screen.pixel_size()
-                                );
+                                if !state.wake_reported {
+                                    state.wake_reported = true;
+                                    log::info!(
+                                        "capture_wake_window_submit_us={} pixels={:?}",
+                                        state
+                                            .started
+                                            .map(|s| s.elapsed().as_micros())
+                                            .unwrap_or_default(),
+                                        screen.pixel_size()
+                                    );
+                                }
                             }
                             Err(error) => {
                                 state.action(CaptureAction::Cancel, cx);
@@ -2929,7 +2945,9 @@ impl Coordinator {
             return;
         }
         self.scroll_preview_last = Some(Instant::now());
-        let image = image::RgbaImage::from_raw(preview.width, preview.height, preview.bgra.clone())
+        // Hand the packed bytes to the image buffer directly: cloning them only
+        // doubles the live preview surface for every verified frame.
+        let image = image::RgbaImage::from_raw(preview.width, preview.height, preview.bgra)
             .map(|buffer| Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
         let _ = handle.update(cx, |view, window, cx| {
             view.set_image(image, window);
@@ -2953,8 +2971,25 @@ impl Coordinator {
             );
         }
         if let Some(started) = self.scroll_event_started.take() {
+            // Remember the reported event: reading `last_scroll` again without
+            // this would re-time the same event at every later preview update.
+            self.scroll_event_reported = Some(started);
             log::info!("event_preview_us={}", started.elapsed().as_micros());
         }
+    }
+
+    /// Clears the per-session latency bookkeeping (PERF-* diagnostics).
+    ///
+    /// These instants belong to one collection: a session that ends before a
+    /// preview update would otherwise report the next session's first preview
+    /// against a timestamp from the previous one, inflating the observed
+    /// input-to-preview latency by the whole gap between sessions.
+    fn reset_scroll_latency(&mut self) {
+        self.scroll_started = None;
+        self.scroll_frame_submitted = None;
+        self.scroll_frame_latency = None;
+        self.scroll_event_started = None;
+        self.scroll_event_reported = None;
     }
 
     /// Opens collection: raw scroll inside the fixed selection is released,
@@ -3038,6 +3073,7 @@ impl Coordinator {
                 force
             );
             self.scroll_drain_started = None;
+            self.reset_scroll_latency();
             // `tap` drops here: the run-loop source is removed and the port
             // invalidated before the gate's memory is released.
         } else {
