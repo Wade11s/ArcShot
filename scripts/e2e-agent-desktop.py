@@ -721,6 +721,73 @@ def select_region(
     fail("the selection drag never reached the overlay")
 
 
+# --- Ticket #37 regression combinations (MAC-E2E-32..37) ---
+
+
+def wait_annotations(log: pathlib.Path, after: int, expect: int, timeout: float = 10.0) -> str:
+    """Waits for a `capture_edit` diagnostic reporting exactly `expect` annotations."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for line in read_log(log)[after:]:
+            if "capture_edit action=" not in line:
+                continue
+            try:
+                value = int(line.split("annotations=", 1)[1].split(" ", 1)[0])
+            except (IndexError, ValueError):
+                continue
+            if value == expect:
+                return line
+        time.sleep(POLL)
+    fail(f"timeout waiting for capture_edit annotations={expect} after line {after} in {log}")
+
+
+def ax_click(app: str, native_id: str, timeout: float = 10.0) -> dict:
+    """Waits for one AX button by stable id and clicks it; returns the node."""
+    node = wait_node(
+        app,
+        lambda tree: (
+            find_nodes(tree, native_id=native_id, require_ref=True) or [None]
+        )[0],
+        timeout,
+    )
+    if not node.get("ref_id"):
+        fail(f"{native_id} is not addressable")
+    agent("click", node["ref_id"])
+    return node
+
+
+def png_files_on_disk() -> set[str]:
+    """PNG paths under the repo tree (product-workdir privacy check, #37)."""
+    found: set[str] = set()
+    for base in (ROOT, ROOT / "target"):
+        if not base.exists():
+            continue
+        for path in base.rglob("*.png"):
+            found.add(str(path))
+    return found
+
+
+def clipboard_png_sha() -> str | None:
+    """SHA-256 of the in-memory clipboard PNG, or None when no PNGf is present."""
+    try:
+        data = read_clipboard_png()
+    except Failure:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def press_global_hotkey(log: pathlib.Path, config: str, before: int) -> int:
+    """Presses the registered global combo (non-headed) until one new capture."""
+    for _ in range(4):
+        press(hotkey_combo(config), headed=False)
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            if count_log(log, "capture_request_us=") >= before + 1:
+                return before + 1
+            time.sleep(POLL)
+    fail("the registered global hotkey never started a new capture")
+
+
 def quit_app(app: str, process: subprocess.Popen, *, expect_status_item_removed: bool) -> None:
     """Quits through the real menu item and checks the process is really gone."""
     click(app, "退出 ArcShot")
@@ -2963,10 +3030,80 @@ def main() -> int:
             cancel = find_nodes(root, native_id="arcshot.overlay.cancel", require_ref=True)
             agent("click", cancel[0]["ref_id"])
             wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
-            return scroll_outcome, single_png
+            # Session E (#37, MAC-E2E-37): the confirmed copy's whole-image
+            # preview on a third-party target: click the thumbnail, add a
+            # Rectangle through the a11y path, re-finish the whole image.
+            log_mark = len(read_log(log))
+            entry_mark, selection = begin()
+            before = len(read_log(log))
+            published = False
+            for _attempt in range(6):
+                agent("press", "return", "--headed")
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    if count_log_after(log, "output_publish", before) > 0:
+                        published = True
+                        break
+                    time.sleep(0.2)
+                if published:
+                    break
+            if not published:
+                fail(f"{case}: Enter never published before the preview")
+            preview_mark = len(read_log(log))
+            preview = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, native_id="arcshot.completion.preview", require_ref=True)
+                    or [None]
+                )[0],
+                10.0,
+            )
+            agent("click", preview["ref_id"])
+            wait_log(log, "a11y_action=arcshot.completion.preview action=Click", 5.0, after=preview_mark)
+            wait_log(log, "completion_annotation_opened", 5.0, after=preview_mark)
+            add_rectangle = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(
+                        tree,
+                        native_id="arcshot.overlay.completion.add_rectangle",
+                        require_ref=True,
+                    )
+                    or [None]
+                )[0],
+                10.0,
+            )
+            agent("click", add_rectangle["ref_id"])
+            wait_log(log, "capture_edit action=AddDefaultRectangle", 5.0, after=preview_mark)
+            finish_mark = len(read_log(log))
+            finish = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, native_id="arcshot.overlay.finish", require_ref=True)
+                    or [None]
+                )[0],
+                10.0,
+            )
+            agent("click", finish["ref_id"])
+            wait_log(log, "a11y_action=arcshot.overlay.finish action=Click", 5.0, after=finish_mark)
+            republish = wait_log_line(log, "output_publish target=Clipboard", 10.0, after=finish_mark)
+            if "annotations=1" not in republish:
+                fail(f"{case}: re-finish lost the annotation: {republish}")
+            pixels = republish.split("pixels=", 1)[1].split(" ", 1)[0]
+            want_pixels = f"{int(selection[2] * 2)}x{int(selection[3] * 2)}"
+            if pixels != want_pixels:
+                fail(f"{case}: re-finish pixels {pixels} != whole image {want_pixels}")
+            wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=finish_mark)
+            metrics = decode_clipboard_expect(selection)
+            if f"{metrics['width']}x{metrics['height']}" != want_pixels:
+                fail(f"{case}: decoded re-finish PNG is not the whole image")
+            preview_png = (
+                f"{metrics['width']}x{metrics['height']}/sRGB/sha={metrics['sha256'][:12]}"
+            )
+            return scroll_outcome, single_png, preview_png
 
         try:
-            outcome_30, png_30 = run_third_party(
+            outcome_30, png_30, preview_30 = run_third_party(
                 "MAC-E2E-30",
                 "TextEdit",
                 "com.apple.TextEdit",
@@ -2987,8 +3124,12 @@ def main() -> int:
             f"click_blocked=true raw_scroll=true single={png_30} "
             f"double_click=true esc=true fixture={TEXTEDIT_FIXTURE_VERSION}"
         )
+        note(
+            f"mac_e2e_37_textedit=pass target=TextEdit preview_click=true "
+            f"annotation=1 whole_image={preview_30} fixture={TEXTEDIT_FIXTURE_VERSION}"
+        )
         try:
-            outcome_31, png_31 = run_third_party(
+            outcome_31, png_31, preview_31 = run_third_party(
                 "MAC-E2E-31",
                 "Safari",
                 "com.apple.Safari",
@@ -3009,6 +3150,627 @@ def main() -> int:
             f"click_blocked=true raw_scroll=true single={png_31} "
             f"double_click=true esc=true fixture={SAFARI_FIXTURE_VERSION} offline=file"
         )
+        note(
+            f"mac_e2e_37_safari=pass target=Safari preview_click=true "
+            f"annotation=1 whole_image={preview_31} fixture={SAFARI_FIXTURE_VERSION} offline=file"
+        )
+
+        # MAC-E2E-32: region combination (ticket #37). Every annotation tool
+        # creates one object in a single selection (headed drags are the
+        # pointer precondition; AX activations and capture_edit diagnostics
+        # are the evidence), object history undo/redo/delete follows, and
+        # Finish copies the surviving set. The clipboard PNG is decoded in
+        # memory and no PNG file may appear on disk (MAC-LIFETIME-PRIVACY).
+        png_before = png_files_on_disk()
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        selection = select_region(
+            app, log, drag_from="200,200", drag_to="1100,750", mark=log_mark
+        )
+        sx, sy, sw, sh = selection
+
+        def drag_doc(x1, y1, x2, y2):
+            agent(
+                "drag",
+                "--from-xy", f"{x1:.0f},{y1:.0f}",
+                "--to-xy", f"{x2:.0f},{y2:.0f}",
+                "--headed",
+            )
+
+        def activate_tool(native_id, tool_name):
+            mark = len(read_log(log))
+            ax_click(app, native_id)
+            wait_log(log, f"a11y_action={native_id} action=Click", 10.0, after=mark)
+            line = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+            if f"tool={tool_name}" not in line:
+                fail(f"tool activation diagnostic was {line!r}, want tool={tool_name}")
+            wait_tool_state(app, native_id, True, 10.0)
+
+        activate_tool("arcshot.overlay.tool.rectangle", "Rectangle")
+        mark = len(read_log(log))
+        drag_doc(sx + 60, sy + 60, sx + 260, sy + 160)
+        wait_annotations(log, mark, 1)
+        activate_tool("arcshot.overlay.tool.line", "Line")
+        mark = len(read_log(log))
+        drag_doc(sx + 300, sy + 60, sx + 500, sy + 160)
+        wait_annotations(log, mark, 2)
+        activate_tool("arcshot.overlay.tool.arrow", "Arrow")
+        mark = len(read_log(log))
+        drag_doc(sx + 540, sy + 60, sx + 740, sy + 160)
+        wait_annotations(log, mark, 3)
+        activate_tool("arcshot.overlay.tool.blur", "Blur")
+        mark = len(read_log(log))
+        drag_doc(sx + 60, sy + 200, sx + 260, sy + 300)
+        wait_annotations(log, mark, 4)
+        activate_tool("arcshot.overlay.tool.text", "Text")
+        agent("mouse-click", "--xy", f"{sx + 300:.0f},{sy + 220:.0f}", "--headed")
+        wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.text.input", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        for _ in range(3):
+            agent("press", "a", "--headed")
+            time.sleep(0.2)
+        # Switching tools commits the editor. A click inside the selection
+        # with the Text tool active would begin a second editor instead, so
+        # it must not be used as the commit gesture here.
+        mark = len(read_log(log))
+        activate_tool("arcshot.overlay.tool.select", "Select")
+        wait_annotations(log, mark, 5)
+        # Object history: one undo removes the text object, one redo restores it.
+        mark = len(read_log(log))
+        press_until(
+            app,
+            "cmd+z",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "capture_edit action=Undo" in line for line in read_log(log)[mark:]
+            ),
+        )
+        wait_annotations(log, mark, 4)
+        mark = len(read_log(log))
+        press_until(
+            app,
+            "cmd+shift+z",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "capture_edit action=Redo" in line for line in read_log(log)[mark:]
+            ),
+        )
+        wait_annotations(log, mark, 5)
+        # Delete the rectangle object through the AX delete button.
+        activate_tool("arcshot.overlay.tool.select", "Select")
+        agent("mouse-click", "--xy", f"{sx + 160:.0f},{sy + 110:.0f}", "--headed")
+        delete = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.delete", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", delete["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.delete action=Click", 10.0, after=mark)
+        wait_annotations(log, mark, 4)
+        # Finish copies the surviving four objects at the selection extent.
+        mark = len(read_log(log))
+        ax_click(app, "arcshot.overlay.finish")
+        wait_log(log, "a11y_action=arcshot.overlay.finish action=Click", 10.0, after=mark)
+        publish = wait_log_line(log, "output_publish target=Clipboard", 10.0, after=mark)
+        pixels = publish.split("pixels=", 1)[1].split(" ", 1)[0]
+        want_pixels = f"{int(round(sw * 2))}x{int(round(sh * 2))}"
+        if pixels != want_pixels or "annotations=4" not in publish:
+            fail(f"region finish publish was {publish!r}, want pixels={want_pixels} annotations=4")
+        wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark)
+        metrics = decode_clipboard_expect(selection)
+        if f"{metrics['width']}x{metrics['height']}" != want_pixels:
+            fail(f"decoded clipboard PNG is not the selection extent: {metrics}")
+        if png_files_on_disk() != png_before:
+            fail("a clipboard finish wrote a PNG file to disk")
+        note(
+            f"mac_e2e_32=pass tools=Rectangle,Line,Arrow,Blur,Text commit=5 "
+            f"undo_redo=4->5 delete=4 pixels={pixels} sRGB=true no_disk_png=true"
+        )
+
+        # MAC-E2E-33: density switch and hover options while a text editor
+        # holds focus. The editor, its size value and the Text tool survive
+        # the switch, the same option ids stay reachable at the new density,
+        # and the density is restored through the same menu path.
+        original_density = next(
+            line.split("density=", 1)[1].split(" ", 1)[0]
+            for line in read_log(log)
+            if "preferences_launch " in line and "density=" in line
+        )
+        if original_density not in DENSITIES:
+            fail(f"unexpected launch density {original_density!r}")
+        flipped_density = "Standard" if original_density == "Compact" else "Compact"
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        selection = select_region(
+            app, log, drag_from="200,200", drag_to="1100,750", mark=log_mark
+        )
+        activate_tool("arcshot.overlay.tool.text", "Text")
+        agent("mouse-click", "--xy", "400,400", "--headed")
+        wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.text.input", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        for _ in range(3):
+            agent("press", "a", "--headed")
+            time.sleep(0.2)
+        # The size field lives in the hover option strip (as in MAC-E2E-25),
+        # so hover is the precondition for reading it.
+        text_tool_node = wait_tool_state(app, "arcshot.overlay.tool.text", True, 10.0)
+        hover(text_tool_node["ref_id"])
+        size_field = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.text.size", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        if str(size_field.get("value")) != "16":
+            fail(f"default text size was {size_field.get('value')!r}, expected '16'")
+        click(app, "选项密度")
+        wait_log(log, f"option_density density={flipped_density} persisted=true", 10.0)
+        density_node = wait_node(
+            app,
+            lambda tree: next(
+                (
+                    node
+                    for node in find_nodes(tree, native_id="arcshot.overlay.density")
+                    if density_node_matches(node, flipped_density)
+                ),
+                None,
+            ),
+            10.0,
+        )
+        if not density_node_matches(density_node, flipped_density):
+            fail(f"dock does not report {flipped_density}: {density_node}")
+        wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="arcshot.overlay.text.input", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        # Density changes dock spacing, so re-hover before reading the
+        # option strip again.
+        text_tool_node = wait_tool_state(app, "arcshot.overlay.tool.text", True, 10.0)
+        hover(text_tool_node["ref_id"])
+        size_after = wait_node(
+            app,
+            lambda tree: next(
+                (
+                    node
+                    for node in find_nodes(tree, native_id="arcshot.overlay.text.size")
+                    if str(node.get("value")) == "16"
+                ),
+                None,
+            ),
+            10.0,
+        )
+        if str(size_after.get("value")) != "16":
+            fail("the text size did not survive the density switch")
+        size_up = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(
+                    tree,
+                    native_id="arcshot.overlay.option.text.size.up",
+                    require_ref=True,
+                )
+                or [None]
+            )[0],
+            10.0,
+        )
+        mark = len(read_log(log))
+        agent("click", size_up["ref_id"])
+        wait_log(log, "a11y_action=arcshot.overlay.option.text.size.up action=Click", 10.0, after=mark)
+        edit = wait_log_line(log, "capture_edit action=TextOption", 10.0, after=mark)
+        if "size=16.5" not in edit:
+            fail(f"text size at the new density was {edit!r}")
+        mark = len(read_log(log))
+        activate_tool("arcshot.overlay.tool.select", "Select")
+        wait_annotations(log, mark, 1)
+        click(app, "选项密度")
+        wait_log(log, f"option_density density={original_density} persisted=true", 10.0)
+        ax_click(app, "arcshot.overlay.cancel")
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        note(
+            f"mac_e2e_33=pass density={original_density}->{flipped_density}->{original_density} "
+            "text_focus=preserved size=16->16.5 commit=1"
+        )
+
+        # MAC-E2E-34: explicit Save vs clipboard Finish on a region. Save
+        # opens the native panel and writes nothing; cancelling the panel is
+        # not an error, leaves the clipboard untouched and keeps the session
+        # frozen; Finish then copies through the shared clipboard path.
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        selection = select_region(
+            app, log, drag_from="300,300", drag_to="900,650", mark=log_mark
+        )
+        hash_before = clipboard_png_sha()
+        mark = len(read_log(log))
+        ax_click(app, "arcshot.overlay.save")
+        wait_log(log, "a11y_action=arcshot.overlay.save action=Click", 10.0, after=mark)
+        wait_log(log, "save_panel_open ", 10.0, after=mark)
+        if any("output_publish" in line for line in read_log(log)[mark:]):
+            fail("opening the save panel published output")
+        # The native panel itself is AX-addressable (CancelButton); Escape
+        # also cancels it, but the AX click is the deterministic path and
+        # needs no frontmost gate (the panel has no titled window).
+        cancel_button = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="CancelButton", require_ref=True) or [None]
+            )[0],
+            10.0,
+        )
+        agent("click", cancel_button["ref_id"])
+        wait_log(log, "save_panel_outcome=cancelled", 10.0, after=mark)
+        if any("output_publish" in line for line in read_log(log)[mark:]):
+            fail("cancelling the save panel published output")
+        if clipboard_png_sha() != hash_before:
+            fail("cancelling the save panel changed the clipboard")
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        if not find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
+            fail("cancelling the save panel did not keep the frozen session")
+        mark = len(read_log(log))
+        ax_click(app, "arcshot.overlay.finish")
+        wait_log(log, "a11y_action=arcshot.overlay.finish action=Click", 10.0, after=mark)
+        wait_log(log, "output_publish target=Clipboard", 10.0, after=mark)
+        wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark)
+        decode_clipboard_expect(selection)
+        note(
+            "mac_e2e_34=pass save_cancel=true clipboard_unchanged=true "
+            "session_retained=true finish=clipboard"
+        )
+        # Subcase B: choosing a destination in the native panel writes the
+        # PNG file (the explicit-save exception to no-disk-capture) and
+        # never touches the clipboard. The unique name avoids an overwrite
+        # prompt; the file is hashed, decoded in memory, then removed.
+        save_name = "ArcShot-37-regression.png"
+        save_path = pathlib.Path.home() / "Documents" / save_name
+        # Guard against a leftover from an interrupted earlier run.
+        save_path.unlink(missing_ok=True)
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        selection = select_region(
+            app, log, drag_from="300,300", drag_to="900,650", mark=log_mark
+        )
+        hash_before = clipboard_png_sha()
+        mark = len(read_log(log))
+        ax_click(app, "arcshot.overlay.save")
+        wait_log(log, "a11y_action=arcshot.overlay.save action=Click", 10.0, after=mark)
+        wait_log(log, "save_panel_open ", 10.0, after=mark)
+        name_field = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="saveAsNameTextField", require_ref=True)
+                or [None]
+            )[0],
+            10.0,
+        )
+        if str(name_field.get("value")) != "ArcShot.png":
+            fail(f"unexpected save-panel name field: {name_field.get('value')!r}")
+        agent("set-value", name_field["ref_id"], save_name)
+        ok_button = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id="OKButton", require_ref=True) or [None]
+            )[0],
+            10.0,
+        )
+        agent("click", ok_button["ref_id"])
+        wait_log(log, "save_panel_outcome=chosen", 10.0, after=mark)
+        publish = wait_log_line(log, "output_publish target=SaveFile", 10.0, after=mark)
+        pixels = publish.split("pixels=", 1)[1].split(" ", 1)[0]
+        want_pixels = f"{int(round(selection[2] * 2))}x{int(round(selection[3] * 2))}"
+        if pixels != want_pixels:
+            fail(f"save publish pixels {pixels} != selection extent {want_pixels}")
+        wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark)
+        if clipboard_png_sha() != hash_before:
+            fail("explicit save changed the clipboard")
+        if not save_path.exists():
+            fail(f"the chosen save file does not exist: {save_path}")
+        saved_bytes = save_path.read_bytes()
+        metrics = decode_png_metrics(saved_bytes)
+        if f"{metrics['width']}x{metrics['height']}" != want_pixels:
+            fail(f"saved PNG is not the selection extent: {metrics}")
+        save_path.unlink()
+        if save_path.exists():
+            fail("the explicit-save test file could not be removed")
+        note(
+            f"mac_e2e_34_save=pass chosen=true target=SaveFile pixels={pixels} "
+            f"sRGB=true sha256={metrics['sha256'][:12]} clipboard_unchanged=true file_removed=true"
+        )
+
+        # MAC-E2E-35: every annotation tool on the whole long image (ticket
+        # #37). An extended stitch copies, the preview opens the shared
+        # document, the Scroll entry is absent, each tool creates one object
+        # (Rectangle via the a11y path, the rest by headed drags into the
+        # centred view), history works, and re-finish copies the whole
+        # stitched extent with all annotations.
+        fixture_log = ROOT / "target" / f"e2e-scroll-fixture-{configuration}.log"
+        fixture = start(
+            ROOT / "target" / configuration / "arcshot-scroll-fixture", fixture_log
+        )
+        try:
+            wait_log(fixture_log, "fixture_window", 10.0)
+            time.sleep(1.0)
+            log_mark = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, log_mark)
+            selection = select_region(
+                app, log, drag_from="620,600", drag_to="850,780", mark=log_mark
+            )
+            mark = len(read_log(log))
+            click_scroll_entry(app, denied=False)
+            wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
+            wait_log(log, "scroll_collecting", 15.0, after=mark)
+            stitch_mark = len(read_log(log))
+            for _ in range(2):
+                agent("mouse-wheel", "--x", "830", "--y", "700", "--dy", "-1", "--headed")
+            wait_log(log, "scroll_stitch extended", 10.0, after=stitch_mark)
+            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0, after=mark)
+            first_publish = wait_log_line(log, "output_publish target=Clipboard", 5.0, after=mark)
+            # The verified bottom is read only once completion has frozen the
+            # document: a later wheel extension would otherwise be missed.
+            bottoms = [
+                int(line.split("bottom=", 1)[1].split(" ", 1)[0])
+                for line in read_log(log)[stitch_mark:]
+                if "scroll_stitch extended" in line and "bottom=" in line
+            ]
+            verified_bottom = max(bottoms) if bottoms else 0
+            if verified_bottom <= int(selection[3] * 2):
+                fail(f"the long image did not extend past the viewport: bottom={verified_bottom}")
+            first_pixels = first_publish.split("pixels=", 1)[1].split(" ", 1)[0]
+            if int(first_pixels.split("x", 1)[1]) != verified_bottom:
+                fail(f"first long-image copy height {first_pixels} != verified bottom {verified_bottom}")
+            preview_mark = len(read_log(log))
+            preview = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, native_id="arcshot.completion.preview", require_ref=True)
+                    or [None]
+                )[0],
+                10.0,
+            )
+            agent("click", preview["ref_id"])
+            wait_log(log, "a11y_action=arcshot.completion.preview action=Click", 5.0, after=preview_mark)
+            opened = wait_log_line(log, "completion_annotation_opened", 5.0, after=preview_mark)
+            doc_text = opened.split("document=", 1)[1].split(" ", 1)[0]
+            doc_w, doc_h = (float(value) for value in doc_text.split("x", 1))
+            zoom = float(opened.split("zoom=", 1)[1].split(" ", 1)[0])
+            if doc_h <= selection[3]:
+                fail(f"the annotation document is not the long image: {opened}")
+            wait_log(log, "app_active surface=frozen", 10.0, after=preview_mark)
+            root = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+                )[0],
+                10.0,
+            )
+            if find_nodes(root, native_id="arcshot.overlay.scroll"):
+                fail("the Scroll entry is offered on the long-image surface")
+            # Centred view geometry (coordinator open_completion_annotation):
+            # screen = document * zoom + offset, viewport 1470x956. Agent
+            # --xy targets screen_y = document_y + 33 (fixture convention).
+            offset_x = (1470.0 - doc_w * zoom) / 2.0
+            offset_y = (956.0 - doc_h * zoom) / 2.0
+
+            def drag_long(x1, y1, x2, y2):
+                agent(
+                    "drag",
+                    "--from-xy",
+                    f"{offset_x + x1 * zoom:.0f},{offset_y + y1 * zoom + 33:.0f}",
+                    "--to-xy",
+                    f"{offset_x + x2 * zoom:.0f},{offset_y + y2 * zoom + 33:.0f}",
+                    "--headed",
+                )
+
+            ann_mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.completion.add_rectangle")
+            wait_log(log, "a11y_action=arcshot.overlay.completion.add_rectangle action=Click", 5.0, after=ann_mark)
+            wait_annotations(log, ann_mark, 1)
+            activate_tool("arcshot.overlay.tool.line", "Line")
+            mark = len(read_log(log))
+            drag_long(10, 10, 100, 60)
+            wait_annotations(log, mark, 2)
+            activate_tool("arcshot.overlay.tool.arrow", "Arrow")
+            mark = len(read_log(log))
+            drag_long(120, 10, 210, 60)
+            wait_annotations(log, mark, 3)
+            activate_tool("arcshot.overlay.tool.blur", "Blur")
+            mark = len(read_log(log))
+            drag_long(10, 80, 100, 140)
+            wait_annotations(log, mark, 4)
+            activate_tool("arcshot.overlay.tool.text", "Text")
+            agent(
+                "mouse-click",
+                "--xy",
+                f"{offset_x + 120 * zoom:.0f},{offset_y + 90 * zoom + 33:.0f}",
+                "--headed",
+            )
+            wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, native_id="arcshot.overlay.text.input", require_ref=True)
+                    or [None]
+                )[0],
+                10.0,
+            )
+            for _ in range(3):
+                agent("press", "a", "--headed")
+                time.sleep(0.2)
+            mark_text = len(read_log(log))
+            activate_tool("arcshot.overlay.tool.select", "Select")
+            # Switching tools commits the text editor; the commit is the
+            # fifth annotation on the shared document.
+            wait_annotations(log, mark_text, 5)
+            mark = len(read_log(log))
+            press_until(
+                app,
+                "cmd+z",
+                headed=True,
+                gate=lambda: wait_log(log, "app_active surface=frozen", 10.0, after=preview_mark),
+                observe=lambda: any(
+                    "capture_edit action=Undo" in line for line in read_log(log)[mark:]
+                ),
+            )
+            wait_annotations(log, mark, 4)
+            mark = len(read_log(log))
+            press_until(
+                app,
+                "cmd+shift+z",
+                headed=True,
+                gate=lambda: wait_log(log, "app_active surface=frozen", 10.0, after=preview_mark),
+                observe=lambda: any(
+                    "capture_edit action=Redo" in line for line in read_log(log)[mark:]
+                ),
+            )
+            wait_annotations(log, mark, 5)
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.finish")
+            wait_log(log, "a11y_action=arcshot.overlay.finish action=Click", 10.0, after=mark)
+            republish = wait_log_line(log, "output_publish target=Clipboard", 10.0, after=mark)
+            repixels = republish.split("pixels=", 1)[1].split(" ", 1)[0]
+            want_pixels = f"{int(round(doc_w * 2))}x{verified_bottom}"
+            if repixels != want_pixels or "annotations=5" not in republish:
+                fail(f"long-image re-finish was {republish!r}, want pixels={want_pixels} annotations=5")
+            wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark)
+            metrics = decode_clipboard_expect((0.0, 0.0, doc_w, doc_h))
+            if metrics["height"] != verified_bottom:
+                fail(f"decoded long image height {metrics['height']} != verified bottom {verified_bottom}")
+            note(
+                f"mac_e2e_35=pass long_image={int(doc_w)}x{int(doc_h)} tools=Rectangle,Line,Arrow,Blur,Text "
+                f"commit=5 undo_redo=4->5 pixels={repixels} sRGB=true"
+            )
+        finally:
+            stop(fixture)
+
+        # MAC-E2E-36: cancel/restart/late-result combinations. A global
+        # hotkey restart discards the region session (new selection, zero
+        # annotations, no stale output) and a collecting Scroll session
+        # (input retired, no output from the old ticket); the second Esc
+        # layer only leaves the annotation tool, it does not cancel.
+        config = next(
+            line.split("config=", 1)[1].split(" ", 1)[0]
+            for line in read_log(log)
+            if "hotkey_launch config=" in line
+        )
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        select_region(app, log, drag_from="300,300", drag_to="900,650", mark=log_mark)
+        activate_tool("arcshot.overlay.tool.rectangle", "Rectangle")
+        mark = len(read_log(log))
+        agent("drag", "--from-xy", "350,350", "--to-xy", "550,450", "--headed")
+        wait_annotations(log, mark, 1)
+        before = count_log(log, "capture_request_us=")
+        restart_mark = len(read_log(log))
+        press_global_hotkey(log, config, before)
+        wait_frozen_active(log, restart_mark)
+        wait_log(log, "to=Frozen action=Completed", 15.0, after=restart_mark)
+        root = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+            )[0],
+            10.0,
+        )
+        if find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
+            fail("the restarted session still has the old selection")
+        mark = len(read_log(log))
+        agent("drag", "--from-xy", "300,300", "--to-xy", "900,650", "--headed")
+        line = wait_log_line(log, "capture_edit action=SelectRegion", 10.0, after=mark)
+        if "annotations=0" not in line:
+            fail(f"the restarted session kept the old annotations: {line}")
+        ax_click(app, "arcshot.overlay.cancel")
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        note(
+            f"mac_e2e_36_region=pass hotkey_restart=dict old_selection_discarded=true "
+            "annotations_reset=0 no_stale_output=true"
+        )
+        # Esc layering: with an annotation tool active, Escape only returns
+        # to Select; the session stays frozen until the AX cancel.
+        log_mark = len(read_log(log))
+        click(app, "开始截图")
+        wait_frozen_active(log, log_mark)
+        activate_tool("arcshot.overlay.tool.rectangle", "Rectangle")
+        mark = len(read_log(log))
+        press_until(
+            app,
+            "escape",
+            headed=True,
+            gate=lambda: wait_frozen_active(log, log_mark),
+            observe=lambda: any(
+                "capture_edit action=SelectTool" in line and "tool=Select" in line
+                for line in read_log(log)[mark:]
+            ),
+        )
+        wait_tool_state(app, "arcshot.overlay.tool.select", True, 10.0)
+        ax_click(app, "arcshot.overlay.cancel")
+        wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+        note("mac_e2e_36_esc=pass first_escape=tool_to_select session_retained=true")
+        # Scroll restart: a hotkey during collection retires input and
+        # starts a fresh region session; the old ticket never publishes.
+        fixture_log = ROOT / "target" / f"e2e-scroll-fixture-{configuration}.log"
+        fixture = start(
+            ROOT / "target" / configuration / "arcshot-scroll-fixture", fixture_log
+        )
+        try:
+            wait_log(fixture_log, "fixture_window", 10.0)
+            time.sleep(1.0)
+            log_mark = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, log_mark)
+            select_region(app, log, drag_from="620,600", drag_to="850,780", mark=log_mark)
+            mark = len(read_log(log))
+            click_scroll_entry(app, denied=False)
+            wait_log(log, "scroll_collecting", 15.0, after=mark)
+            before = count_log(log, "capture_request_us=")
+            restart_mark = len(read_log(log))
+            press_global_hotkey(log, config, before)
+            wait_log(log, "scroll_input_retired", 10.0, after=restart_mark)
+            wait_frozen_active(log, restart_mark)
+            if any("output_publish" in line for line in read_log(log)[restart_mark:]):
+                fail("the abandoned Scroll session published output after restart")
+            click_scroll_entry(app, denied=True)
+            ax_click(app, "arcshot.overlay.cancel")
+            wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+            note(
+                "mac_e2e_36_scroll=pass hotkey_restart=input_retired fresh_selection_required=true "
+                "old_ticket_output=none"
+            )
+        finally:
+            stop(fixture)
 
         # MAC-E2E-15: the 完成音效 preference toggles through AX and is persisted.
         original_sound = next(
@@ -3175,7 +3937,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=30")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=37")
     return 0
 
 
