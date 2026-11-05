@@ -2859,6 +2859,19 @@ impl Coordinator {
             }
             Err(refusal) => {
                 log::info!("scroll_stitch_refused reason={refusal}");
+                if let Some(span) = self
+                    .scroll_stitch
+                    .as_ref()
+                    .and_then(arcshot_image::StitchBuilder::last_mismatch_span)
+                {
+                    log::info!(
+                        "scroll_stitch_mismatch rows={}..{} cols={}..{}",
+                        span.first_row,
+                        span.last_row,
+                        span.first_col,
+                        span.last_col
+                    );
+                }
                 self.action(
                     CaptureAction::ScrollStitchRefused {
                         ticket,

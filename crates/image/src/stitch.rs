@@ -50,6 +50,24 @@ pub struct StitchPlacement {
     pub offset: i64,
 }
 
+/// Where one frame diverged from verified history inside the best overlap.
+///
+/// Rows are document rows of the verified history and columns are physical
+/// pixel columns, so a native session can separate an edge artifact from
+/// genuinely changed content. Recorded only for diagnostics; the refusal
+/// itself stays [`StitchRefusal::ContentChanged`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MismatchSpan {
+    /// First document row whose bytes differ.
+    pub first_row: i64,
+    /// Last document row whose bytes differ.
+    pub last_row: i64,
+    /// First physical column whose bytes differ in any differing row.
+    pub first_col: u32,
+    /// Last physical column whose bytes differ in any differing row.
+    pub last_col: u32,
+}
+
 /// One verified decision about a new frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StitchDecision {
@@ -100,6 +118,7 @@ pub struct StitchBuilder {
     extensions: u64,
     duplicates: u64,
     added_rows: u64,
+    last_mismatch: Option<MismatchSpan>,
 }
 
 impl StitchBuilder {
@@ -145,6 +164,7 @@ impl StitchBuilder {
             extensions: 0,
             duplicates: 0,
             added_rows: 0,
+            last_mismatch: None,
         })
     }
 
@@ -154,6 +174,7 @@ impl StitchBuilder {
     /// # Errors
     /// Returns the classified refusal; the builder is left unchanged.
     pub fn submit(&mut self, frame: &CapturedFrame) -> Result<StitchDecision, StitchRefusal> {
+        self.last_mismatch = None;
         if frame.geometry() != self.origin_geometry {
             return Err(StitchRefusal::Geometry);
         }
@@ -219,6 +240,7 @@ impl StitchBuilder {
             // once more to separate a changed overlap from a disjoint jump.
             let mut partial_matches = 0_usize;
             let mut partial_overlap = 0_usize;
+            let mut best_s: Option<i64> = None;
             for candidate in (self.top - i64::from(viewport) + 1)..=(self.bottom - 1) {
                 let overlap_start = self.top.max(candidate);
                 let overlap_end = self.bottom.min(candidate + i64::from(viewport));
@@ -236,15 +258,24 @@ impl StitchBuilder {
                 if matches > partial_matches {
                     partial_matches = matches;
                     partial_overlap = overlap_rows;
+                    best_s = Some(candidate);
                 }
             }
-            return Err(
-                if partial_matches > 0 && partial_matches < partial_overlap {
-                    StitchRefusal::ContentChanged
-                } else {
-                    StitchRefusal::Gap
-                },
-            );
+            if partial_matches > 0 && partial_matches < partial_overlap {
+                if let Some(best) = best_s {
+                    self.last_mismatch = mismatch_span(
+                        frame,
+                        &self.surface,
+                        self.row_bytes,
+                        best,
+                        self.top,
+                        self.bottom,
+                        viewport,
+                    );
+                }
+                return Err(StitchRefusal::ContentChanged);
+            }
+            return Err(StitchRefusal::Gap);
         };
         if s >= self.top && s + i64::from(viewport) <= self.bottom {
             self.duplicates += 1;
@@ -364,6 +395,16 @@ impl StitchBuilder {
         })
     }
 
+    /// Span of the first divergence in the best overlap of the last submit.
+    ///
+    /// `Some` documented-history row and physical-column span that differs;
+    /// `None` unless the most recent submit refused with
+    /// [`StitchRefusal::ContentChanged`].
+    #[must_use]
+    pub const fn last_mismatch_span(&self) -> Option<MismatchSpan> {
+        self.last_mismatch
+    }
+
     /// Current verified physical width.
     #[must_use]
     pub const fn width(&self) -> u32 {
@@ -433,6 +474,59 @@ fn exact_rows_match(
         }
     }
     true
+}
+
+/// The document-row and physical-column span where one frame's bytes differ
+/// from the verified surface over the overlap at displacement `s`.
+///
+/// Returns `None` when the row hashes disagreed but the bytes did not (a
+/// 64-bit hash collision); no bogus span is reported in that case.
+fn mismatch_span(
+    frame: &CapturedFrame,
+    surface: &[u8],
+    row_bytes: usize,
+    s: i64,
+    top: i64,
+    bottom: i64,
+    viewport: u32,
+) -> Option<MismatchSpan> {
+    let overlap_start = top.max(s);
+    let overlap_end = bottom.min(s + i64::from(viewport));
+    let mut result: Option<MismatchSpan> = None;
+    for document_row in overlap_start..overlap_end {
+        let frame_row = (document_row - s) as usize;
+        let surface_row = (document_row - top) as usize;
+        let frame_start = frame_row * frame.stride();
+        let surface_start = surface_row * row_bytes;
+        let frame_bytes = &frame.bgra()[frame_start..frame_start + row_bytes];
+        let surface_bytes = &surface[surface_start..surface_start + row_bytes];
+        if frame_bytes == surface_bytes {
+            continue;
+        }
+        let mut span = MismatchSpan {
+            first_row: document_row,
+            last_row: document_row,
+            first_col: u32::MAX,
+            last_col: 0,
+        };
+        for (index, (a, b)) in frame_bytes.iter().zip(surface_bytes).enumerate() {
+            if a != b {
+                let column = (index / 4) as u32;
+                span.first_col = span.first_col.min(column);
+                span.last_col = span.last_col.max(column);
+            }
+        }
+        result = Some(match result {
+            None => span,
+            Some(mut accumulated) => {
+                accumulated.last_row = span.last_row;
+                accumulated.first_col = accumulated.first_col.min(span.first_col);
+                accumulated.last_col = accumulated.last_col.max(span.last_col);
+                accumulated
+            }
+        });
+    }
+    result
 }
 
 /// A deterministic 64-bit FNV-1a style row hash used only to shortlist
@@ -607,6 +701,136 @@ mod tests {
             builder.submit(&make_frame(&[2, 99, 4, 5])),
             Err(StitchRefusal::ContentChanged)
         );
+    }
+
+    #[test]
+    fn image_stitch_59_01_content_changed_records_diverging_span() {
+        // A capture that disagrees with verified history inside the overlap
+        // must say where: the document rows and physical columns that differ
+        // are the only diagnostic that can separate an edge artifact from
+        // changed content during a native session.
+        let origin = make_pixel_frame(&pixel_rows(&[10, 20, 30, 40]));
+        let mut builder = StitchBuilder::new(&origin).expect("origin");
+        let mut next = pixel_rows(&[30, 40, 50, 60]);
+        // Corrupt the B channel of column 2 in the overlapping row for
+        // document row 3 (frame row 1 at displacement 2).
+        next[1][2 * 4] = 0x7f;
+        assert_eq!(
+            builder.submit(&make_pixel_frame(&next)),
+            Err(StitchRefusal::ContentChanged)
+        );
+        assert_eq!(
+            builder.last_mismatch_span(),
+            Some(MismatchSpan {
+                first_row: 3,
+                last_row: 3,
+                first_col: 2,
+                last_col: 2,
+            })
+        );
+        // A refused submit leaves history untouched.
+        assert_eq!(builder.height(), 4);
+    }
+
+    #[test]
+    fn image_stitch_59_02_successful_submit_clears_mismatch_span() {
+        let origin = make_pixel_frame(&pixel_rows(&[10, 20, 30, 40]));
+        let mut builder = StitchBuilder::new(&origin).expect("origin");
+        let mut changed = pixel_rows(&[30, 40, 50, 60]);
+        changed[0][0] = 0x7f;
+        assert_eq!(
+            builder.submit(&make_pixel_frame(&changed)),
+            Err(StitchRefusal::ContentChanged)
+        );
+        assert!(builder.last_mismatch_span().is_some());
+        builder
+            .submit(&make_pixel_frame(&pixel_rows(&[30, 40, 50, 60])))
+            .expect("clean extension");
+        assert_eq!(builder.last_mismatch_span(), None);
+    }
+
+    #[test]
+    fn image_stitch_59_03_inner_preview_top_band_is_refused_as_full_width_change() {
+        // #59 regression: under the inner fixed preview, the tall-selection
+        // 24M build saw the first ~48 rows of each scrolled frame replaced
+        // by the target window's top-edge redraw transient, across the whole
+        // width. The verifier must refuse the frame (never relax the overlap
+        // check or guess-fill), and its diagnostic must localize the change
+        // to that band and every physical column.
+        const VIEWPORT: u32 = 128;
+        let origin = make_pixel_frame(&content_rows(0, VIEWPORT));
+        let mut builder = StitchBuilder::new(&origin).expect("origin");
+        let mut next = content_rows(32, VIEWPORT);
+        for row in next.iter_mut().take(48) {
+            row.fill(0xf4);
+            for pixel in row.as_chunks_mut::<4>().0 {
+                pixel[3] = 255;
+            }
+        }
+        assert_eq!(
+            builder.submit(&make_pixel_frame(&next)),
+            Err(StitchRefusal::ContentChanged)
+        );
+        assert_eq!(
+            builder.last_mismatch_span(),
+            Some(MismatchSpan {
+                first_row: 32,
+                last_row: 79,
+                first_col: 0,
+                last_col: 3,
+            })
+        );
+        assert_eq!(builder.height(), VIEWPORT);
+        assert_eq!(builder.extensions(), 0);
+    }
+
+    /// Rows whose bytes encode their content row, so any replaced band differs
+    /// in every physical column rather than only in the left margin.
+    fn content_rows(offset: u32, height: u32) -> Vec<Vec<u8>> {
+        (0..height)
+            .map(|row| {
+                let value = (offset + row) as u8;
+                let mut bytes = Vec::new();
+                for column in 0..4_u8 {
+                    bytes.extend_from_slice(&[value, value.wrapping_add(column), 7, 255]);
+                }
+                bytes
+            })
+            .collect()
+    }
+
+    fn pixel_rows(fills: &[u8]) -> Vec<Vec<u8>> {
+        fills
+            .iter()
+            .map(|&fill| {
+                let mut row = Vec::new();
+                for _ in 0..4 {
+                    row.extend_from_slice(&[fill, fill, fill, 255]);
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn make_pixel_frame(rows: &[Vec<u8>]) -> CapturedFrame {
+        let height = rows.len() as u32;
+        const WIDTH: u32 = 4;
+        let mut bgra = Vec::new();
+        for row in rows {
+            assert_eq!(row.len(), WIDTH as usize * 4);
+            bgra.extend_from_slice(row);
+        }
+        let geometry = ScreenGeometry::try_new(
+            1,
+            0.0,
+            0.0,
+            f64::from(WIDTH) / 2.0,
+            f64::from(height) / 2.0,
+            2.0,
+        )
+        .expect("test geometry");
+        CapturedFrame::try_from_srgb_bgra(geometry, WIDTH, height, WIDTH as usize * 4, bgra)
+            .expect("test frame")
     }
 
     #[test]
