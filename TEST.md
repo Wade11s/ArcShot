@@ -757,7 +757,43 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | RESOURCE-MAX | 最大导出 5 次观测 peak physical footprint ≤ 2 GiB，同时记录 RSS、native/GPU 与编码阶段 |
 
 资源测量与性能测量分开，采样间隔 ≤ 100 ms，并以 macOS footprint 交叉检查。不得
-通过降质、缩图、跳过验证、删除用例或自动落盘达标。当前这些项目全部 **Not tested**。
+通过降质、缩图、跳过验证、删除用例或自动落盘达标。
+
+测量入口（#38）：
+
+```sh
+scripts/perf-measure.py --configuration release --samples 30
+scripts/perf-gate.sh target/perf-measure-release.log
+scripts/resource-footprint.sh <arcshot-pid> 0.1 <seconds>
+```
+
+`perf-measure.py` 构建并启动正式 bundle，用 `agent-desktop` 驱动菜单/AX/热键与
+自有 GPUI 夹具，采集 `interact_commit_us`、`capture_wake_window_submit_us`、
+`scroll_start_us`、`frame_preview_us`、`event_preview_us`、`capture_request_us`、
+`scroll_stitch_verify_us`、`output_encode_us`、`clipboard_accept_us` 等文本诊断，
+再由 `perf-gate.sh` 计算 n/median/nearest-rank p95/max 并判定门槛。资源采样与
+性能采样分开：RSS 用 `ps` 以 100 ms 轮询，physical footprint 用 macOS
+`footprint` 交叉检查。所有原生门禁运行在 `mkdir /tmp/arcshot-native-gate.lock`
+目录锁下串行执行。注意驱动每次运行会清空日志，需要保留原样本时先复制日志或
+用 `--log` 指定独立路径。
+
+| 稳定 ID | 测量接缝 | 结果 |
+| --- | --- | --- |
+| PERF-INTERACT-38-01 | `interact_commit_us` | Pass（n=31，p95 1 ms） |
+| PERF-REGION-38-01 | `capture_wake_window_submit_us` | Pass（n=31，p95 165824 us；高负载组 298076 us） |
+| PERF-SCK-38-01 | `capture_request_us` | Pass（n=31，p95 38313 us） |
+| PERF-FRAME-PREVIEW-38-01 | `frame_preview_us` | Pass（n=80，p95 131088 us，max 134880 us） |
+| PERF-EVENT-PREVIEW-38-01 | `event_preview_us` | Pass（n=79，p95 283919 us，max 300866 us） |
+| PERF-STITCH-38-01 | `scroll_stitch_verify_us` | Pass（n=82，p95 819 us） |
+| PERF-EXPORT-2M-38-01 | `output_encode_us`（≤2M 桶） | Pass（n=30，p95 43548 us） |
+| PERF-EXPORT-6M-38-01 | `output_encode_us`（≤6M 桶） | Pass（n=30，p95 59241 us） |
+| PERF-CLIPBOARD-38-01 | `clipboard_accept_us` | Pass（n=60，p95 609 us） |
+| PERF-SCROLL-START-38-01 | `scroll_start_us` | Not tested（n=1 < 30） |
+| PERF-EXPORT-24M-38-01 | `output_encode_us`（24M 桶） | Not tested（内嵌预览拼接拒绝，阻塞） |
+| RESOURCE-MAX-38-01 | `resource-footprint.sh` | Not tested（依赖 PERF-EXPORT-24M） |
+
+PERF-EXPORT-24M 与 RESOURCE-MAX 的阻塞与窄跟进见
+`docs/validation/38-perf-resource.md`。
 
 ## 7. 证据、隐私与放行
 

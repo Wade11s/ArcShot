@@ -156,4 +156,54 @@ if scripts/check-validation.sh "$temporary/missing-field" >/dev/null 2>&1; then
     exit 1
 fi
 
+# perf-gate.sh: nearest-rank statistics, export bucketing and gate verdicts.
+perf_log="$temporary/perf.log"
+{
+    for i in $(seq 1 31); do echo "interact_commit_us=$i"; done
+} >"$perf_log"
+perf_output=$(scripts/perf-gate.sh "$perf_log")
+case "$perf_output" in
+    *"| PERF-INTERACT | 31 | 16 | 30 | 31 | 100000 | Pass |"*) ;;
+    *)
+        printf 'perf gate test failed: nearest-rank p95/median wrong\n%s\n' "$perf_output" >&2
+        exit 1
+        ;;
+esac
+{
+    for i in 1 2 3; do echo "interact_commit_us=500"; done
+} >"$perf_log"
+perf_output=$(scripts/perf-gate.sh "$perf_log")
+case "$perf_output" in
+    *"| PERF-INTERACT | 3 | 500 | 500 | 500 | 100000 | Not tested |"*) ;;
+    *)
+        printf 'perf gate test failed: insufficient samples were not Not tested\n%s\n' "$perf_output" >&2
+        exit 1
+        ;;
+esac
+{
+    for i in $(seq 1 30); do echo "capture_request_us=200000"; done
+} >"$perf_log"
+if scripts/perf-gate.sh "$perf_log" >/dev/null 2>&1; then
+    printf 'perf gate test failed: a failing gate was accepted\n' >&2
+    exit 1
+fi
+{
+    for i in $(seq 1 5); do echo "output_encode_us=1000 pixels=1000x2000"; done
+    for i in $(seq 1 5); do echo "output_encode_us=2000 pixels=2000x3000"; done
+    for i in $(seq 1 5); do echo "output_encode_us=3000 pixels=4000x6000"; done
+} >"$perf_log"
+perf_output=$(scripts/perf-gate.sh "$perf_log" --min-samples 5)
+for expected in \
+    "| PERF-EXPORT-2M | 5 | 1000 | 1000 | 1000 | 2000000 | Pass |" \
+    "| PERF-EXPORT-6M | 5 | 2000 | 2000 | 2000 | 5000000 | Pass |" \
+    "| PERF-EXPORT-24M | 5 | - | - | - | 20000000 (5 runs) | Pass |"; do
+    case "$perf_output" in
+        *"$expected"*) ;;
+        *)
+            printf 'perf gate test failed: missing %s\n%s\n' "$expected" "$perf_output" >&2
+            exit 1
+            ;;
+    esac
+done
+
 printf 'validation_tools=pass\n'
