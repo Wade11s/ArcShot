@@ -11,10 +11,13 @@ Usage: scripts/e2e-agent-desktop.py [--release] [--tier quiet|ax|physical|full]
        [--only UNIT_OR_CASE,...] [--skip UNIT_OR_CASE,...] [--no-build] [--list]
 
 The 37 cases run as 20 units (see UNITS). A unit is the smallest slice that can
-run on its own: it starts from a resident app and leaves one. `--tier` limits a
-run to units whose effect on the shared desktop is known and enforced (see
-TIERS); with no flags every unit runs, exactly as before. A partial run prints
-`mac_e2e=partial` and is never acceptance evidence for the full matrix.
+run on its own: it brings the app to the state the case needs and, except for
+the units that end by quitting it (sound_prefs, density_prefs), leaves one
+running. `--tier` limits a run to units whose effect on the shared desktop is
+known and enforced (see TIERS), and every unit is held to its own tier even
+inside a wider run; with no flags every unit runs, exactly as before. A partial
+run prints `mac_e2e=partial`, a failed one prints `mac_e2e=fail`, and neither is
+acceptance evidence for the full matrix.
 """
 
 from __future__ import annotations
@@ -179,7 +182,8 @@ UNITS = [
          "permission notice appears; Esc closes it",
          "headed Esc; key handling belongs in an app-level test"),
     Unit("notice_ax", "ax", ("10",), False,
-         "permission notice is readable and closable through AX"),
+         "permission notice is readable and closable through AX",
+         "the notice is a real window and takes focus; AX actions drive it without keys"),
     Unit("settings", "physical", ("06", "11"), False,
          "hotkey settings window; AX-driven record and restore",
          "11 records a combination with headed key presses"),
@@ -243,6 +247,45 @@ PHYSICAL_COMMANDS = {
     "minimize", "maximize", "restore",
 }
 
+# Commands that open, quit or take over another app's surface: they change what
+# is running or frontmost even without a key or pointer event.
+DESKTOP_COMMANDS = {"launch", "close-app", "open-system-surface"}
+# A batch hides its commands inside JSON, so it cannot be checked one call at a
+# time; below the physical tier it is refused instead of inspected.
+UNREVIEWABLE_COMMANDS = {"batch"}
+# Global options consume the next token, so the command is not always args[0].
+GLOBAL_VALUE_FLAGS = {
+    "--screenshot", "--session", "--agent-id", "--trace", "--wait-for",
+    "--wait-for-gone", "--wait-timeout", "-w",
+}
+
+
+def command_of(args: tuple[str, ...]) -> str | None:
+    """The subcommand, skipping any global options that precede it."""
+    index = 0
+    while index < len(args):
+        if args[index] in GLOBAL_VALUE_FLAGS:
+            index += 2
+        elif args[index].startswith("-"):
+            index += 1
+        else:
+            return args[index]
+    return None
+
+
+def physical_violation(args: tuple[str, ...]) -> str | None:
+    """Why this agent-desktop call may not run below the physical tier."""
+    if "--headed" in args:
+        return "--headed delivers real input"
+    command = command_of(args)
+    if command in UNREVIEWABLE_COMMANDS:
+        return f"{command} cannot be audited one command at a time"
+    if command in PHYSICAL_COMMANDS:
+        return f"{command} delivers real input or moves a window"
+    if command in DESKTOP_COMMANDS:
+        return f"{command} changes what is running or frontmost"
+    return None
+
 
 def want(uid: str) -> bool:
     """True when this unit is selected; marks it current for failure hints.
@@ -250,11 +293,19 @@ def want(uid: str) -> bool:
     Units that capture the screen first require a clean display, so a stray
     banner fails at the unit that it would corrupt instead of minutes later.
     """
-    global _CURRENT, _UNIT_STARTED
+    global _CURRENT, _UNIT_STARTED, _ALLOW_PHYSICAL
     if uid not in _SELECTED:
         return False
+    unit = next(unit for unit in UNITS if unit.id == uid)
     _CURRENT = uid
-    if next(unit for unit in UNITS if unit.id == uid).capture:
+    # The unit's own tier is the authority inside the unit: a quiet or ax unit
+    # stays refused even when the run itself is allowed physical input, so a
+    # mislabelled unit cannot borrow a wider run's ceiling.
+    _ALLOW_PHYSICAL = (
+        TIERS.index(unit.tier) >= TIERS.index("physical")
+        and TIERS.index(_TIER) >= TIERS.index("physical")
+    )
+    if unit.capture:
         require_clean_display(uid)
     _UNIT_STARTED = time.monotonic()
     return True
@@ -265,11 +316,14 @@ def unit_done(uid: str) -> None:
 
 
 def refuse_physical(what: str) -> None:
-    if not _ALLOW_PHYSICAL:
-        fail(
-            f"tier {_TIER!r} forbids physical input but unit {_CURRENT!r} attempted: "
-            f"{what} (the unit is mislabelled; fix its tier in UNITS)"
-        )
+    """Fails when the run tier or the current unit's own tier forbids real input."""
+    if _ALLOW_PHYSICAL:
+        return
+    where = f"unit {_CURRENT!r}" if _CURRENT else "the run"
+    fail(
+        f"tier {_TIER!r} forbids physical input and {where} attempted: "
+        f"{what} (the unit is mislabelled; fix its tier in UNITS)"
+    )
 
 
 def resolve_units(tier: str, only: str, skip: str) -> list[Unit]:
@@ -317,6 +371,21 @@ def print_units() -> None:
     print(f"{TOTAL_CASES} cases in {len(UNITS)} units")
 
 
+def report_failure() -> None:
+    """States outcome and coverage after a failed check, never as a pass line."""
+    picked = [unit for unit in UNITS if unit.id in _SELECTED]
+    cases = sum(len(unit.cases) for unit in picked)
+    if _CURRENT is not None and _UNIT_STARTED:
+        note(
+            f"e2e_timing unit={_CURRENT} "
+            f"seconds={time.monotonic() - _UNIT_STARTED:.1f} failed=true"
+        )
+    note(
+        f"mac_e2e=fail tier={_TIER} units={','.join(unit.id for unit in picked)} "
+        f"cases={cases}/{TOTAL_CASES} acceptance=false"
+    )
+
+
 def finish_run(configuration: str, log: pathlib.Path) -> int:
     picked = [unit for unit in UNITS if unit.id in _SELECTED]
     cases = sum(len(unit.cases) for unit in picked)
@@ -361,8 +430,9 @@ def run(argv: list[str], *, timeout: float = 60.0) -> subprocess.CompletedProces
 def agent(*args: str) -> dict:
     """Runs one agent-desktop command and returns the envelope after checking ok."""
     global _AGENT_CALLS
-    if args and (args[0] in PHYSICAL_COMMANDS or "--headed" in args):
-        refuse_physical(f"agent-desktop {' '.join(args)[:100]}")
+    violation = physical_violation(args)
+    if violation is not None:
+        refuse_physical(f"agent-desktop {' '.join(args)[:100]} ({violation})")
     _AGENT_CALLS += 1
     result = run([AGENT_DESKTOP, *args])
     try:
@@ -4389,6 +4459,8 @@ if __name__ == "__main__":
         sys.exit(main())
     except Failure as failure:
         print(f"e2e check failed: {failure}", file=sys.stderr)
+        if _SELECTED:
+            report_failure()
         if _CURRENT is not None:
             print(
                 f"e2e rerun: scripts/e2e-agent-desktop.py --only {_CURRENT} --no-build"

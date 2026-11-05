@@ -599,8 +599,9 @@ agent-desktop press escape --headed
 
 ### 4.3.1 单元、分档与重跑
 
-37 个用例按源码顺序切成 20 个**单元**（`scripts/e2e-agent-desktop.py --list`）。单元从“应用驻留”开始、
-以“应用驻留”结束，因此可单独运行；有连续冻结会话的用例（12/13/14/18/19/20/21/23/25）同属
+37 个用例按源码顺序切成 20 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
+（`identity` 结束时应用仍在驻留，`sound_prefs`、`density_prefs` 以退出应用结束），因此可单独运行；
+有连续冻结会话的用例（12/13/14/18/19/20/21/23/25）同属
 `overlay_tools`，15/08/16 同属 `sound_prefs`。每个单元标注一个**档位**，说明它对与人共用的桌面做什么：
 
 | 档位 | 对桌面的影响 | 当前单元 |
@@ -611,8 +612,11 @@ agent-desktop press escape --headed
 | `full` | 另外打开并移动 TextEdit/Safari 窗口 | `third_party`（30/31/37） |
 
 档位**由脚本强制**：低于 `physical` 时，`agent()` 与 `run()` 拒绝 `press`/`hover`/`drag`/`mouse-*`、
-任何 `--headed`、窗口移动/聚焦命令、`osascript` 与 `open`，并报“单元档位标错”，因此标成 `quiet`/`ax`
-的单元不可能悄悄占用键鼠。`01` 的菜单快照会让状态菜单瞬时打开（只读），这是 `quiet` 档唯一的可见副作用。
+任何 `--headed`、窗口移动/聚焦命令、`osascript` 与 `open`，也拒绝 `batch`（内容藏在 JSON 里，无法逐条
+审计）和 `launch`/`close-app`/`open-system-surface`（改变运行中或前台应用）；全局选项写在命令前的形式
+（如 `--session <id> press`）同样识别，并报“单元档位标错”。判据是**单元自身的档位**：`quiet`/`ax` 单元
+即使在完整运行里也拒绝这些调用，不会借用整轮的上限，因此标错的单元不可能悄悄占用键鼠。
+`01` 的菜单快照会让状态菜单瞬时打开（只读），这是 `quiet` 档唯一的可见副作用。
 
 ```sh
 scripts/e2e-agent-desktop.py --list                      # 单元、档位、阻止降档的原因
@@ -622,8 +626,11 @@ scripts/e2e-agent-desktop.py --only 36 --no-build        # 单元 id 或用例�
 scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可省略第三方目标
 ```
 
-- 部分运行打印 `mac_e2e=partial … cases=n/37 acceptance=false`，**不是**完整矩阵的验收证据；只有
-  不带选择参数的完整运行才打印 `mac_e2e=pass … cases=37`。
+- 部分运行打印 `mac_e2e=partial … cases=n/37 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
+  覆盖 37 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=37`。
+- 任何失败都以非零退出并打印 `mac_e2e=fail … cases=n/37 acceptance=false`；失败发生在单元内时，
+  其前另有一条 `e2e_timing unit=… failed=true`。参数与选择错误（如 `--only` 超出 `--tier`）在运行开始前退出，
+  不带汇总行。
 - 只运行 `quiet`/`ax` 单元时，门禁只要求辅助功能权限；含截图的单元仍要求屏幕录制。
 - 失败时脚本给出 `e2e rerun: … --only <单元> --no-build`，不必从头重跑；`e2e_timing unit=…` 给出每个
   单元耗时，`e2e_timing total_s=… agent_desktop_calls=…` 给出总耗时与调用次数。

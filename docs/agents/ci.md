@@ -8,7 +8,6 @@ Workflow: `.github/workflows/guardrails.yml`.
 | --- | --- | --- | --- |
 | `source` | pull request, push to main, manual dispatch | GitHub-hosted `macos-26` | Formatting, crate direction, dependency sources/summary, validation-tool tests and report checks. No product binary is built or executed. |
 | `native` | manual dispatch only | `[self-hosted, macOS, ARM64, arcshot-macos27]` | Asserts macOS 27 + SDK 27 + arm64, then runs complete `scripts/check-all.sh`, including Rust checks and Debug/Release native smoke. |
-
 | `e2e` | manual dispatch with `e2e_tier` = `quiet` or `ax` | same self-hosted runner | `scripts/e2e-agent-desktop.py --tier <tier>` only. These tiers refuse real keys, pointer moves, `--headed` and `osascript`, so they cannot take over a shared desktop. `physical` and `full` are never run in CI. |
 
 GitHub-hosted stable images currently do not provide the required macOS 27 product
@@ -37,5 +36,9 @@ network prohibition is unchanged.
    background daemon has no such session; the job then fails at the permission
    gate, which is a setup problem and not a product failure. Run it with
    `gh workflow run guardrails.yml -f e2e_tier=quiet`.
+5. `e2e` declares `needs: native` so it never shares the desktop with the native
+   job's smoke runs. That ordering assumes one runner process; a second runner
+   on the same Mac must join the same job queue, because two concurrent jobs
+   would break the single-instance rule in `TEST.md` §4.1.
 
 No runner or branch-protection setting is changed by the repository scripts.

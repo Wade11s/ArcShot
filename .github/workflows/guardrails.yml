@@ -68,6 +68,9 @@ jobs:
   e2e:
     name: agent-desktop E2E (self-hosted, quiet/ax tiers)
     if: github.event_name == 'workflow_dispatch' && inputs.e2e_tier != ''
+    # The native job launches and quits the product too; both jobs share one
+    # desktop, so the E2E tier waits for it instead of running beside it.
+    needs: native
     runs-on: [self-hosted, macOS, ARM64, arcshot-macos27]
     timeout-minutes: 30
     steps:
