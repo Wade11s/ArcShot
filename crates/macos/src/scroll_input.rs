@@ -12,7 +12,7 @@
 //! All methods run on the main thread only; the tap source is added to the main
 //! run loop's common modes, so callback and coordinator never race.
 
-use std::{cell::RefCell, error::Error, fmt, ptr, rc::Rc};
+use std::{cell::RefCell, error::Error, fmt, ptr, rc::Rc, time::Instant};
 
 use objc2::MainThreadMarker;
 
@@ -245,6 +245,10 @@ pub struct TapGate {
     command_key: Option<u16>,
     protection_lost: bool,
     stats: TapStats,
+    /// Receipt instant of the newest scroll event passed to the target; the
+    /// coordinator reads it to report input-to-preview latency. Never part of
+    /// the gate decision or the retirement counters.
+    last_scroll: Option<Instant>,
 }
 
 impl TapGate {
@@ -261,6 +265,7 @@ impl TapGate {
             command_key: None,
             protection_lost: false,
             stats: TapStats::default(),
+            last_scroll: None,
         }
     }
 
@@ -321,6 +326,12 @@ impl TapGate {
         self.stats
     }
 
+    /// Receipt instant of the newest scroll event passed to the target.
+    #[must_use]
+    pub const fn last_scroll(&self) -> Option<Instant> {
+        self.last_scroll
+    }
+
     /// Applies one event and decides pass or swallow (I-12 ownership rules).
     #[must_use]
     pub fn on_event(&mut self, event: TapEvent) -> TapDecision {
@@ -350,6 +361,7 @@ impl TapGate {
                         .is_some_and(|rect| rect.contains(event.location))
                 {
                     self.stats.scrolls_passed += 1;
+                    self.last_scroll = Some(Instant::now());
                     TapDecision::Pass
                 } else {
                     // Before the trusted first frame, and outside the fixed
@@ -612,6 +624,12 @@ impl ScrollInputTap {
     #[must_use]
     pub fn stats(&self) -> TapStats {
         self.gate.borrow().stats()
+    }
+
+    /// Receipt instant of the newest scroll event passed to the target.
+    #[must_use]
+    pub fn last_scroll(&self) -> Option<Instant> {
+        self.gate.borrow().last_scroll()
     }
 }
 

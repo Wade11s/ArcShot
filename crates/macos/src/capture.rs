@@ -322,6 +322,7 @@ fn capture_display_region(
     excluding_window_ids: Vec<u32>,
     region: Option<CaptureRegion>,
 ) -> Result<NativeCapture, CaptureError> {
+    let pre_started = Instant::now();
     if builtin_display()? != expected {
         return Err(CaptureError::Display);
     }
@@ -329,7 +330,12 @@ fn capture_display_region(
         None => dimensions(expected)?,
         Some(region) => region_dimensions(region.size)?,
     };
+    let content_started = Instant::now();
     let content = SCShareableContent::get().map_err(|e| CaptureError::Request(e.to_string()))?;
+    log::info!(
+        "capture_sc_content_us={}",
+        content_started.elapsed().as_micros()
+    );
     if builtin_display()? != expected {
         return Err(CaptureError::Display);
     }
@@ -374,6 +380,7 @@ fn capture_display_region(
         }
         selected.push(window);
     }
+    let filter_started = Instant::now();
     let filter = SCContentFilter::create()
         .with_display(display)
         .with_excluding_windows(&selected)
@@ -398,10 +405,13 @@ fn capture_display_region(
         .map_err(|_| CaptureError::Frame)?
         .with_capture_dynamic_range(SCCaptureDynamicRange::SDR)
         .map_err(|_| CaptureError::Frame)?;
+    log::info!("capture_filter_us={}", filter_started.elapsed().as_micros());
+    log::info!("capture_pre_us={}", pre_started.elapsed().as_micros());
     let request_start = Instant::now();
     let image = SCScreenshotManager::capture_image(&filter, &config)
         .map_err(|e| CaptureError::Request(e.to_string()))?;
     let request_duration = request_start.elapsed();
+    let post_started = Instant::now();
     if builtin_display()? != expected {
         return Err(CaptureError::Display);
     }
@@ -463,6 +473,7 @@ fn capture_display_region(
     if builtin_display()? != expected {
         return Err(CaptureError::Display);
     }
+    log::info!("capture_post_us={}", post_started.elapsed().as_micros());
     Ok(NativeCapture {
         display: expected,
         width,

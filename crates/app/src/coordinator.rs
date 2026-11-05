@@ -116,7 +116,7 @@ struct Coordinator {
     overlay: Option<WindowHandle<CaptureView>>,
     overlay_error: Option<String>,
     notice: Option<WindowHandle<NoticeView>>,
-    pending: Option<(CaptureTicket, Instant)>,
+    pending: Option<(CaptureTicket, Instant, Option<u32>)>,
     /// True while the frozen overlay still needs one active-application check.
     overlay_activation_pending: bool,
     /// The built-in display geometry captured with the region frame. Scroll
@@ -180,6 +180,16 @@ struct Coordinator {
     /// collection. A dismissed overlay may leave the WindowServer between
     /// preparation and collection; no window may ever be added to this set.
     scroll_capture_exclusion: Vec<u32>,
+    /// Receipt instant of the current Scroll activation, for PERF-SCROLL-START.
+    scroll_started: Option<Instant>,
+    /// Receipt instant of the newest raw frame submission, for PERF-FRAME-PREVIEW.
+    scroll_frame_submitted: Option<Instant>,
+    /// (submission, stitch-decision) instants for the verified frame whose
+    /// preview update is pending, for PERF-FRAME-PREVIEW.
+    scroll_frame_latency: Option<(Instant, Instant)>,
+    /// Receipt instant of the newest scroll event passed to the target, for
+    /// PERF-EVENT-PREVIEW.
+    scroll_event_started: Option<Instant>,
     scroll_visiting_settings: bool,
     scroll_settings_departed: bool,
 }
@@ -265,6 +275,10 @@ pub(crate) fn launch(cx: &mut App) {
         scroll_capture_exclusion: Vec::new(),
         scroll_visiting_settings: false,
         scroll_settings_departed: false,
+        scroll_started: None,
+        scroll_frame_submitted: None,
+        scroll_frame_latency: None,
+        scroll_event_started: None,
         completion_preview: None,
         completion_preview_deadline: None,
         completion_preview_png: None,
@@ -590,6 +604,12 @@ impl Coordinator {
         if let Some(pending) = self.pending_scroll_input.take() {
             self.drive_scroll_input(pending, cx);
         }
+        if let Some((_, tap)) = self.scroll_tap.as_ref()
+            && let Some(scrolled) = tap.last_scroll()
+            && self.scroll_event_started != Some(scrolled)
+        {
+            self.scroll_event_started = Some(scrolled);
+        }
         // The session tap reports raw user intents and lost protection; the
         // pure policy maps them into authoritative actions.
         let tap_report = self
@@ -690,24 +710,37 @@ impl Coordinator {
                 }
             }
         }
-        if let Some((ticket, ready)) = self.pending
-            && Instant::now() >= ready
-        {
-            self.pending = None;
-            if self.session.may_capture(ticket) {
-                self.submit(ticket, cx);
-            } else {
-                // Cancellation happened before any native request was submitted.
-                self.action(
-                    CaptureAction::Completed {
-                        ticket,
-                        result: Err(CaptureFailure::WorkerUnavailable),
-                    },
-                    cx,
-                );
+        if let Some((ticket, ready, window_number)) = self.pending {
+            // The preparing window only needs to be registered in the
+            // WindowServer for the capture to exclude it; polling for that
+            // exact condition is both faster and more precise than a fixed
+            // sleep, which remains the upper bound.
+            let registered = window_number.is_some_and(|number| {
+                native::owned_visible_window_ids().is_ok_and(|ids| ids.contains(&number))
+            });
+            if registered || Instant::now() >= ready {
+                self.pending = None;
+                if self.session.may_capture(ticket) {
+                    self.submit(ticket, cx);
+                } else {
+                    // Cancellation happened before any native request was submitted.
+                    self.action(
+                        CaptureAction::Completed {
+                            ticket,
+                            result: Err(CaptureFailure::WorkerUnavailable),
+                        },
+                        cx,
+                    );
+                }
             }
         }
         if let Some((ticket, result)) = self.tasks.poll(Instant::now()) {
+            log::info!(
+                "capture_result_us={}",
+                self.started
+                    .map(|s| s.elapsed().as_micros())
+                    .unwrap_or_default()
+            );
             cx.global_mut::<MenuBarGlobal>().0.restore_after_capture();
             self.action(CaptureAction::Completed { ticket, result }, cx);
         }
@@ -1078,9 +1111,15 @@ impl Coordinator {
         );
         let before = self.session.phase();
         let scroll_before = self.session.scroll_phase();
+        let is_scroll_start = matches!(action, CaptureAction::EnterScroll { .. });
+        let dispatch_started = Instant::now();
         let effects: VecDeque<_> = self.session.dispatch(action).into();
+        let dispatch_elapsed = dispatch_started.elapsed();
         let after = self.session.phase();
         let scroll_after = self.session.scroll_phase();
+        if is_scroll_start {
+            self.scroll_started = Some(dispatch_started);
+        }
         if after != before {
             log::info!("capture_phase from={before:?} to={after:?} action={name}");
         }
@@ -1112,6 +1151,13 @@ impl Coordinator {
                 style
             );
         }
+        if edits {
+            // Text-only interaction latency: command dequeue to session commit.
+            log::info!(
+                "interact_commit_us={} action={name}",
+                dispatch_elapsed.as_micros()
+            );
+        }
         effects
     }
 
@@ -1130,14 +1176,24 @@ impl Coordinator {
                         continue;
                     }
                     self.close_notice(cx);
-                    if let Err(error) = self.open_preparing(ticket, cx) {
-                        self.show_error(format!("无法打开截图准备窗口：{error}"), cx);
-                        effects.extend(self.dispatch(CaptureAction::Completed {
-                            ticket,
-                            result: Err(CaptureFailure::WorkerUnavailable),
-                        }));
-                    } else {
-                        self.pending = Some((ticket, Instant::now() + PREPARE_SETTLE));
+                    match self.open_preparing(ticket, cx) {
+                        Ok(window_number) => {
+                            log::info!(
+                                "capture_preparing_opened_us={}",
+                                self.started
+                                    .map(|s| s.elapsed().as_micros())
+                                    .unwrap_or_default()
+                            );
+                            self.pending =
+                                Some((ticket, Instant::now() + PREPARE_SETTLE, window_number));
+                        }
+                        Err(error) => {
+                            self.show_error(format!("无法打开截图准备窗口：{error}"), cx);
+                            effects.extend(self.dispatch(CaptureAction::Completed {
+                                ticket,
+                                result: Err(CaptureFailure::WorkerUnavailable),
+                            }));
+                        }
                     }
                 }
                 CaptureEffect::PresentFrozen(ticket) => {
@@ -1194,9 +1250,18 @@ impl Coordinator {
                     // route for the same snapshot; only the target differs.
                     let fence = job.clone();
                     let snapshot = job.clone();
-                    let submitted = self
-                        .output_tasks
-                        .submit(fence, move || encode_document(&frame, snapshot));
+                    let pixels = (snapshot.crop().width(), snapshot.crop().height());
+                    let submitted = self.output_tasks.submit(fence, move || {
+                        let started = Instant::now();
+                        let encoded = encode_document(&frame, snapshot);
+                        log::info!(
+                            "output_encode_us={} pixels={}x{}",
+                            started.elapsed().as_micros(),
+                            pixels.0,
+                            pixels.1
+                        );
+                        encoded
+                    });
                     if let Err(error) = submitted {
                         log::error!("output_submit_failure={error}");
                         effects.extend(self.session.dispatch(CaptureAction::OutputCompleted {
@@ -1463,12 +1528,14 @@ impl Coordinator {
                     job.clone(),
                     &png,
                     &mut self.pending_save,
-                    |png| match native::write_png_to_clipboard(png) {
-                        Ok(()) => Ok(()),
-                        Err(error) => {
+                    |png| {
+                        let started = Instant::now();
+                        let result = native::write_png_to_clipboard(png);
+                        log::info!("clipboard_accept_us={}", started.elapsed().as_micros());
+                        result.map_err(|error| {
                             log::error!("clipboard_failure={error}");
-                            Err(OutputFailure::Clipboard)
-                        }
+                            OutputFailure::Clipboard
+                        })
                     },
                     |path, png| match native::write_png_to_file(path, png) {
                         Ok(()) => Ok(()),
@@ -1584,11 +1651,22 @@ impl Coordinator {
     }
 
     fn submit(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        log::info!(
+            "capture_submit_us={}",
+            self.started
+                .map(|s| s.elapsed().as_micros())
+                .unwrap_or_default()
+        );
         // All own visible windows are fixed before submission. No other UI is created
         // until the result is resolved, and the status item cannot reopen a native menu.
         cx.global_mut::<MenuBarGlobal>().0.hide_for_capture();
+        let native_prep_started = Instant::now();
         let prepared = native::builtin_display()
             .and_then(|display| native::owned_visible_window_ids().map(|ids| (display, ids)));
+        log::info!(
+            "capture_native_prep_us={}",
+            native_prep_started.elapsed().as_micros()
+        );
         let (display, ids) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -1606,10 +1684,12 @@ impl Coordinator {
             }
         };
         let submitted = self.tasks.submit(ticket, Instant::now(), move || {
+            let worker_started = Instant::now();
             let result = native::capture_builtin(display, ids).map_err(|error| {
                 log::error!("capture_failure={error}");
                 classify_native_failure(&error)
             })?;
+            log::info!("capture_worker_us={}", worker_started.elapsed().as_micros());
             log::info!(
                 "capture_request_us={} display={} pixels={}x{} stride={} scale={}",
                 result.request_duration.as_micros(),
@@ -1650,16 +1730,30 @@ impl Coordinator {
     }
 
     fn prepare_preview(&mut self, ticket: CaptureTicket, cx: &mut Context<Self>) {
+        log::info!(
+            "capture_prepare_submit_us={}",
+            self.started
+                .map(|s| s.elapsed().as_micros())
+                .unwrap_or_default()
+        );
         let Some(frame) = self.session.frame().cloned() else {
             return;
         };
         let screen = frame.geometry();
         self.region_geometry = Some(screen);
         let preview = cx.background_executor().spawn(async move {
+            let prepare_started = Instant::now();
             let preview = arcshot_image::capture_preview(&frame).map_err(|e| e.to_string())?;
             let buffer = image::RgbaImage::from_raw(preview.width, preview.height, preview.bgra)
                 .ok_or_else(|| "invalid preview layout".to_owned())?;
-            Ok::<_, String>(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+            log::info!(
+                "capture_prepare_us={} pixels={}x{}",
+                prepare_started.elapsed().as_micros(),
+                preview.width,
+                preview.height
+            );
+            Ok::<_, String>(image)
         });
         self.preview_task = Some(cx.spawn(async move |entity, cx| {
             let preview = preview.await;
@@ -1679,8 +1773,13 @@ impl Coordinator {
                 match preview {
                     Ok(image) => {
                         state.close_overlay(cx);
+                        let open_started = Instant::now();
                         match state.open_frozen(ticket, screen, image, cx) {
                             Ok(()) => {
+                                log::info!(
+                                    "capture_open_window_us={}",
+                                    open_started.elapsed().as_micros()
+                                );
                                 // A re-presented frozen overlay (after a Scroll
                                 // cancel/refusal) starts with no view state;
                                 // mirror the authoritative document so the
@@ -2551,6 +2650,7 @@ impl Coordinator {
             return;
         };
         let exclusion = self.scroll_capture_exclusion.clone();
+        self.scroll_frame_submitted = Some(Instant::now());
         let submitted = self
             .scroll_frame_tasks
             .submit(ticket, Instant::now(), move || {
@@ -2688,6 +2788,7 @@ impl Coordinator {
         let Some(frame) = self.session.take_scroll_pending_frame() else {
             return;
         };
+        let stitch_started = Instant::now();
         let result = match self.scroll_stitch.as_mut() {
             Some(builder) => builder.submit(&frame),
             None => {
@@ -2702,6 +2803,15 @@ impl Coordinator {
                 return;
             }
         };
+        log::info!(
+            "scroll_stitch_verify_us={}",
+            stitch_started.elapsed().as_micros()
+        );
+        if let Some(submitted) = self.scroll_frame_submitted.take() {
+            let finished = Instant::now();
+            log::info!("frame_verify_us={}", submitted.elapsed().as_micros());
+            self.scroll_frame_latency = Some((submitted, finished));
+        }
         match result {
             Ok(arcshot_image::StitchDecision::Extended {
                 placement,
@@ -2822,6 +2932,16 @@ impl Coordinator {
             builder.extensions(),
             builder.duplicates()
         );
+        if let Some((submitted, finished)) = self.scroll_frame_latency.take() {
+            log::info!(
+                "frame_preview_us={} preview_update_us={}",
+                submitted.elapsed().as_micros(),
+                finished.elapsed().as_micros()
+            );
+        }
+        if let Some(started) = self.scroll_event_started.take() {
+            log::info!("event_preview_us={}", started.elapsed().as_micros());
+        }
     }
 
     /// Opens collection: raw scroll inside the fixed selection is released,
@@ -2873,6 +2993,9 @@ impl Coordinator {
             cx,
         );
         log::info!("scroll_collecting ticket={ticket:?}");
+        if let Some(started) = self.scroll_started.take() {
+            log::info!("scroll_start_us={}", started.elapsed().as_micros());
+        }
         // The origin is already verified: show it immediately, then start the
         // bounded request loop (at most one in-flight request and two queued).
         self.scroll_preview_last = None;
@@ -2957,11 +3080,13 @@ impl Coordinator {
         &mut self,
         ticket: CaptureTicket,
         cx: &mut Context<Self>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<u32>> {
         self.close_overlay(cx);
         let queue = Rc::clone(&self.queue);
         let density = self.session.density();
         let bounds = WindowBounds::centered(size(px(420.0), px(110.0)), cx);
+        let number = Rc::new(RefCell::new(None));
+        let number_for_closure = Rc::clone(&number);
         self.overlay = Some(cx.open_window(
             WindowOptions {
                 window_bounds: Some(bounds),
@@ -2973,6 +3098,15 @@ impl Coordinator {
                 ..Default::default()
             },
             move |window, cx| {
+                *number_for_closure.borrow_mut() =
+                    raw_window_handle::HasWindowHandle::window_handle(window)
+                        .ok()
+                        .and_then(|handle| match handle.as_raw() {
+                            raw_window_handle::RawWindowHandle::AppKit(handle) => {
+                                native::ns_window_number(handle.ns_view.as_ptr())
+                            }
+                            _ => None,
+                        });
                 let close_queue = Rc::clone(&queue);
                 window.on_window_should_close(cx, move |_, _| {
                     close_queue
@@ -3017,7 +3151,7 @@ impl Coordinator {
             },
         )?);
         cx.activate(true);
-        Ok(())
+        Ok(*number.borrow())
     }
 
     fn open_frozen(
