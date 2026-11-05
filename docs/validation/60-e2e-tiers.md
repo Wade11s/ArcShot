@@ -209,7 +209,10 @@ scripts/e2e-agent-desktop.py --no-build     # 完整矩阵，Debug
 ```
 
 结果：退出码 0，`mac_e2e=pass configuration=debug log=target/e2e-agent-desktop-debug.log
-cases=37`，`e2e_timing total_s=320.6 agent_desktop_calls=622`。20 个单元、37 条用例
+cases=37`。完整运行两次通过：`e2e_timing total_s=318.8 agent_desktop_calls=624`
+（`target/e2e-full-60-run7.log`，脚本 `6f3c20f`，含“三次稳定读数”的前置）与 `total_s=320.6
+agent_desktop_calls=622`（`target/e2e-full-60-run6.log`，前一版脚本的两次读数前置）。
+20 个单元、37 条用例
 全部在**一次运行内**通过，包含 `physical` 与 `full` 两档（冻结内置屏、真实键鼠、
 TextEdit/Safari 第三方目标）。
 
