@@ -1030,9 +1030,9 @@ def write_safari_fixture(path: pathlib.Path) -> None:
     path.write_text(html, encoding="utf-8")
 
 
-def wait_target_window(app: str, title_part: str) -> None:
+def wait_target_window(app: str, title_part: str, timeout: float = 15.0) -> None:
     """Waits for exactly one window whose title contains the fixture name."""
-    deadline = time.monotonic() + 15.0
+    deadline = time.monotonic() + timeout
     last: list[dict] = []
     while time.monotonic() < deadline:
         try:
@@ -1048,6 +1048,33 @@ def wait_target_window(app: str, title_part: str) -> None:
             return
         time.sleep(POLL)
     fail(f"expected exactly one {app} fixture window, saw {last}")
+
+
+def open_textedit_backdrop(fixture: pathlib.Path) -> None:
+    """Puts deterministic text behind a region capture's pixel assertions.
+
+    MAC-E2E-32/34 decode the produced PNG and require real row diversity, so
+    the screen area under the selection must not be a flat window (a browser
+    new-tab page, an empty editor pane). The desktop belongs to the user and
+    changes during a run, so the fixture supplies the content instead of the
+    ambient desktop; the assertions themselves are unchanged.
+    """
+    try:
+        agent("close-app", "TextEdit", "--force")
+    except Exception:
+        pass
+    run(["open", str(fixture)])
+    wait_target_window("TextEdit", "e2e-36-textedit")
+    set_window_geometry("TextEdit", 150, 150, 1250, 780)
+    time.sleep(0.5)
+
+
+def close_textedit_backdrop() -> None:
+    """Removes the deterministic backdrop window started for one unit."""
+    try:
+        agent("close-app", "TextEdit", "--force")
+    except Exception:
+        pass
 
 
 def begin_third_party_scroll(
@@ -3274,8 +3301,10 @@ def main() -> int:
                 time.sleep(1.0)
                 # Land mid-document: a viewport near either end is mostly blank and
                 # therefore ambiguous (white rows match many displacements), which
-                # the verifier must refuse. Wheel toward the centre, verifying the
-                # vertical scroller fraction on every step.
+                # the verifier must refuse. Wheel toward the centre, then require
+                # the scroller to stay put across three readings: the click-blocking
+                # assertion below compares the scroller before and after one click,
+                # so still-coasting momentum would look like a click that landed.
                 if frontmost_process() != "TextEdit":
                     fail("TextEdit is not frontmost for the mid-document pre-scroll")
                 before = textedit_scroll_fraction()
@@ -3309,15 +3338,46 @@ def main() -> int:
                     fail("the TextEdit scroller never settled mid-document")
                 if not 0.3 <= fraction <= 0.6:
                     fail(f"the TextEdit viewport is not mid-document (scroller={fraction})")
-                time.sleep(1.0)
+                stable = []
+                for _ in range(20):
+                    values = textedit_scroll_fraction()
+                    current = values[vertical_index] if len(values) > vertical_index else None
+                    stable.append(current)
+                    if len(stable) >= 3 and len(set(stable[-3:])) == 1:
+                        break
+                    time.sleep(0.5)
+                else:
+                    fail("the TextEdit scroller never settled before the click check")
 
             def setup_safari_31():
                 try:
                     agent("close-app", "Safari", "--force")
                 except Exception:
                     pass
+                # A cold `open -F -a Safari <file>` can lose the document while
+                # the app is still launching (observed as "no Safari fixture
+                # window"), so wait for the forced instance to disappear, let
+                # Safari finish launching on its own, then hand it the file.
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline:
+                    try:
+                        if not windows("Safari"):
+                            break
+                    except Failure:
+                        break
+                    time.sleep(0.3)
+                run(["open", "-a", "Safari"])
+                for _ in range(40):
+                    try:
+                        if windows("Safari"):
+                            break
+                    except Failure:
+                        pass
+                    time.sleep(0.5)
+                else:
+                    fail("Safari did not launch for the file:// fixture")
                 run(["open", "-F", "-a", "Safari", str(sa_fixture)])
-                wait_target_window("Safari", "ArcShot36")
+                wait_target_window("Safari", "ArcShot36", timeout=25.0)
                 set_window_geometry("Safari", 100, 80, 1200, 800)
                 run(["open", "-a", "Safari"])
                 time.sleep(1.0)
@@ -3685,6 +3745,10 @@ def main() -> int:
             # are the evidence), object history undo/redo/delete follows, and
             # Finish copies the surviving set. The clipboard PNG is decoded in
             # memory and no PNG file may appear on disk (MAC-LIFETIME-PRIVACY).
+            # The backdrop is a deterministic fixture, not the user's desktop.
+            backdrop = ROOT / "target" / "e2e-36-textedit.txt"
+            write_textedit_fixture(backdrop)
+            open_textedit_backdrop(backdrop)
             png_before = png_files_on_disk()
             log_mark = len(read_log(log))
             click(app, "开始截图")
@@ -3784,6 +3848,7 @@ def main() -> int:
                 fail(f"decoded clipboard PNG is not the selection extent: {metrics}")
             if png_files_on_disk() != png_before:
                 fail("a clipboard finish wrote a PNG file to disk")
+            close_textedit_backdrop()
             note(
                 f"mac_e2e_32=pass tools=Rectangle,Line,Arrow,Blur,Text commit=5 "
                 f"undo_redo=4->5 delete=4 pixels={pixels} sRGB=true no_disk_png=true"
@@ -3914,6 +3979,10 @@ def main() -> int:
             # opens the native panel and writes nothing; cancelling the panel is
             # not an error, leaves the clipboard untouched and keeps the session
             # frozen; Finish then copies through the shared clipboard path.
+            # The backdrop is a deterministic fixture, not the user's desktop.
+            backdrop = ROOT / "target" / "e2e-36-textedit.txt"
+            write_textedit_fixture(backdrop)
+            open_textedit_backdrop(backdrop)
             log_mark = len(read_log(log))
             click(app, "开始截图")
             wait_frozen_active(log, log_mark)
@@ -4018,6 +4087,7 @@ def main() -> int:
             save_path.unlink()
             if save_path.exists():
                 fail("the explicit-save test file could not be removed")
+            close_textedit_backdrop()
             note(
                 f"mac_e2e_34_save=pass chosen=true target=SaveFile pixels={pixels} "
                 f"sRGB=true sha256={metrics['sha256'][:12]} clipboard_unchanged=true file_removed=true"
