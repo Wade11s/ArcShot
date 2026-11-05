@@ -428,8 +428,15 @@ def measure_scroll(app: str, log: pathlib.Path, samples: int) -> None:
 
 
 def fixture_24m_args() -> list[str]:
-    """The #59 24M fixture geometry: wider window, clamped scroll range."""
-    return ["--width", "800", "--max-offset", "7808"]
+    """The #59 24M fixture geometry: wider window, exact clamped range.
+
+    Starting at content row 0 avoids an up-scroll phase: a 384-physical-row
+    viewport scrolled down to row 7808 yields 384 + 2 * 7808 = 16000 rows at
+    1500 pixels per row = 24,000,000 pixels. It also removes the momentum
+    inversion that coalesced wheel events can produce when the collection
+    changes direction under load.
+    """
+    return ["--width", "800", "--max-offset", "7808", "--initial-offset", "0"]
 
 
 def build_24m_document(app: str, log: pathlib.Path) -> int:
@@ -442,14 +449,13 @@ def build_24m_document(app: str, log: pathlib.Path) -> int:
     mark = enter_fixture_scroll(
         app, log, drag_from=(620, 196), drag_to=(1370, 388)
     )
-    # Scroll to the top, then to the bottom, waiting for the verifier.
-    # Small steps keep each captured frame strictly verifiable; a large
-    # synthetic wheel step can be caught mid-rebuild by the continuous
-    # capture and read as changed content inside the overlap.
-    for _ in range(150):
-        wheel(650, 280, 1)
-        time.sleep(0.15)
-    for _ in range(500):
+    # Scroll down in small steps, waiting for the verifier. The fixture
+    # clamps at 7808, so any late or coalesced wheel event is de-duplicated
+    # instead of pushing the document past the 24,000,000-pixel cap. Large
+    # synthetic wheel steps can be caught mid-rebuild by the continuous
+    # capture and read as changed content inside the overlap, so the cadence
+    # stays at the controlled slow-scroll rate used by the E2E fixtures.
+    for _ in range(600):
         wheel(650, 280, -1)
         time.sleep(0.15)
         if document_height(log) >= MAX_DOCUMENT_HEIGHT:
@@ -485,7 +491,9 @@ def measure_export_24m(
     if sampler is not None:
         sampler_stdout = sampler_log.open("w")
         sampler_process = subprocess.Popen(
-            [str(sampler), str(pid), "0.1", str(240 * runs)],
+            # 50 ms sleep keeps the observed RSS cadence under 100 ms even
+            # after `ps` and the slower `footprint` cross-check complete.
+            [str(sampler), str(pid), "0.05", str(240 * runs)],
             stdout=sampler_stdout,
             stderr=subprocess.STDOUT,
             text=True,
@@ -493,7 +501,7 @@ def measure_export_24m(
         sampler_stdout.close()
     try:
         for run in range(runs):
-            # A fresh fixture resets the content offset to 2000. The first
+            # A fresh fixture resets the content offset to row 0. The first
             # clipboard copy of a Scroll completion keeps the document for
             # optional annotation and then ends the session on re-finish, so
             # five maximum-size exports require five consecutive sessions
