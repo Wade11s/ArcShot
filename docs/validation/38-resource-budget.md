@@ -7,11 +7,11 @@
 
 ## 实测来源与环境
 
-- 候选 SHA：`50719acd8b50dad42152d8cb36faa35af4900951`
+- 实测实现/脚本 SHA：`50719acd8b50dad42152d8cb36faa35af4900951`
   （`fix(stitch): grow the verified surface in place and time Scroll latency per session`，
   工作树干净）。
 - 时间：2026-11-05T22:32:46Z（`scripts/record-validation.sh` 采集）。
-- 构建配置：Release（`scripts/build-app.sh --release`，本机自签名身份 `ArcShot Dev`）。
+- 构建配置：Release。`scripts/build-app.sh --release` 产出，本机自签名身份 `ArcShot Dev`。
 - 入口：`scripts/perf-measure.py --no-build …`，判定 `scripts/perf-gate.sh`。
 - 夹具：自有 GPUI 滚动夹具 `arcshot-scroll-fixture`（`fixture=agent-desktop-e2e-v1`）；
   24M 几何由 `fixture_24m_args()` 固定为 `--width 800 --max-offset 7808
@@ -40,8 +40,9 @@ swift=Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)
 metal=Apple metal version 32023.921 (metalfe-32023.921.6)
 ```
 
-显示器为内建单屏 1470×956 逻辑点、scale=2；`agent-desktop status` 报告
-`accessibility=granted`、`screen_recording=granted`。未改动 TCC。
+- 显示器：内建单屏 1470×956 逻辑点、scale=2。
+- 权限：`agent-desktop status` 报告 `accessibility=granted`、`screen_recording=granted`；
+  未改动 TCC。
 
 ## 缺陷与修复
 

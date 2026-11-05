@@ -7,18 +7,35 @@ AX 接缝）、原生故障注入与非 ArcShot 应用粘贴 smoke 仍未验证�
 
 ## 候选与环境
 
-- **产品代码**：`50719acd8b50dad42152d8cb36faa35af4900951`
-  （`fix(stitch): grow the verified surface in place and time Scroll latency per session`）。
-- **测试脚本**：`6f3c20f735eeb8eadc5ecba30fda3c5d85f27b53`（含 E2E 前置加固）。
-  该提交只改 `scripts/`、`TEST.md` 与验证文档，不含产品代码；因此性能、资源与
-  功能证据都落在同一份产品代码上。
-- 机器 Mac14,2 / Apple M2 / 16 GB；macOS 27.2 (26B123)；内建单屏 1470×956 逻辑点、
-  scale=2；Xcode 27.0 (27A266a)、SDK 27.0 (26A425)、Swift 6.4、Metal 32023.921；
-  rustc/cargo 1.99.1。构建由 `scripts/check-all.sh` 与 `scripts/build-app.sh`
-  产出，本机自签名身份 `ArcShot Dev`。
+- 实测实现/脚本 SHA：`50719acd8b50dad42152d8cb36faa35af4900951`
+  （产品代码：`fix(stitch): grow the verified surface in place and time Scroll latency
+  per session`）；测试脚本 `6f3c20f735eeb8eadc5ecba30fda3c5d85f27b53`
+  （含 E2E 前置加固，只改 `scripts/`、`TEST.md` 与验证文档，不含产品代码）。因此性能、
+  资源与功能证据都落在同一份产品代码上。
+- 时间：2026-11-05T23:20:04Z（`scripts/record-validation.sh` 采集）。
+- 构建配置：Debug 与 Release。Debug 跑完整 E2E 矩阵，Release 跑 T-04 与启动冒烟；
+  两者均由 `scripts/check-all.sh` / `scripts/build-app.sh` 产出，本机自签名身份 `ArcShot Dev`。
+- Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
+- Xcode：27.0 (27A266a)。
+- SDK：macOS 27.0 (26A425)。
+- Swift：Apple Swift version 6.4 (`swiftlang-6.4.0.34.1 clang-2100.3.34.1`)。
+- Metal/AIR-LLD：Apple metal version 32023.921 (`metalfe-32023.921.6`)。
+- 机器：Mac14,2，arm64，Apple M2 / 16 GB。
+- macOS：27.2 (26B123)。
+- 显示器：内建单屏 1470×956 逻辑点，scale=2。
 - 权限：`accessibility=granted`、`screen_recording=granted`；未改动任何 TCC 设置。
 - 夹具：自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`（`agent-desktop-e2e-v1`）、
   TextEdit `textedit-36-v1`、Safari `file://` `safari-36-v1`。
+- 日志：`target/e2e-full-60-run7.log`、`target/e2e-full-60-run6.log`、
+  `target/38-check-all.log`、`target/perf-38-idle.log`、`target/perf-38-scroll.log`、
+  `target/perf-38-scroll-start.log`、`target/perf-38-24m-perf.log`、
+  `target/perf-38-24m-resource.log`。日志是本地构建产物，不入库。
+
+| 范围 | 结果 |
+| --- | --- |
+| T-04 性能与资源门槛（#38 记录） | Pass |
+| E2E 完整矩阵（Debug，37 用例） | Pass |
+| §4.4 用户项与真实指针手势验收 | Not tested |
 
 ## 已通过的项目（同一候选）
 
