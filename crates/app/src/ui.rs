@@ -441,10 +441,16 @@ impl CaptureView {
     /// Creates or drops the live editor to match the authoritative text edit.
     pub(crate) fn sync_text_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.text_edit.clone() else {
-            if self.text_input.take().is_some() {
-                self.text_focus = None;
+            let had_input = self.text_input.take().is_some();
+            let had_focus = self.text_focus.take().is_some();
+            if had_input || had_focus {
                 self.size_editing = false;
                 self.size_draft.clear();
+                // The removed editor element would otherwise keep window
+                // focus and overlay keys (undo/redo/Escape) would reach no
+                // handler; return focus to the overlay root instead.
+                let focus = self.focus.clone();
+                window.focus(&focus, cx);
                 cx.notify();
             }
             return;
@@ -485,7 +491,9 @@ impl CaptureView {
                 cx.notify();
             });
         }
-        self.text_focus = None;
+        // `text_focus` stays set until `sync_text_editor` observes the edit
+        // is gone: only that path has the window needed to return focus to
+        // the overlay root.
         self.text_edit = None;
         self.size_editing = false;
         self.size_draft.clear();
