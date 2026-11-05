@@ -13,8 +13,10 @@ Usage: scripts/e2e-agent-desktop.py [--release]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
+import struct
 import subprocess
 import sys
 import time
@@ -379,6 +381,34 @@ def free_fixture_selection(
             x += step
         y += step
     fail("no floating-window-free selection region inside the fixture")
+
+
+PASTEBOARD_SWIFT = r"""
+import AppKit
+import Foundation
+let path = CommandLine.arguments[1]
+guard let data = NSPasteboard.general.data(forType: .png) else { exit(2) }
+try data.write(to: URL(fileURLWithPath: path))
+print("bytes=\(data.count)")
+"""
+
+
+def pasteboard_png(name: str) -> tuple[str, int, int, int]:
+    """Reads the PNG bytes from the real pasteboard and returns (hash, size, w, h)."""
+    directory = ROOT / "target"
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "e2e-pasteboard.swift"
+    script.write_text(PASTEBOARD_SWIFT)
+    output = directory / name
+    output.unlink(missing_ok=True)
+    run(["swift", str(script), str(output)], timeout=60.0)
+    if not output.exists():
+        fail("the pasteboard holds no PNG at the expected point")
+    data = output.read_bytes()
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        fail(f"the pasteboard payload is not a PNG: {len(data)} bytes")
+    width, height = struct.unpack(">II", data[16:24])
+    return hashlib.sha256(data).hexdigest(), len(data), width, height
 
 
 def count_log_after(path: pathlib.Path, needle: str, after: int) -> int:
@@ -1739,7 +1769,7 @@ def main() -> int:
                 fail(f"the first completion copy already had annotations: {first_publish}")
             crop_width = int(round(selection[2] * 2))
             crop_height = int(round(selection[3] * 2))
-            activate_completion_preview(mark)
+            doc_width, doc_height, zoom = activate_completion_preview(mark)
             wait_log(log, "app_active surface=frozen", 10.0, after=mark)
             # Accessibility-only creation path: it drives the same authoritative
             # Document::add_rectangle and does not depend on coordinate pointer
@@ -1768,6 +1798,15 @@ def main() -> int:
             )
             if "annotations=1" not in edited:
                 fail(f"the accessible rectangle did not enter the shared document: {edited}")
+            # The un-annotated whole image is already on the real pasteboard.
+            first_hash, first_size, first_w, first_h = pasteboard_png(
+                "35-e2e-29-first.png"
+            )
+            if (first_w, first_h) != (crop_width, crop_height):
+                fail(
+                    f"first clipboard PNG is {first_w}x{first_h}, "
+                    f"want the whole crop {crop_width}x{crop_height}"
+                )
             finish = wait_node(
                 app,
                 lambda tree: (
@@ -1805,15 +1844,31 @@ def main() -> int:
                 10.0,
                 after=finish_mark,
             )
+            # The re-finish copied the whole annotated image to the real pasteboard.
+            second_hash, second_size, second_w, second_h = pasteboard_png(
+                "35-e2e-29-annotated.png"
+            )
+            if (second_w, second_h) != (crop_width, crop_height):
+                fail(
+                    f"re-finish clipboard PNG is {second_w}x{second_h}, "
+                    f"want the whole crop {crop_width}x{crop_height}"
+                )
+            if second_hash == first_hash:
+                fail("re-finish copied the un-annotated image")
             note(
                 "mac_e2e_29_refinish=pass preview_click=true annotation=1 "
-                f"whole_image={pixels} bytes={first_bytes}->{second_bytes} session=ended"
+                f"whole_image={second_w}x{second_h} "
+                f"clipboard_sha256={first_hash[:12]}..{second_hash[:12]} "
+                f"bytes={first_size}->{second_size} session=ended"
             )
 
             # Case B: activating the preview then cancelling must not touch the
             # clipboard again; the earlier un-annotated copy stays authoritative.
             mark, selection, first_publish = complete_long_image()
             copies_after_first = count_log_after(log, "output_publish target=Clipboard", mark)
+            cancel_hash, cancel_size, cancel_w, cancel_h = pasteboard_png(
+                "35-e2e-29-cancel-first.png"
+            )
             activate_completion_preview(mark)
             # Escape reaches the overlay once the product owns keyboard focus;
             # every retry re-gates on the product's own activation line.
@@ -1836,9 +1891,13 @@ def main() -> int:
                 fail("Escape never reached the annotation surface")
             if count_log_after(log, "output_publish target=Clipboard", mark) != copies_after_first:
                 fail("cancelling the annotation wrote to the clipboard a second time")
+            after_hash, after_size, _, _ = pasteboard_png("35-e2e-29-cancel-after.png")
+            if after_hash != cancel_hash:
+                fail("cancelling the annotation changed the previously copied PNG")
             note(
                 "mac_e2e_29_cancel=pass clipboard_retention=true "
-                f"copies={copies_after_first} session=cancelled"
+                f"copies={copies_after_first} sha256={after_hash[:12]} "
+                f"bytes={after_size} session=cancelled"
             )
         finally:
             stop(fixture)
