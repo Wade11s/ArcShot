@@ -305,6 +305,114 @@ def fixture_offset_points(fixture_log: pathlib.Path) -> int:
     return offsets[-1] if offsets else FIXTURE_INITIAL_OFFSET_ROWS
 
 
+FIXTURE_RECT = (600.0, 120.0, 760.0, 720.0)
+# agent-desktop's raw --xy space places the frozen window's y origin 33 points
+# lower than the screen point (the menu-bar inset); drags therefore target
+# screen_y = document_y + 33.
+SCREEN_Y_OFFSET = 33.0
+
+CG_WINDOWS_SWIFT = r"""
+import CoreGraphics
+import Foundation
+guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as NSArray? else { exit(1) }
+for case let w as NSDictionary in list {
+    let owner = w[kCGWindowOwnerName as String] as? String ?? "?"
+    let layer = w[kCGWindowLayer as String] as? Int ?? 0
+    let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+    let x = b["X"] as? Double ?? 0, y = b["Y"] as? Double ?? 0
+    let ww = b["Width"] as? Double ?? 0, hh = b["Height"] as? Double ?? 0
+    print("\(layer) \(x) \(y) \(ww) \(hh) \(owner)")
+}
+"""
+
+
+def floating_windows() -> list[tuple[int, float, float, float, float]]:
+    """CoreGraphics windows above the normal layer, with their bounds."""
+    directory = ROOT / "target"
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "e2e-cg-windows.swift"
+    script.write_text(CG_WINDOWS_SWIFT)
+    result = run(["swift", str(script)], timeout=60.0)
+    windows = []
+    for line in result.stdout.splitlines():
+        parts = line.split(maxsplit=5)
+        if len(parts) != 6:
+            continue
+        layer, x, y, width, height, owner = parts
+        try:
+            windows.append((int(layer), float(x), float(y), float(width), float(height), owner))
+        except ValueError:
+            continue
+    return windows
+
+
+def intersects(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    return not (
+        a[0] + a[2] <= b[0]
+        or b[0] + b[2] <= a[0]
+        or a[1] + a[3] <= b[1]
+        or b[1] + b[3] <= a[1]
+    )
+
+
+def free_fixture_selection(
+    *, width: float = 240.0, height: float = 160.0
+) -> tuple[float, float, float, float]:
+    """Finds a selection inside the fixture clear of floating windows.
+
+    Third-party notification banners and floating panels sit above normal
+    windows and can intercept a headed drag; picking an unobstructed rectangle
+    keeps the physical precondition honest instead of retrying blind.
+    """
+    fixture_x, fixture_y, fixture_width, fixture_height = FIXTURE_RECT
+    blockers = [
+        (layer, x, y, w, h)
+        for (layer, x, y, w, h, _owner) in floating_windows()
+        if layer > 0 and w > 0 and h > 0
+    ]
+    step = 20.0
+    y = fixture_y + 20.0
+    while y + height <= fixture_y + fixture_height - 20.0:
+        x = fixture_x + 20.0
+        while x + width <= fixture_x + fixture_width - 20.0:
+            candidate = (x, y, width, height)
+            if not any(intersects(candidate, blocker) for blocker in blockers):
+                return candidate
+            x += step
+        y += step
+    fail("no floating-window-free selection region inside the fixture")
+
+
+PASTEBOARD_SWIFT = r"""
+import AppKit
+import Foundation
+let path = CommandLine.arguments[1]
+guard let data = NSPasteboard.general.data(forType: .png) else { exit(2) }
+try data.write(to: URL(fileURLWithPath: path))
+print("bytes=\(data.count)")
+"""
+
+
+def pasteboard_png(name: str) -> tuple[str, int, int, int]:
+    """Reads the PNG bytes from the real pasteboard and returns (hash, size, w, h)."""
+    directory = ROOT / "target"
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "e2e-pasteboard.swift"
+    script.write_text(PASTEBOARD_SWIFT)
+    output = directory / name
+    output.unlink(missing_ok=True)
+    run(["swift", str(script), str(output)], timeout=60.0)
+    if not output.exists():
+        fail("the pasteboard holds no PNG at the expected point")
+    data = output.read_bytes()
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        fail(f"the pasteboard payload is not a PNG: {len(data)} bytes")
+    width, height = struct.unpack(">II", data[16:24])
+    return hashlib.sha256(data).hexdigest(), len(data), width, height
+
+
 def count_log_after(path: pathlib.Path, needle: str, after: int) -> int:
     return sum(1 for line in read_log(path)[after:] if needle in line)
 
@@ -563,6 +671,36 @@ def decode_clipboard_expect(selection: tuple[float, float, float, float]) -> dic
     return metrics
 
 
+def select_region(
+    app: str,
+    log: pathlib.Path,
+    *,
+    drag_from: str,
+    drag_to: str,
+    mark: int,
+    attempts: int = 3,
+) -> tuple[float, float, float, float]:
+    """Drags one selection, retrying a fresh capture after lost physical input.
+
+    A headed drag can be intercepted by an unrelated floating window above the
+    overlay; a retry restarts the capture instead of weakening the assertion
+    that the product itself reports the resulting selection.
+    """
+    for attempt in range(attempts):
+        agent("drag", "--from-xy", drag_from, "--to-xy", drag_to, "--headed")
+        try:
+            wait_log(log, "capture_edit action=SelectRegion", 4.0, after=mark)
+            return parse_selection(log, mark)
+        except Failure:
+            if attempt == attempts - 1:
+                raise
+            restart = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, restart)
+            mark = restart
+    fail("the selection drag never reached the overlay")
+
+
 def quit_app(app: str, process: subprocess.Popen, *, expect_status_item_removed: bool) -> None:
     """Quits through the real menu item and checks the process is really gone."""
     click(app, "退出 ArcShot")
@@ -733,18 +871,25 @@ def press(combo: str, *, headed: bool) -> None:
 
 
 def press_until_log(
-    combo: str, log: pathlib.Path, needle: str, *, timeout: float = 4.0, attempts: int = 4
+    combo: str,
+    log: pathlib.Path,
+    needle: str,
+    *,
+    timeout: float = 4.0,
+    attempts: int = 4,
+    after: int | None = None,
 ) -> str:
     """Press a headed key and require the product's own diagnostic line.
 
     Physical key delivery can lose a focus race; each retry re-sends the key
     and re-reads the product log, never relaxing the behavioral assertion.
+    `after` keeps a stale earlier line from satisfying the wait.
     """
     last: Exception | None = None
     for _ in range(attempts):
         press(combo, headed=True)
         try:
-            return wait_log(log, needle, timeout)
+            return wait_log(log, needle, timeout, after=after or 0)
         except Failure as error:
             last = error
     fail(f"headed {combo!r} never produced {needle!r}: {last}")
@@ -1802,6 +1947,236 @@ def main() -> int:
             f"missing={','.join(missing) or 'none'}"
         )
 
+        # MAC-E2E-29: the confirmed-copy whole-image preview, the shared
+        # annotation surface, the whole-image annotated output and cancel
+        # retention (I-11 §7–8). The headed drag is a pointer precondition; its
+        # product effect is proven by `capture_edit ... annotations=1`, and the
+        # whole-image extent by the output pixels plus the verified stitch.
+        fixture_log = ROOT / "target" / f"e2e-scroll-fixture-{configuration}.log"
+        fixture = start(
+            ROOT / "target" / configuration / "arcshot-scroll-fixture", fixture_log
+        )
+        try:
+            wait_log(fixture_log, "fixture_window", 10.0)
+            time.sleep(1.0)
+
+            def latest_stitch_bottom(after):
+                values = [
+                    int(line.split("bottom=", 1)[1].split(" ", 1)[0])
+                    for line in read_log(log)[after:]
+                    if "scroll_stitch extended" in line and "bottom=" in line
+                ]
+                return values[-1] if values else None
+
+            def complete_long_image(drag_from=None, drag_to=None):
+                if drag_from is None or drag_to is None:
+                    free = free_fixture_selection()
+                    drag_from = f"{free[0]:.0f},{free[1] + SCREEN_Y_OFFSET:.0f}"
+                    drag_to = (
+                        f"{free[0] + free[2]:.0f},"
+                        f"{free[1] + free[3] + SCREEN_Y_OFFSET:.0f}"
+                    )
+                log_mark = len(read_log(log))
+                click(app, "开始截图")
+                wait_frozen_active(log, log_mark)
+                selection = select_region(
+                    app,
+                    log,
+                    drag_from=drag_from,
+                    drag_to=drag_to,
+                    mark=log_mark,
+                )
+                mark = len(read_log(log))
+                click_scroll_entry(app, denied=False)
+                wait_log(
+                    log,
+                    "a11y_action=arcshot.overlay.scroll action=Click",
+                    10.0,
+                    after=mark,
+                )
+                wait_log(log, "scroll_collecting", 15.0, after=mark)
+                # The whole-image post-processing path does not depend on how many
+                # rows were stitched: completing the trusted single frame already
+                # exercises copy -> preview -> annotate -> re-finish end to end.
+                press_until_log(
+                    "return", log, "output_publish target=Clipboard", timeout=5.0, after=mark
+                )
+                publish = wait_log_line(
+                    log, "output_publish target=Clipboard", 5.0, after=mark
+                )
+                wait_log(log, "completion_preview shown", 5.0, after=mark)
+                return mark, selection, publish
+
+            def activate_completion_preview(mark):
+                preview = wait_node(
+                    app,
+                    lambda tree: (
+                        find_nodes(
+                            tree,
+                            native_id="arcshot.completion.preview",
+                            require_ref=True,
+                        )
+                        or [None]
+                    )[0],
+                    10.0,
+                )
+                agent("click", preview["ref_id"])
+                wait_log(
+                    log,
+                    "a11y_action=arcshot.completion.preview action=Click",
+                    5.0,
+                    after=mark,
+                )
+                opened = wait_log_line(
+                    log, "completion_annotation_opened", 5.0, after=mark
+                )
+                document = opened.split("document=", 1)[1].split(" ", 1)[0]
+                doc_width, doc_height = (float(value) for value in document.split("x", 1))
+                zoom = float(opened.split("zoom=", 1)[1].split(" ", 1)[0])
+                return doc_width, doc_height, zoom
+
+            # Case A: click the thumbnail, draw one Rectangle with the existing
+            # editor, re-finish and observe the whole annotated image copied.
+            mark, selection, first_publish = complete_long_image("620,600", "850,780")
+            first_bytes = int(first_publish.split("bytes=", 1)[1].split(" ", 1)[0])
+            first_annotations = first_publish.split("annotations=", 1)[1].split(" ", 1)[0]
+            if first_annotations != "0":
+                fail(f"the first completion copy already had annotations: {first_publish}")
+            crop_width = int(round(selection[2] * 2))
+            crop_height = int(round(selection[3] * 2))
+            doc_width, doc_height, zoom = activate_completion_preview(mark)
+            wait_log(log, "app_active surface=frozen", 10.0, after=mark)
+            # Accessibility-only creation path: it drives the same authoritative
+            # Document::add_rectangle and does not depend on coordinate pointer
+            # delivery, which third-party floating windows can intercept.
+            add_rectangle = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(
+                        tree,
+                        native_id="arcshot.overlay.completion.add_rectangle",
+                        require_ref=True,
+                    )
+                    or [None]
+                )[0],
+                10.0,
+            )
+            agent("click", add_rectangle["ref_id"])
+            wait_log(
+                log,
+                "a11y_action=arcshot.overlay.completion.add_rectangle action=Click",
+                5.0,
+                after=mark,
+            )
+            edited = wait_log_line(
+                log, "capture_edit action=AddDefaultRectangle", 5.0, after=mark
+            )
+            if "annotations=1" not in edited:
+                fail(f"the accessible rectangle did not enter the shared document: {edited}")
+            # The un-annotated whole image is already on the real pasteboard.
+            first_hash, first_size, first_w, first_h = pasteboard_png(
+                "35-e2e-29-first.png"
+            )
+            if (first_w, first_h) != (crop_width, crop_height):
+                fail(
+                    f"first clipboard PNG is {first_w}x{first_h}, "
+                    f"want the whole crop {crop_width}x{crop_height}"
+                )
+            finish = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, native_id="arcshot.overlay.finish", require_ref=True)
+                    or [None]
+                )[0],
+                10.0,
+            )
+            finish_mark = len(read_log(log))
+            agent("click", finish["ref_id"])
+            wait_log(
+                log,
+                "a11y_action=arcshot.overlay.finish action=Click",
+                5.0,
+                after=finish_mark,
+            )
+            republish = wait_log_line(
+                log, "output_publish target=Clipboard", 10.0, after=finish_mark
+            )
+            second_bytes = int(republish.split("bytes=", 1)[1].split(" ", 1)[0])
+            pixels = republish.split("pixels=", 1)[1].split(" ", 1)[0]
+            width_text, height_text = pixels.split("x", 1)
+            if int(width_text) != crop_width:
+                fail(f"re-finish width {width_text} != whole crop {crop_width}")
+            if int(height_text) != crop_height:
+                fail(
+                    f"re-finish height {height_text} is not the whole captured frame "
+                    f"({crop_height})"
+                )
+            if "annotations=1" not in republish:
+                fail(f"re-finish snapshot lost the annotation: {republish}")
+            wait_log(
+                log,
+                "from=Frozen to=Resident action=OutputCompleted",
+                10.0,
+                after=finish_mark,
+            )
+            # The re-finish copied the whole annotated image to the real pasteboard.
+            second_hash, second_size, second_w, second_h = pasteboard_png(
+                "35-e2e-29-annotated.png"
+            )
+            if (second_w, second_h) != (crop_width, crop_height):
+                fail(
+                    f"re-finish clipboard PNG is {second_w}x{second_h}, "
+                    f"want the whole crop {crop_width}x{crop_height}"
+                )
+            if second_hash == first_hash:
+                fail("re-finish copied the un-annotated image")
+            note(
+                "mac_e2e_29_refinish=pass preview_click=true annotation=1 "
+                f"whole_image={second_w}x{second_h} "
+                f"clipboard_sha256={first_hash[:12]}..{second_hash[:12]} "
+                f"bytes={first_size}->{second_size} session=ended"
+            )
+
+            # Case B: activating the preview then cancelling must not touch the
+            # clipboard again; the earlier un-annotated copy stays authoritative.
+            mark, selection, first_publish = complete_long_image()
+            copies_after_first = count_log_after(log, "output_publish target=Clipboard", mark)
+            cancel_hash, cancel_size, cancel_w, cancel_h = pasteboard_png(
+                "35-e2e-29-cancel-first.png"
+            )
+            activate_completion_preview(mark)
+            # Escape reaches the overlay once the product owns keyboard focus;
+            # every retry re-gates on the product's own activation line.
+            cancelled = False
+            for _ in range(4):
+                wait_log(log, "app_active surface=frozen", 10.0, after=mark)
+                press("escape", headed=True)
+                try:
+                    wait_log(
+                        log,
+                        "from=Frozen to=Resident action=CancelAttempt",
+                        2.5,
+                        after=mark,
+                    )
+                except Failure:
+                    continue
+                cancelled = True
+                break
+            if not cancelled:
+                fail("Escape never reached the annotation surface")
+            if count_log_after(log, "output_publish target=Clipboard", mark) != copies_after_first:
+                fail("cancelling the annotation wrote to the clipboard a second time")
+            after_hash, after_size, _, _ = pasteboard_png("35-e2e-29-cancel-after.png")
+            if after_hash != cancel_hash:
+                fail("cancelling the annotation changed the previously copied PNG")
+            note(
+                "mac_e2e_29_cancel=pass clipboard_retention=true "
+                f"copies={copies_after_first} sha256={after_hash[:12]} "
+                f"bytes={after_size} session=cancelled"
+            )
+        finally:
+            stop(fixture)
+
         # MAC-E2E-26: the protected single-frame Scroll completion loop over the
         # own GPUI fixture target (I-11 §3/6/10, I-12). The fixture is a real
         # separate process whose pixels are an exact function of its content
@@ -1819,9 +2194,13 @@ def main() -> int:
             log_mark = len(read_log(log))
             click(app, "开始截图")
             wait_frozen_active(log, log_mark)
-            agent("drag", "--from-xy", "620,413", "--to-xy", "1200,593", "--headed")
-            wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
-            selection = parse_selection(log, log_mark)
+            selection = select_region(
+                app,
+                log,
+                drag_from="620,413",
+                drag_to="1200,593",
+                mark=log_mark,
+            )
             root = wait_node(
                 app,
                 lambda tree: (
@@ -1880,10 +2259,12 @@ def main() -> int:
             agent("mouse-wheel", "--x", "1000", "--y", "470", "--dy", "-6", "--headed")
             wait_log(fixture_log, "fixture_scroll", 5.0)
             # Enter completes the single frame; the user simply stopped collecting.
-            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
-            wait_log(
-                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark
+            press_until_log(
+                "return", log, "output_publish target=Clipboard", timeout=5.0, after=mark
             )
+            # A confirmed copy keeps the session frozen and shows the whole-image
+            # thumbnail for its fixed stay, then leaves without a second output.
+            wait_log(log, "completion_preview shown", 5.0, after=mark)
             retired = wait_log_line(log, "scroll_input_retired", 10.0, after=mark)
             scrolls = int(retired.split("scrolls=", 1)[1].split(" ", 1)[0])
             clicks = int(retired.split("clicks_blocked=", 1)[1].split(" ", 1)[0])
@@ -1891,18 +2272,24 @@ def main() -> int:
                 fail(f"tap counters do not prove protection: {retired}")
             if windows(app):
                 fail(f"completed scroll left own windows: {windows(app)}")
+            wait_log(log, "completion_preview_expired", 8.0, after=mark)
             note(
                 "mac_e2e_26=pass prepared=true collecting=true pixel_oracle=exact "
-                f"click_blocked=true scroll_passed=true enter=clipboard scrolls={scrolls} "
-                f"clicks_blocked={clicks}"
+                f"click_blocked=true scroll_passed=true enter=clipboard preview=true "
+                f"auto_dismiss=true scrolls={scrolls} clicks_blocked={clicks}"
             )
 
             # Esc abandons the scroll result: the pre-scroll selection returns.
             log_mark = len(read_log(log))
             click(app, "开始截图")
             wait_frozen_active(log, log_mark)
-            agent("drag", "--from-xy", "620,413", "--to-xy", "1200,593", "--headed")
-            wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+            select_region(
+                app,
+                log,
+                drag_from="620,413",
+                drag_to="1200,593",
+                mark=log_mark,
+            )
             root = wait_node(
                 app,
                 lambda tree: (
@@ -1951,9 +2338,13 @@ def main() -> int:
                 log_mark = len(read_log(log))
                 click(app, "开始截图")
                 wait_frozen_active(log, log_mark)
-                agent("drag", "--from-xy", drag_from, "--to-xy", drag_to, "--headed")
-                wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
-                selection = parse_selection(log, log_mark)
+                selection = select_region(
+                    app,
+                    log,
+                    drag_from=drag_from,
+                    drag_to=drag_to,
+                    mark=log_mark,
+                )
                 mark = len(read_log(log))
                 click_scroll_entry(app, denied=False)
                 wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=mark)
@@ -2043,13 +2434,14 @@ def main() -> int:
                     f"(duplicates={duplicates}, extended {extended_before}→{extended_after})"
                 )
             expect_probe(selection, stitch_mark, "right reverse")
-            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
-            wait_log(
-                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=stitch_mark
+            press_until_log(
+                "return", log, "output_publish target=Clipboard", timeout=5.0, after=stitch_mark
             )
+            wait_log(log, "completion_preview shown", 5.0, after=stitch_mark)
+            wait_log(log, "completion_preview_expired", 8.0, after=stitch_mark)
             note(
                 "mac_e2e_27_right=pass placed=right extended=true reverse_dedup=true "
-                f"duplicates={duplicates} output=clipboard"
+                f"duplicates={duplicates} output=clipboard preview=true auto_dismiss=true"
             )
 
             # Left of the selection: a selection near the fixture's right edge.
@@ -2066,8 +2458,15 @@ def main() -> int:
                 wheel(1050, 500, 1)
             wait_log(log, "scroll_stitch duplicate", 10.0, after=stitch_mark)
             expect_probe(selection, stitch_mark, "left reverse")
-            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
-            note("mac_e2e_27_left=pass placed=left extended=true reverse_dedup=true output=clipboard")
+            press_until_log(
+                "return", log, "output_publish target=Clipboard", timeout=5.0, after=stitch_mark
+            )
+            wait_log(log, "completion_preview shown", 5.0, after=stitch_mark)
+            wait_log(log, "completion_preview_expired", 8.0, after=stitch_mark)
+            note(
+                "mac_e2e_27_left=pass placed=left extended=true reverse_dedup=true "
+                "output=clipboard preview=true auto_dismiss=true"
+            )
 
             # Inner bottom-right: a selection spanning the fixture width, so
             # neither side placement fits. The pointer sits on the preview and
@@ -2085,13 +2484,15 @@ def main() -> int:
             wait_log(log, "scroll_stitch extended", 10.0, after=stitch_mark)
             wait_log(fixture_log, "fixture_scroll", 5.0, after=fixture_mark)
             expect_probe(selection, stitch_mark, "inner over-preview")
-            press_until_log("return", log, "output_publish target=Clipboard", timeout=5.0)
-            wait_log(
-                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=stitch_mark
+            press_until_log(
+                "return", log, "output_publish target=Clipboard", timeout=5.0, after=stitch_mark
             )
+            wait_log(log, "completion_preview shown", 5.0, after=stitch_mark)
+            wait_log(log, "completion_preview_expired", 8.0, after=stitch_mark)
             note(
                 "mac_e2e_27_inner=pass placed=inner over_preview_scroll=true "
-                "pixel_oracle=exact preview_excluded=true output=clipboard"
+                "pixel_oracle=exact preview_excluded=true output=clipboard "
+                "completion_preview=true auto_dismiss=true"
             )
         finally:
             stop(fixture)
@@ -2212,12 +2613,19 @@ def main() -> int:
             agent("click", use["ref_id"])
             wait_log(log, "scroll_partial_choice action=accept", 10.0, after=mark)
             wait_log(log, "output_publish target=Clipboard", 10.0, after=mark)
+            # #35: any confirmed clipboard completion shares the whole-image
+            # preview post-processing, including an accepted verified part.
+            wait_log(log, "completion_preview shown", 10.0, after=mark)
+            wait_log(log, "completion_preview_expired", 10.0, after=mark)
             wait_log(
-                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark
+                log,
+                "from=Frozen to=Resident action=CancelAttempt",
+                10.0,
+                after=mark,
             )
             note(
                 "mac_e2e_28_accept=pass gap_stop=true choices=two no_auto_output=true "
-                "accept=clipboard after_explicit_click"
+                "accept=clipboard shared_preview=true auto_dismiss=true"
             )
         finally:
             stop(fixture)

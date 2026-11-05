@@ -2,7 +2,8 @@
 use crate::{
     MenuBarGlobal,
     ui::{
-        CaptureView, HotkeyView, NoticeView, OverlayPreview, ScrollControlView,
+        COMPLETION_PREVIEW_ENTER, COMPLETION_PREVIEW_EXIT, COMPLETION_PREVIEW_HOLD, CaptureView,
+        CompletionPreviewView, HotkeyView, NoticeView, OverlayPreview, ScrollControlView,
         ScrollPermissionView, ScrollPreviewView, TextEditMirror, UiCommand, UiQueue,
     },
 };
@@ -14,7 +15,7 @@ use arcshot_app::{
     ScrollFrameQueue, ScrollFrameSubmitError, ScrollFrameTasks, ScrollPartialChoice,
     ScrollPermissionAction, ScrollPermissionEffect, ScrollPermissionFlow, ScrollPermissionNotice,
     ScrollTapCommand, ScrollTargetTasks, encode_document, may_submit_scroll_frame, partial_action,
-    scroll_tap_action,
+    preview_layout, scroll_tap_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CaptureAction, CaptureEffect,
@@ -166,6 +167,13 @@ struct Coordinator {
     scroll_target_checked: Option<Instant>,
     /// Region overlay to restore when a Scroll permission notice closes.
     scroll_restore: Option<CaptureTicket>,
+    /// The confirmed-copy whole-image thumbnail; it leaves after its fixed stay.
+    completion_preview: Option<WindowHandle<CompletionPreviewView>>,
+    /// When the completion thumbnail must leave; `Instant` is app presentation
+    /// timing, never a capture or session semantic.
+    completion_preview_deadline: Option<(CaptureTicket, Instant)>,
+    /// Encoded PNG handed to the completion preview by the successful copy.
+    completion_preview_png: Option<Vec<u8>>,
     /// The fixed exclusion set for the current Scroll preparation (#31).
     scroll_exclusion: Vec<u32>,
     /// The still-visible subset of the fixed set, fixed immediately before
@@ -257,6 +265,9 @@ pub(crate) fn launch(cx: &mut App) {
         scroll_capture_exclusion: Vec::new(),
         scroll_visiting_settings: false,
         scroll_settings_departed: false,
+        completion_preview: None,
+        completion_preview_deadline: None,
+        completion_preview_png: None,
     });
     coordinator.update(cx, |state, cx| {
         state
@@ -435,6 +446,17 @@ impl Coordinator {
                         self.action(CaptureAction::CancelScroll { ticket }, cx);
                     }
                 }
+                UiCommand::EnterCompletionAnnotation(ticket)
+                    if self.session.may_present(ticket)
+                        && self.session.completion_preview().is_some() =>
+                {
+                    self.overlay_error = None;
+                    self.close_completion_preview(cx);
+                    self.action(CaptureAction::EnterCompletionAnnotation { ticket }, cx);
+                }
+                UiCommand::AddDefaultRectangle(ticket) if self.session.may_present(ticket) => {
+                    self.action(CaptureAction::AddDefaultRectangle { ticket }, cx);
+                }
                 UiCommand::ScrollPartialAccept(ticket) => {
                     if self.session.scroll_partial_available() {
                         log::info!("scroll_partial_choice action=accept ticket={ticket:?}");
@@ -507,6 +529,16 @@ impl Coordinator {
                 }
                 _ => {}
             }
+        }
+        // The completion thumbnail leaves after exactly its documented stay;
+        // hover never extends it and cancelling keeps the earlier clipboard copy.
+        if let Some((ticket, deadline)) = self.completion_preview_deadline
+            && self.completion_preview.is_some()
+            && Instant::now() >= deadline
+        {
+            log::info!("completion_preview_expired ticket={ticket:?}");
+            self.close_completion_preview(cx);
+            self.action(CaptureAction::CancelAttempt(ticket), cx);
         }
         if let Some(error) = self.hotkey_error.take_if(|_| {
             self.notice.is_none() && self.overlay.is_none() && self.hotkey_settings.is_none()
@@ -740,6 +772,8 @@ impl Coordinator {
     /// The shared entry for the menu command and the global hotkey.
     fn start_capture(&mut self, cx: &mut Context<Self>) {
         self.close_scroll_ui(cx);
+        self.close_completion_preview(cx);
+        self.completion_preview_png = None;
         self.permission(PermissionAction::Cancel, cx);
         self.started = Some(Instant::now());
         self.action(CaptureAction::Start, cx);
@@ -1040,6 +1074,7 @@ impl Coordinator {
                 | CaptureAction::TextCommit { .. }
                 | CaptureAction::DeleteSelected { .. }
                 | CaptureAction::DeselectSelected { .. }
+                | CaptureAction::AddDefaultRectangle { .. }
         );
         let before = self.session.phase();
         let scroll_before = self.session.scroll_phase();
@@ -1116,6 +1151,7 @@ impl Coordinator {
                 CaptureEffect::DismissOverlay => {
                     self.preview_task = None;
                     self.end_pending_save();
+                    self.close_completion_preview(cx);
                     self.close_overlay(cx);
                 }
                 CaptureEffect::PermissionUnavailable => {
@@ -1192,6 +1228,22 @@ impl Coordinator {
                 CaptureEffect::PlayCompletionSound => {
                     if !native::play_completion_sound() {
                         log::warn!("completion_sound_unavailable");
+                    }
+                }
+                CaptureEffect::ShowCompletionPreview(ticket) => {
+                    // Only a confirmed clipboard copy reaches this arm; the PNG
+                    // was produced by the same shared encode path as the copy.
+                    if let Some(png) = self.completion_preview_png.take()
+                        && let Err(error) = self.open_completion_preview(ticket, png, cx)
+                    {
+                        log::error!("completion_preview_failure={error}");
+                        effects.extend(self.dispatch(CaptureAction::CancelAttempt(ticket)));
+                    }
+                }
+                CaptureEffect::PresentCompletionAnnotation(ticket) => {
+                    if let Err(error) = self.open_completion_annotation(ticket, cx) {
+                        log::error!("completion_annotation_failure={error}");
+                        effects.extend(self.dispatch(CaptureAction::CancelAttempt(ticket)));
                     }
                 }
                 CaptureEffect::ReportOutputFailure(error) => {
@@ -1391,16 +1443,23 @@ impl Coordinator {
                 encoded.is_ok()
             );
             self.pending_save.clear();
+            self.completion_preview_png = None;
             return;
         }
+        // Only a confirmed clipboard copy may show the completion thumbnail;
+        // its exact encoded bytes are reused instead of recomposing the image.
+        self.completion_preview_png = None;
         let result = match encoded {
             Ok(png) => {
                 log::info!(
-                    "output_publish target={:?} bytes={}",
+                    "output_publish target={:?} bytes={} pixels={}x{} annotations={}",
                     job.target(),
-                    png.len()
+                    png.len(),
+                    job.crop().width(),
+                    job.crop().height(),
+                    job.annotations().len()
                 );
-                arcshot_app::publish_output(
+                let outcome = arcshot_app::publish_output(
                     job.clone(),
                     &png,
                     &mut self.pending_save,
@@ -1418,7 +1477,11 @@ impl Coordinator {
                             Err(OutputFailure::SaveFile)
                         }
                     },
-                )
+                );
+                if outcome.is_ok() && job.target() == arcshot_core::OutputTarget::Clipboard {
+                    self.completion_preview_png = Some(png);
+                }
+                outcome
             }
             Err(error) => {
                 self.pending_save.clear();
@@ -1426,6 +1489,8 @@ impl Coordinator {
             }
         };
         self.action(CaptureAction::OutputCompleted { job, result }, cx);
+        // The effect handler consumed the bytes when it showed the preview.
+        self.completion_preview_png = None;
     }
 
     /// Applies the native save panel outcome and clears unused destinations.
@@ -2068,6 +2133,218 @@ impl Coordinator {
                 window.remove_window();
             });
         }
+    }
+
+    /// Opens the fixed completion thumbnail at the bottom-right (I-11 §7).
+    ///
+    /// The window presents the exact PNG that was copied, proportionally scaled
+    /// and letterboxed. It slides in, stays for the documented three seconds,
+    /// then slides out and fades; hover never extends the stay.
+    fn open_completion_preview(
+        &mut self,
+        ticket: CaptureTicket,
+        png: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.close_completion_preview(cx);
+        let display = native::builtin_display()?;
+        let image = image::load_from_memory(&png)
+            .map_err(|error| anyhow::anyhow!("completion preview decode: {error}"))?
+            .to_rgba8();
+        let (pixels_width, pixels_height) = (image.width(), image.height());
+        // V1 captures are fixed at 2x, so the logical image is half the pixels.
+        const CAPTURE_SCALE: f64 = 2.0;
+        let layout = preview_layout(
+            [
+                f64::from(pixels_width) / CAPTURE_SCALE,
+                f64::from(pixels_height) / CAPTURE_SCALE,
+            ],
+            [display.width, display.height],
+        );
+        let render = Arc::new(RenderImage::new(vec![image::Frame::new(image)]));
+        let bounds = Bounds {
+            origin: Point::new(px(layout.x as f32), px(layout.y as f32)),
+            size: size(px(layout.width as f32), px(layout.height as f32)),
+        };
+        let queue = Rc::clone(&self.queue);
+        let handle = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                kind: WindowKind::PopUp,
+                titlebar: None,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let close_queue = Rc::clone(&queue);
+                window.on_window_should_close(cx, move |_, _| {
+                    // Closing the thumbnail is equivalent to activating it: both
+                    // enter the shared annotation surface for this attempt.
+                    close_queue
+                        .borrow_mut()
+                        .push(UiCommand::EnterCompletionAnnotation(ticket));
+                    true
+                });
+                cx.new(|_| CompletionPreviewView {
+                    image: Some(render),
+                    ticket,
+                    queue,
+                    width: layout.width as f32,
+                })
+            },
+        )?;
+        self.completion_preview = Some(handle);
+        self.completion_preview_deadline = Some((
+            ticket,
+            Instant::now()
+                + COMPLETION_PREVIEW_ENTER
+                + COMPLETION_PREVIEW_HOLD
+                + COMPLETION_PREVIEW_EXIT,
+        ));
+        log::info!(
+            "completion_preview shown ticket={ticket:?} frame=[{:.0},{:.0},{:.0},{:.0}] pixels={pixels_width}x{pixels_height}",
+            layout.x,
+            layout.y,
+            layout.width,
+            layout.height
+        );
+        // The thumbnail never takes keyboard focus: the target stays frontmost
+        // and the user chooses it with the pointer.
+        Ok(())
+    }
+
+    /// Closes the completion thumbnail and cancels its pending auto-dismiss.
+    fn close_completion_preview(&mut self, cx: &mut Context<Self>) {
+        self.completion_preview_deadline = None;
+        if let Some(handle) = self.completion_preview.take() {
+            let _ = handle.update(cx, |view, window, cx| {
+                if let Some(image) = view.image.take() {
+                    cx.drop_image(image, Some(window));
+                }
+                window.remove_window();
+            });
+        }
+    }
+
+    /// Presents the confirmed whole-image document in the shared editor.
+    ///
+    /// The window stays screen-sized; the complete long image is fitted inside
+    /// it and the view transform pans/zooms without touching the document crop
+    /// or annotation coordinates, so the output extent never changes (I-03/I-11 §8).
+    fn open_completion_annotation(
+        &mut self,
+        ticket: CaptureTicket,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        self.close_completion_preview(cx);
+        if !self.session.may_present(ticket) {
+            return Err(anyhow::anyhow!("completion annotation fence failed"));
+        }
+        let Some(frame) = self.session.frame().cloned() else {
+            return Err(anyhow::anyhow!("completion document is gone"));
+        };
+        let screen = frame.geometry();
+        let preview = arcshot_image::capture_preview(&frame)?;
+        let buffer = image::RgbaImage::from_raw(preview.width, preview.height, preview.bgra)
+            .ok_or_else(|| anyhow::anyhow!("invalid completion preview layout"))?;
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+        let [_, _, width, height] = screen.source_rect();
+        let display = native::builtin_display()?;
+        let viewport = [display.width, display.height];
+        let zoom = (viewport[0] / width).min(viewport[1] / height).min(1.0);
+        let offset = [
+            (viewport[0] - width * zoom) / 2.0,
+            (viewport[1] - height * zoom) / 2.0,
+        ];
+        let display_id = cx
+            .displays()
+            .into_iter()
+            .find(|candidate| u64::from(candidate.id()) == u64::from(screen.display_id()))
+            .ok_or_else(|| anyhow::anyhow!("built-in display absent from GPUI"))?
+            .id();
+        let queue = Rc::clone(&self.queue);
+        self.overlay_error = None;
+        // A stale region overlay must not survive into the annotation surface;
+        // the original display anchor stays for display-loss detection.
+        if let Some(handle) = self.overlay.take() {
+            let _ = handle.update(cx, |view, window, cx| {
+                if let Some(image) = view.image.take() {
+                    cx.drop_image(image, Some(window));
+                }
+                if let Some(preview) = view.preview.take() {
+                    cx.drop_image(preview.image, Some(window));
+                }
+                window.remove_window();
+            });
+        }
+        self.overlay = Some(cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(viewport[0] as f32), px(viewport[1] as f32)),
+                })),
+                display_id: Some(display_id),
+                kind: WindowKind::PopUp,
+                titlebar: None,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let close_queue = Rc::clone(&queue);
+                window.on_window_should_close(cx, move |_, _| {
+                    close_queue
+                        .borrow_mut()
+                        .push(UiCommand::CancelCapture(ticket));
+                    true
+                });
+                let focus = cx.focus_handle();
+                let entity = cx.new(|_| CaptureView {
+                    ticket,
+                    image: Some(image),
+                    selection: None,
+                    busy: false,
+                    error: None,
+                    screen: Some(screen),
+                    drag: None,
+                    tool: Tool::default(),
+                    selected: None,
+                    annotations: Vec::new(),
+                    rectangle_style: RectangleStyle::default(),
+                    line_style: LineStyle::default(),
+                    arrow_style: ArrowStyle::default(),
+                    blur_style: BlurStyle::default(),
+                    text_style: TextStyle::default(),
+                    text_edit: None,
+                    text_input: None,
+                    text_focus: None,
+                    size_editing: false,
+                    size_draft: String::new(),
+                    preview: None,
+                    hovered_tool: None,
+                    density: Density::Compact,
+                    long_image: true,
+                    view_zoom: zoom,
+                    view_offset: offset,
+                    viewport,
+                    focus: focus.clone(),
+                    queue,
+                });
+                window.focus(&focus, cx);
+                entity
+            },
+        )?);
+        self.overlay_activation_pending = true;
+        cx.activate(true);
+        log::info!(
+            "completion_annotation_opened ticket={ticket:?} document={width}x{height} zoom={zoom:.3}"
+        );
+        self.refresh_capture_view(cx);
+        self.sync_preview(cx);
+        Ok(())
     }
 
     /// Closes every Scroll-owned window; the region session is untouched.
@@ -2728,6 +3005,10 @@ impl Coordinator {
                     preview: None,
                     hovered_tool: None,
                     density,
+                    long_image: false,
+                    view_zoom: 1.0,
+                    view_offset: [0.0, 0.0],
+                    viewport: [0.0, 0.0],
                     focus: focus.clone(),
                     queue,
                 });
@@ -2805,6 +3086,10 @@ impl Coordinator {
                     preview: None,
                     hovered_tool: None,
                     density,
+                    long_image: false,
+                    view_zoom: 1.0,
+                    view_offset: [0.0, 0.0],
+                    viewport: [w, h],
                     focus: focus.clone(),
                     queue,
                 });
@@ -3191,6 +3476,8 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::ScrollInputLost { .. } => "ScrollInputLost",
         CaptureAction::ScrollTargetLost { .. } => "ScrollTargetLost",
         CaptureAction::CompleteScroll { .. } => "CompleteScroll",
+        CaptureAction::EnterCompletionAnnotation { .. } => "EnterCompletionAnnotation",
+        CaptureAction::AddDefaultRectangle { .. } => "AddDefaultRectangle",
         CaptureAction::CancelScroll { .. } => "CancelScroll",
         CaptureAction::AcceptScrollPartial { .. } => "AcceptScrollPartial",
         CaptureAction::AbandonScrollPartial { .. } => "AbandonScrollPartial",

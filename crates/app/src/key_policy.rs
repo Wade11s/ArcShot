@@ -115,6 +115,30 @@ pub fn capture_key_action(
     }
 }
 
+/// Routes one press on the whole-image completion annotation surface.
+///
+/// Unlike [`capture_press_action`] this never moves, resizes or reselects the
+/// full-frame selection: the long image is output at its document extent, so a
+/// press may only create an annotation, drag a hit object, or do nothing.
+#[must_use]
+pub fn capture_long_image_press_action(
+    _double_click: bool,
+    busy: bool,
+    tool: Tool,
+    selection: Option<Selection>,
+    object_hit: bool,
+    point: [f64; 2],
+) -> Option<CapturePressAction> {
+    if busy {
+        return None;
+    }
+    let inside = selection.is_some_and(|selection| selection.contains(point));
+    if tool.is_annotation() {
+        return inside.then_some(CapturePressAction::Create);
+    }
+    (inside && object_hit).then_some(CapturePressAction::ObjectDrag)
+}
+
 /// Decides whether a press is a text re-edit under the select tool.
 ///
 /// A double-click on a text object re-edits it; every other object keeps the

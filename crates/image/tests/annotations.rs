@@ -250,3 +250,44 @@ fn image_compose_11_the_preview_bytes_are_the_gpu_bgra_layout_of_the_same_pixels
         assert_eq!(bgra, &[rgba[2], rgba[1], rgba[0], rgba[3]]);
     }
 }
+
+// #35 / I-03/I-11 §8: the annotated long image is output at its whole extent;
+// no view pan/zoom can change that extent.
+#[test]
+fn image_compose_35_a_long_document_outputs_its_whole_extent_with_annotations() {
+    // A tall stitched document: 20x80 physical pixels (10x40 logical points).
+    let screen = ScreenGeometry::try_new(1, 0.0, 0.0, 10.0, 40.0, 2.0).unwrap();
+    let [width, height] = screen.pixel_size();
+    let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+    for _ in 0..width as usize * height as usize {
+        // Stored BGBA base; the composed RGBA truth is BASE above.
+        bytes.extend_from_slice(&[10, 20, 30, 255]);
+    }
+    let frame = CapturedFrame::try_from_srgb_bgra(screen, width, height, width as usize * 4, bytes)
+        .unwrap();
+    let mut document = Document::new(frame);
+    document
+        .select(Selection::try_new(0.0, 0.0, 10.0, 40.0).unwrap())
+        .unwrap();
+    // One rectangle near the bottom of the long image, far outside any
+    // screen-sized viewport (logical y 30..33 -> physical rows 60..66).
+    document
+        .add_rectangle(Selection::try_new(2.0, 30.0, 4.0, 3.0).unwrap())
+        .unwrap();
+    assert_eq!(document.annotations().len(), 1);
+
+    let crop = document.crop().unwrap();
+    assert_eq!(crop, PixelRect::try_new(0, 0, width, height).unwrap());
+    let image = compose_document(document.frame(), crop, document.annotations()).unwrap();
+    assert_eq!((image.width(), image.height()), (width, height));
+    // The stroke band around physical path (4,60)-(12,66) is red.
+    assert_eq!(pixel(&image, 6, 61), RED);
+    assert_eq!(pixel(&image, 6, 57), RED);
+    assert_eq!(pixel(&image, 6, 63), RED);
+    assert_eq!(pixel(&image, 6, 70), BASE, "below the annotation");
+    assert_eq!(
+        pixel(&image, 15, 79),
+        BASE,
+        "the bottom row is still output"
+    );
+}

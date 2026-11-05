@@ -1,7 +1,7 @@
 //! APP-KEY: I-09 key priority and overlay pointer gesture routing.
 use arcshot_app::{
     CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, capture_key_action,
-    capture_press_action,
+    capture_long_image_press_action, capture_press_action,
 };
 use arcshot_core::{ResizeHandle, Selection, Tool};
 
@@ -829,6 +829,53 @@ fn app_key_16_the_blur_tool_shares_the_annotation_pointer_and_esc_priority() {
     // Delete still needs a selected object even with the blur tool active.
     assert_eq!(
         capture_key_action("backspace", KeyModifiers::default(), blur_context),
+        None
+    );
+}
+
+#[test]
+fn app_key_18_long_image_annotation_has_no_selection_or_reselect_gestures() {
+    let selection = selection();
+    let inside = [12.0, 8.0];
+    // The select tool on empty image space never moves, resizes or reselects
+    // the whole-image document and a double-click never finishes from it.
+    assert_eq!(
+        capture_long_image_press_action(false, false, Tool::Select, Some(selection), false, inside),
+        None
+    );
+    assert_eq!(
+        capture_long_image_press_action(true, false, Tool::Select, Some(selection), false, inside),
+        None
+    );
+    // A hit object still drags under the select tool.
+    assert_eq!(
+        capture_long_image_press_action(false, false, Tool::Select, Some(selection), true, inside),
+        Some(CapturePressAction::ObjectDrag)
+    );
+    // Annotation tools create inside the whole-image selection only; the
+    // select-tool path never starts a new-selection band outside it.
+    for tool in [Tool::Rectangle, Tool::Line, Tool::Arrow, Tool::Blur] {
+        assert_eq!(
+            capture_long_image_press_action(false, false, tool, Some(selection), false, inside),
+            Some(CapturePressAction::Create),
+            "{tool:?}"
+        );
+        assert_eq!(
+            capture_long_image_press_action(true, false, tool, Some(selection), false, inside),
+            Some(CapturePressAction::Create),
+            "{tool:?} ignores the double-click"
+        );
+    }
+    // Busy output ignores every press.
+    assert_eq!(
+        capture_long_image_press_action(
+            false,
+            true,
+            Tool::Rectangle,
+            Some(selection),
+            false,
+            inside
+        ),
         None
     );
 }

@@ -82,8 +82,12 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 状态仍为 **Not tested**。
 
 #32 已实现受保护的单帧滚动完成闭环：准备→输入保护→可信首帧→采集→Enter/双击
-完成或 Esc 放弃；多帧拼接、位移校验、反向去重、实时预览与三秒完成预览仍由 #33 拥有，
-当前保持 **Not tested**。
+完成或 Esc 放弃；多帧拼接、位移校验、反向去重与实时已验证预览已由 #33 落地。
+
+#35 已实现确认复制后的完成预览、进入共享长图文档标注与整图输出：只有真实复制成功
+才保留整帧共享文档并显示三秒缩略预览；点击/关闭缩略图进入同一文档的可滚动视
+图，Rectangle 等既有工具直接标注；重新完成输出整张带标注长图，取消保留此前剪
+贴板；三秒停留的动画观感与第三方目标仍属 **Not tested**。
 
 | 稳定用例组 | 公共入口与覆盖 | 必须观察的行为 |
 | --- | --- | --- |
@@ -384,6 +388,25 @@ app 的纯选择分类与控制窗 AX 按钮、自有 GPUI 精确像素夹具的
 
 实测记录见 `docs/validation/36-third-party-scroll.md`。
 
+### #35 的稳定自动化入口
+
+完成预览、长图标注与整图输出只走已确认接缝：core 的成功后处理（真实复制成功才
+保留整帧共享文档并请求预览）、image 的整图带标注合成、app 的等比缩略图布局与
+长图键位路由，以及自有 GPUI 精确像素夹具的真实 AX + 文本诊断 E2E。三秒停留的
+动画观感、悬停不延长的主观计时与第三方目标保持 **Not tested**。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/core/tests/scroll_loop.rs` | CORE-SESSION-52（本票改为：确认复制成功后请求 `ShowCompletionPreview` 并保持整帧共享文档）、CORE-SESSION-53（复制失败不显示预览且可重试）、CORE-SESSION-77～82：取消不再产生第二个输出；点击进入同一文档后重新完成输出整张带标注长图并结束会话；无编辑也正常结束；预览显示期间直接 Finish 视为重新完成、不二次预览；普通区域 Finish 仍直接结束且无预览；辅助功能非拖拽矩形路径经同一权威 `add_rectangle` 进入共享文档且输出期被栅栏 | GPUI 窗口、真实剪贴板字节 |
+| `crates/image/tests/annotations.rs` | IMAGE-COMPOSE-35：高长文档以完整 crop 输出并在底部标注处有红色描边，视口不裁剪输出范围 | 原生观感、大图压力 |
+| `crates/app/src/completion_preview.rs` 与 `crates/app/tests/completion_preview.rs` | APP-EFFECT-50～52：等比缩略图窗口按高/宽上限与视口余量适配，右下定位且不越屏 | 真实窗口动画、Retina DPI |
+| `crates/app/src/key_policy.rs` 与 `crates/app/tests/key_policy.rs` | APP-KEY-18：长图表面只允许创建与对象拖动，禁选区移动/调整/重选与双击完成 | 真实指针命中区域与视觉布局 |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-29：确认复制→缩略图出现→AX 点击进入共享文档→AX 辅助功能添加 Rectangle→重新完成输出整图带标注并结束；再次进入后 Esc 取消不再写剪贴板 | 悬停不延长的实机计时、视觉动画、TextEdit/Safari |
+
+长图表面额外提供 `arcshot.overlay.completion.add_rectangle`（仅长图模式、role button）作为无法拖拽用户的辅助功能入口，点击写一行 `a11y_action=arcshot.overlay.completion.add_rectangle action=Click` 并经权威 `Document::add_rectangle` 生成一个内缩矩形；它不是第二套标注器。
+
+实测记录见 `docs/validation/35-long-image-preview.md`。
+
 ### #29 的稳定自动化入口
 
 选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
@@ -511,9 +534,10 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
 | MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `drag --from-xy 400,300 --to-xy 700,500 --headed` 作为前置创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；拖拽后出现 `capture_edit action=SelectRegion` 与 `selection=Some([…])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared`；`--headed` 拖拽只是选区前置，不作为指针手势的验收证据 |
 | MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
-| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
-| MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 且 `from=Frozen to=Resident action=OutputCompleted` | 三秒完成预览、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
-| MAC-E2E-28 | 由脚本启动同一夹具；选区内慢速下滚 2 次扩展已验证历史，按键 `j` 触发夹具原子跳变 +1000 行造成无重叠 Gap 停止；AX 读控制窗选择；分别点击放弃与接受 | `scroll_stitch_refused … gap` 与 `scroll_phase … to=AwaitingPartialChoice`；`scroll_partial_choice available=true … pixels=460x424`；点击前无 `output_publish`；`arcshot.scroll.partial.use` / `.abandon` 均可寻址且 `arcshot.scroll.hint` 含“不完整”；放弃出现 `scroll_partial_choice action=abandon` 与 `action=AbandonScrollPartial`，覆盖层与选区返回且无输出；接受出现 `action=accept` 后才 `output_publish target=Clipboard` 与 `from=Frozen to=Resident action=OutputCompleted` | 其余负例（动态/固定表头/重复低纹理/横向·对角·嵌套/目标·权限·输入保护失效）的实机通过仅由注入式用例证明安全处理；真实 TCC 切换、TextEdit/Safari、原生故障注入与视觉观感 |
+| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `completion_preview shown`，会话保持冻结，固定停留后 `completion_preview_expired`；`scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
+| MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 并出现 `completion_preview shown`，固定停留后 `completion_preview_expired` | 三秒完成预览的视觉动画与悬停计时、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
+| MAC-E2E-28 | 由脚本启动同一夹具；选区内慢速下滚 2 次扩展已验证历史，按键 `j` 触发夹具原子跳变 +1000 行造成无重叠 Gap 停止；AX 读控制窗选择；分别点击放弃与接受 | `scroll_stitch_refused … gap` 与 `scroll_phase … to=AwaitingPartialChoice`；`scroll_partial_choice available=true … pixels=460x424`；点击前无 `output_publish`；`arcshot.scroll.partial.use` / `.abandon` 均可寻址且 `arcshot.scroll.hint` 含“不完整”；放弃出现 `scroll_partial_choice action=abandon` 与 `action=AbandonScrollPartial`，覆盖层与选区返回且无输出；接受出现 `action=accept` 后才 `output_publish target=Clipboard`，随后按 #35 共享后处理出现 `completion_preview shown`，固定停留后 `completion_preview_expired` 与 `CancelAttempt` | 其余负例（动态/固定表头/重复低纹理/横向·对角·嵌套/目标·权限·输入保护失效）的实机通过仅由注入式用例证明安全处理；真实 TCC 切换、TextEdit/Safari、原生故障注入与视觉观感 |
+| MAC-E2E-29 | 由脚本启动自有夹具；进入滚动采集后直接 Enter 完成可信单帧，断言 `completion_preview shown`，再 AX 点击 `arcshot.completion.preview` 进入共享文档；AX 点击仅长图模式存在的 `arcshot.overlay.completion.add_rectangle` 添加一个 Rectangle；AX 点击 `arcshot.overlay.finish` 重新完成。随后再进行一轮：完成→点击缩略图→`press escape --headed` 取消 | 第一次出现 `a11y_action=arcshot.completion.preview action=Click`、`completion_annotation_opened document=WxH zoom=…` 与恢复的 `group "ArcShot 截图覆盖层"`；`capture_edit action=AddDefaultRectangle … annotations=1`；第二次 `output_publish target=Clipboard … pixels=<整 crop 宽>x<整 crop 高> annotations=1`，随后 `from=Frozen to=Resident action=OutputCompleted`；取消轮出现 `from=Frozen to=Resident action=CancelAttempt` 且真实剪贴板 PNG 逐字节不变 | 带滚动的整图扩展（由 #33 的像素真值与本票 IMAGE-COMPOSE-35 覆盖）、悬停不延长、动画观感、TextEdit/Safari 第三方目标 |
 | MAC-E2E-30 | TextEdit 固定几何纯文本（`textedit-36-v1`，System Events 固定 `200,120 1000x700`，滚轮预滚藏光标）；开始截图后 `--headed` 拖拽建内侧选区（`400,350→1000,650`），AX 激活滚动入口；采集中点击选区、慢速滚 4 下 4 上、Enter 或部分放弃、双击、Esc 分别验证 | `scroll_target owner=com.apple.TextEdit` 与帧 `[200,120,1000,700]`；`scroll_preview placed=inner` 且预览可寻址并在 `scroll_exclusion_fixed` 排除集中；采集中前台为 TextEdit；点击后文本不变且退役 `clicks_blocked≥1`；原始滚动达目标且或扩展或 Gap/ContentChanged 安全停止（有 `scroll_partial_choice available=true`、点击前无输出、放弃回原选区）；无滚动 Enter 与双击各一次 Clipboard 输出，内存 PNG 解码为选区物理宽 `1200`、`sRGB`、全不透明且高度等于已验证底（单帧 `600`）；Esc 放弃且选区返回、无输出 | 正向长图扩展在合成滚轮下被拒止（§4.5，需真机滚轮，Not tested）；三秒完成预览与长图标注（#37）；视觉观感、IME |
 | MAC-E2E-31 | Safari `file://` 静态页（`safari-36-v1`，无远端资源，System Events 固定 `100,80 1200x800`）；同上选区（`300,350→900,650`）与流程，滚轮轴点 `600,600` | `scroll_target owner=com.apple.Safari`；`scroll_preview placed=inner` 且预览可寻址并在排除集中；地址栏仍为 `file://` 且前台为 Safari；点击不改地址且退役 `clicks_blocked≥1`；或扩展或安全停止（同 MAC-E2E-30）；无滚动 Enter、双击（滚动区双击）各一次 sRGB PNG 解码（`1200×600` 单帧）；Esc 放弃回原选区 | 正向长图扩展（合成滚轮下被拒止，Not tested，需真机滚轮）；动态内容、联网行为（夹具无远端、未启 HTTP 服务）；视觉观感 |
 
@@ -597,6 +621,16 @@ agent-desktop press escape --headed
   pixels=… document=… extensions=… duplicates=…`；预览放置写
   `scroll_preview placed=right|left|inner frame=[…]`。原始帧队列与背压由
   APP-ASYNC-17～20 守护。
+- 已落地（#35）：确认复制后的完成缩略图窗口 `arcshot.completion.preview`
+  （role button）可 AX 激活，激活写 `a11y_action=arcshot.completion.preview
+  action=Click`；产品另有 `completion_preview shown ticket=… frame=[…] pixels=…`、
+  `completion_preview_expired ticket=…`、`completion_annotation_opened ticket=…
+  document=WxH zoom=…`。进入标注后仍是同一 `group "ArcShot 截图覆盖层"` 与既有
+  工具/完成/保存 AX 标识；长图表面不注册滚动入口，并提供仅长图模式的辅助功能入口
+  `arcshot.overlay.completion.add_rectangle`（写一行
+  `a11y_action=arcshot.overlay.completion.add_rectangle action=Click` 后经权威
+  `Document::add_rectangle` 生成一个内缩矩形）。输出诊断扩展为
+  `output_publish … pixels=WxH annotations=N`；取消后不再写入第二次。
 - 已落地（#34）：已知状态停止且有已验证历史时，控制窗切换为显式部分选择：
   `arcshot.scroll.partial.use`（使用已验证部分）与
   `arcshot.scroll.partial.abandon`（放弃并返回原选区）两个 `button`，
@@ -669,7 +703,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
 | MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分（#36）：两第三方目标各经命名 sRGB display-filter 接纳后解码 PNG 校验尺寸/不透明/sRGB 块/行纹理（`decode_png_metrics`），剪贴板 `PNGf` 由 osascript 回读证实；非 ArcShot 应用粘贴与显式保存字节一致仍 **Not tested** |
-| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分：保存取消/失败/重试/放弃与文件写入由 core/app/原生自动化覆盖，`save_file_smoke` 验证真实写入；面板显示/取消/覆盖写需有效选区，选区尚无 AX 节点（§4.5），保持 Not tested |
+| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分：保存取消/失败/重试/放弃与文件写入由 core/app/原生自动化覆盖，`save_file_smoke` 验证真实写入；面板显示/取消/覆盖写需有效选区，选区尚无 AX 节点（§4.5），保持 Not tested；#35 的 MAC-E2E-29 已驱动自有夹具完成确认复制→缩略图→点击进入→Rectangle→重新完成（整图带标注输出）与 Esc 取消不再写剪贴板；三秒停留的动画观感与悬停不延长属 §4.4，保持 Not tested |
 | MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分：退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
 
 权限切换若先触发焦点停止，只能记录实际时序，不能冒称“运行中直接撤权”已验证。

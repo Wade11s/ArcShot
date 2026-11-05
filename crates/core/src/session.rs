@@ -301,6 +301,21 @@ pub enum CaptureAction {
         /// Preparation to cancel.
         ticket: CaptureTicket,
     },
+    /// Activates the completion preview: the same whole-image document becomes
+    /// the shared annotation surface. Re-finishing then ends the session.
+    EnterCompletionAnnotation {
+        /// Frozen attempt whose completion preview was activated.
+        ticket: CaptureTicket,
+    },
+    /// Adds one Rectangle to the whole-image completion surface.
+    ///
+    /// This is the non-drag accessibility path for users who cannot perform a
+    /// press-drag gesture; it creates the same [`Document::add_rectangle`] object
+    /// through the authoritative editor rather than a second annotator.
+    AddDefaultRectangle {
+        /// Frozen attempt whose completion annotation surface is active.
+        ticket: CaptureTicket,
+    },
     /// Explicitly accepts the verified partial result after a known-state stop.
     ///
     /// Only valid while awaiting the partial choice with a verified result;
@@ -348,6 +363,12 @@ pub enum CaptureEffect {
     RequestSavePanel(OutputJob),
     /// Play the short completion sound after successful clipboard or file output.
     PlayCompletionSound,
+    /// A verified whole-image completion was copied; present its proportional
+    /// thumbnail and keep the same document available for annotation (I-11 §7).
+    ShowCompletionPreview(CaptureTicket),
+    /// The user activated the completion preview; present the same whole-image
+    /// document in the shared annotation surface (I-11 §8).
+    PresentCompletionAnnotation(CaptureTicket),
     /// Report an output failure without discarding the document.
     ReportOutputFailure(OutputFailure),
     /// Preflight the three Scroll-only permissions.
@@ -542,6 +563,17 @@ enum OutputStage {
     Encoding(OutputJob),
 }
 
+/// The verified completion whose clipboard copy succeeded and whose whole-image
+/// document stays authoritative for optional annotation (I-11 steps 7–8).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompletionPreview {
+    ticket: CaptureTicket,
+    version: u64,
+    /// Whether the whole-image thumbnail was already requested for this exact
+    /// snapshot. A later clipboard output is a re-finish and must end the session.
+    confirmed: bool,
+}
+
 /// The sole capture authority; contains no system handles, clocks or I/O.
 #[derive(Debug)]
 pub struct CaptureSession {
@@ -557,6 +589,9 @@ pub struct CaptureSession {
     /// sub-flow of the one Capture Session: it reuses the selection and never
     /// starts a second capture. `None` while Region Capture is active.
     scroll: Option<ScrollPreparation>,
+    /// The confirmed clipboard completion whose whole image is still the live
+    /// document. It is consumed when the preview is activated or the session ends.
+    completion_preview: Option<CompletionPreview>,
 }
 impl Default for CaptureSession {
     fn default() -> Self {
@@ -569,6 +604,7 @@ impl Default for CaptureSession {
             // I-09: Compact is the documented default.
             density: Density::Compact,
             scroll: None,
+            completion_preview: None,
         }
     }
 }
@@ -654,6 +690,41 @@ impl CaptureSession {
     #[must_use]
     pub fn scroll_refusal(&self) -> Option<&ScrollRefusal> {
         self.scroll.as_ref().and_then(ScrollPreparation::refusal)
+    }
+
+    /// Whether a confirmed whole-image clipboard completion is awaiting
+    /// annotation. Activating the preview consumes this marker.
+    #[must_use]
+    pub fn completion_preview(&self) -> Option<CaptureTicket> {
+        self.completion_preview.map(|preview| preview.ticket)
+    }
+
+    /// Marks the current frozen document as a verified whole-image completion.
+    ///
+    /// The next successful clipboard copy keeps this exact document
+    /// authoritative for optional annotation instead of ending the session
+    /// (I-11 steps 7–8). Scroll completion and an explicitly accepted verified
+    /// part share this seam, so neither builds a second output pipeline.
+    ///
+    /// Returns whether the current frozen attempt was marked.
+    #[must_use]
+    pub fn mark_completion_preview(&mut self, ticket: CaptureTicket) -> bool {
+        let State::Frozen {
+            ticket: current,
+            document,
+        } = &self.state
+        else {
+            return false;
+        };
+        if *current != ticket {
+            return false;
+        }
+        self.completion_preview = Some(CompletionPreview {
+            ticket,
+            version: document.version(),
+            confirmed: false,
+        });
+        true
     }
 
     /// The trusted origin frame, once collection has opened.
@@ -750,6 +821,7 @@ impl CaptureSession {
                 // A hotkey restart abandons any Scroll preparation together with
                 // the region session; the new capture starts from Resident.
                 self.scroll = None;
+                self.completion_preview = None;
                 match self.state {
                     State::Relaunch => vec![CaptureEffect::ReportFailure(
                         CaptureFailure::NativeUncertain,
@@ -948,9 +1020,35 @@ impl CaptureSession {
                 self.output = None;
                 match result {
                     Ok(()) => {
+                        let first_copy = self.completion_preview.as_ref().is_some_and(|preview| {
+                            preview.ticket == job.ticket()
+                                && preview.version == job.version()
+                                && !preview.confirmed
+                        });
+                        if first_copy && job.target() == OutputTarget::Clipboard {
+                            // I-11 step 7: a confirmed copy keeps the verified
+                            // whole image authoritative for optional annotation.
+                            let preview = self
+                                .completion_preview
+                                .as_mut()
+                                .expect("the preview marker was just confirmed to exist");
+                            preview.confirmed = true;
+                            self.scroll = None;
+                            let mut effects = vec![
+                                CaptureEffect::DismissOverlay,
+                                CaptureEffect::ShowCompletionPreview(job.ticket()),
+                            ];
+                            // The preference only silences success; failure still reports.
+                            if self.completion_sound {
+                                effects.push(CaptureEffect::PlayCompletionSound);
+                            }
+                            return effects;
+                        }
+                        // Any other successful output (a re-finish or an explicit
+                        // save) ends the session; the preview marker is consumed.
+                        self.completion_preview = None;
                         self.state = State::Resident;
-                        // A successful Scroll completion ends the whole session;
-                        // the stashed region document is not restored.
+                        // A successful Region Finish ends the whole session.
                         self.scroll = None;
                         let mut effects = vec![CaptureEffect::DismissOverlay];
                         // The preference only silences success; failure still reports.
@@ -960,6 +1058,9 @@ impl CaptureSession {
                         effects
                     }
                     Err(error) => {
+                        // A failed completion copy must not leave a preview marker
+                        // behind; the retry starts from the collection again.
+                        self.completion_preview = None;
                         // A failed Scroll completion keeps the collected result:
                         // the region document returns so Esc and retry work.
                         // An accepted partial instead returns to the explicit
@@ -1126,6 +1227,49 @@ impl CaptureSession {
                 self.finish_scroll_outcome(ticket, outcome)
             }
             CaptureAction::CompleteScroll { ticket } => self.complete_scroll(ticket),
+            CaptureAction::EnterCompletionAnnotation { ticket } => {
+                if self.output.is_some()
+                    || !matches!(self.state, State::Frozen { ticket: current, .. } if current == ticket)
+                {
+                    return vec![];
+                }
+                if self.completion_preview.take().is_none() {
+                    return vec![]; // Not the confirmed completion preview.
+                }
+                vec![CaptureEffect::PresentCompletionAnnotation(ticket)]
+            }
+            CaptureAction::AddDefaultRectangle { ticket } => {
+                if self.output.is_some() {
+                    return vec![];
+                }
+                let State::Frozen {
+                    ticket: current,
+                    document,
+                } = &mut self.state
+                else {
+                    return vec![];
+                };
+                if *current != ticket {
+                    return vec![];
+                }
+                let Some(selection) = document.selection() else {
+                    return vec![];
+                };
+                // A deterministic, clearly visible box inset by a tenth of the
+                // image; it never depends on pointer geometry.
+                let Ok(bounds) = Selection::try_new(
+                    selection.x() + selection.width() * 0.1,
+                    selection.y() + selection.height() * 0.1,
+                    selection.width() * 0.2,
+                    selection.height() * 0.2,
+                ) else {
+                    return vec![];
+                };
+                if document.add_rectangle(bounds).is_err() {
+                    return vec![];
+                }
+                vec![]
+            }
             CaptureAction::AcceptScrollPartial { ticket } => self.accept_partial(ticket),
             CaptureAction::AbandonScrollPartial { ticket } => self.abandon_partial(ticket),
             CaptureAction::CancelScroll { ticket } => {
@@ -1154,6 +1298,7 @@ impl CaptureSession {
                 }
                 self.scroll = None;
                 self.output = None;
+                self.completion_preview = None;
                 self.state = State::Relaunch;
                 vec![
                     CaptureEffect::DismissOverlay,
@@ -1166,6 +1311,7 @@ impl CaptureSession {
                 // Display loss and cancellation abandon Scroll preparation too;
                 // the region session is kept for a known Scroll refusal only.
                 self.scroll = None;
+                self.completion_preview = None;
                 let invalid = matches!(action, CaptureAction::DisplayInvalidated);
                 self.state = match self.state {
                     State::Preparing(ticket) | State::Draining { ticket, .. } => State::Draining {
@@ -1454,7 +1600,11 @@ impl CaptureSession {
                 preparation.begin_partial_output();
             }
         }
-        self.begin_output(ticket, OutputTarget::Clipboard, None)
+        let effects = self.begin_output(ticket, OutputTarget::Clipboard, None);
+        if effects.is_empty() || !self.mark_completion_preview(ticket) {
+            self.completion_preview = None;
+        }
+        effects
     }
 
     /// Runs the shared pre-output contract, then fences one output snapshot.
