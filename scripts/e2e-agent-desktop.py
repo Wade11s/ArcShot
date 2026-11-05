@@ -616,7 +616,14 @@ def wait_target_window(app: str, title_part: str) -> None:
     deadline = time.monotonic() + 15.0
     last: list[dict] = []
     while time.monotonic() < deadline:
-        last = windows(app)
+        try:
+            last = windows(app)
+        except Failure as error:
+            # `open` may still be launching the target app; a missing app is a
+            # retry, not a product failure.
+            if "APP_NOT_FOUND" not in str(error):
+                raise
+            last = []
         titled = [entry for entry in last if title_part in str(entry.get("title") or "")]
         if len(titled) == 1 and len(last) == 1:
             return
@@ -630,9 +637,7 @@ def begin_third_party_scroll(
     """Starts one frozen session and enters Scroll collection (seek to collecting)."""
     click(app, "开始截图")
     wait_frozen_active(log, mark)
-    agent("drag", "--from-xy", drag_from, "--to-xy", drag_to, "--headed")
-    wait_log(log, "capture_edit action=SelectRegion", 10.0, after=mark)
-    selection = parse_selection(log, mark)
+    selection = select_region(app, log, drag_from=drag_from, drag_to=drag_to, mark=mark)
     entry_mark = len(read_log(log))
     click_scroll_entry(app, denied=False)
     wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=entry_mark)
@@ -641,6 +646,21 @@ def begin_third_party_scroll(
     wait_log(log, "scroll_preview placed=inner", 15.0, after=entry_mark)
     wait_log(log, "scroll_collecting", 15.0, after=entry_mark)
     return entry_mark, selection
+
+
+def wait_completion_preview(log: pathlib.Path, entry_mark: int) -> None:
+    """Waits for the shared post-copy preview lifecycle and session end.
+
+    A successful clipboard completion keeps the session frozen and shows the
+    whole-image thumbnail for its fixed stay; the session then leaves Frozen
+    without a second output. Waiting for the expiry also keeps the preview
+    window from polluting the next capture.
+    """
+    wait_log(log, "completion_preview shown", 10.0, after=entry_mark)
+    wait_log(log, "completion_preview_expired", 10.0, after=entry_mark)
+    wait_log(
+        log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=entry_mark
+    )
 
 
 def expect_selection_returned(app: str) -> None:
@@ -2635,12 +2655,10 @@ def main() -> int:
         # Each session drives the real app through the product (target lock,
         # inner preview, click blocking, slow wheel, Enter/double-click/Esc,
         # PNG output) and asserts product text diagnostics plus the decoded
-        # clipboard PNG. Synthetic wheel steps on Cocoa/WebKit targets are
-        # frequently inexact (fractional/page-sized), in which case the
-        # product must stop safely (Gap/ContentChanged -> partial choice)
-        # instead of guessing; that safe-stop outcome is asserted as such and
-        # the positive long-image extension stays Not tested (TEST.md 4.5)
-        # pending a real-device wheel step the harness cannot synthesise.
+        # clipboard PNG. The collection wheel is one slow line per step: the
+        # verifier requires a substantial overlap, so a fast synthetic step
+        # that leaves only a few rows of overlap is refused as unverifiable
+        # (the product stops safely behind the explicit partial choice).
         te_fixture = ROOT / "target" / "e2e-36-textedit.txt"
         sa_fixture = ROOT / "target" / "e2e-36-safari.html"
         write_textedit_fixture(te_fixture)
@@ -2716,9 +2734,9 @@ def main() -> int:
             time.sleep(1.0)
 
         def textedit_state():
-            tree = snapshot_tree("TextEdit")
-            nodes = find_nodes(tree, role="textfield")
-            return str(nodes[0].get("value") or "") if nodes else "<missing>"
+            """The TextEdit vertical scroller value (a blocked click must not move it)."""
+            values = textedit_scroll_fraction()
+            return values[0] if values else "<missing>"
 
         def safari_state():
             tree = snapshot_tree("Safari")
@@ -2727,9 +2745,9 @@ def main() -> int:
 
         def textedit_double_ref():
             tree = snapshot_tree("TextEdit")
-            nodes = find_nodes(tree, role="textfield", require_ref=True)
+            nodes = find_nodes(tree, role="scrollarea", require_ref=True)
             if not nodes:
-                fail("the TextEdit text view is not addressable for double-click")
+                fail("the TextEdit scroll area is not addressable for double-click")
             return nodes[0]["ref_id"]
 
         def safari_double_ref():
@@ -2809,19 +2827,17 @@ def main() -> int:
 
             down_mark = len(read_log(log))
             wheel_x, wheel_y = wheel_xy.split(",")
-            # One slow step down, then back: deeper histories develop periodic
-            # whitespace that the strict verifier rightly refuses as
-            # ambiguous, so the reverse leg stays shallow (one step each).
-            for _ in range(1):
-                agent("mouse-wheel", "--x", wheel_x, "--y", wheel_y, "--dy", "-6", "--headed")
-                time.sleep(0.6)
+            # One slow line down, then back. A slow step keeps a substantial
+            # verified overlap; the reverse leg must de-duplicate against the
+            # verified history instead of growing the document.
+            agent("mouse-wheel", "--x", wheel_x, "--y", wheel_y, "--dy", "-1", "--headed")
+            time.sleep(0.8)
             stitch_quiet(down_mark)
             extended_down = count_log_after(log, "scroll_stitch extended", down_mark)
             bottom_down = max_bottom(down_mark)
             up_mark = len(read_log(log))
-            for _ in range(1):
-                agent("mouse-wheel", "--x", wheel_x, "--y", wheel_y, "--dy", "6", "--headed")
-                time.sleep(0.6)
+            agent("mouse-wheel", "--x", wheel_x, "--y", wheel_y, "--dy", "1", "--headed")
+            time.sleep(0.8)
             stitch_quiet(up_mark)
             extended_up = count_log_after(log, "scroll_stitch extended", up_mark)
             refused = count_log_after(log, "scroll_stitch_refused", entry_mark)
@@ -2847,6 +2863,7 @@ def main() -> int:
                         break
                 if not published:
                     fail(f"{case}: Enter never published after mark")
+                wait_completion_preview(log, entry_mark)
                 metrics = decode_clipboard_expect(selection)
                 if metrics["height"] != bottom:
                     fail(
@@ -2898,9 +2915,7 @@ def main() -> int:
                     break
             if not published:
                 fail(f"{case}: Enter never published the single frame")
-            wait_log(
-                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=entry_mark
-            )
+            wait_completion_preview(log, entry_mark)
             metrics = decode_clipboard_expect(selection)
             if metrics["height"] != int(selection[3] * 2):
                 fail(f"{case}: single-frame PNG height {metrics['height']} is not the viewport")
@@ -2913,6 +2928,7 @@ def main() -> int:
             agent("double-click", double_ref_fn(), "--headed")
             wait_log(log, "scroll_tap_command", 5.0, after=entry_mark)
             wait_log(log, "output_publish target=Clipboard", 10.0, after=entry_mark)
+            wait_completion_preview(log, entry_mark)
             decode_clipboard_expect(selection)
             # Session D: Esc abandons and returns the pre-scroll selection.
             log_mark = len(read_log(log))
