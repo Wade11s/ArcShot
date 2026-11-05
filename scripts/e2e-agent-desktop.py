@@ -2364,12 +2364,19 @@ def main() -> int:
             agent("click", use["ref_id"])
             wait_log(log, "scroll_partial_choice action=accept", 10.0, after=mark)
             wait_log(log, "output_publish target=Clipboard", 10.0, after=mark)
+            # #35: any confirmed clipboard completion shares the whole-image
+            # preview post-processing, including an accepted verified part.
+            wait_log(log, "completion_preview shown", 10.0, after=mark)
+            wait_log(log, "completion_preview_expired", 10.0, after=mark)
             wait_log(
-                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark
+                log,
+                "from=Frozen to=Resident action=CancelAttempt",
+                10.0,
+                after=mark,
             )
             note(
                 "mac_e2e_28_accept=pass gap_stop=true choices=two no_auto_output=true "
-                "accept=clipboard after_explicit_click"
+                "accept=clipboard shared_preview=true auto_dismiss=true"
             )
         finally:
             stop(fixture)
