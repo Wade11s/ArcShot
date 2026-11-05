@@ -17,15 +17,18 @@ ps -p "$pid" -o pid= >/dev/null 2>&1 || { printf 'no such pid: %s\n' "$pid" >&2;
 
 peak_rss=0
 peak_footprint=0
+peak_phys_footprint_kb=0
 samples=0
 footprint_samples=0
 footprint_seconds=0
+detail_printed=0
 start=$(date +%s)
 index=0
 
 summary() {
-    printf 'peak_rss_kb=%d peak_footprint_kb=%d rss_samples=%d footprint_samples=%d footprint_total_s=%s duration_s=%s\n' \
-        "$peak_rss" "$peak_footprint" "$samples" "$footprint_samples" "$footprint_seconds" "$duration"
+    now=$(date +%s)
+    printf 'peak_rss_kb=%d peak_footprint_kb=%d peak_phys_footprint_kb=%d rss_samples=%d footprint_samples=%d footprint_total_s=%s elapsed_s=%d duration_s=%s\n' \
+        "$peak_rss" "$peak_footprint" "$peak_phys_footprint_kb" "$samples" "$footprint_samples" "$footprint_seconds" "$((now - start))" "$duration"
 }
 # A measurement driver terminates the sampler when its work is done; the
 # summary must still be printed so the observed peak is never lost.
@@ -57,6 +60,27 @@ while :; do
             fi
             footprint_samples=$((footprint_samples + 1))
             footprint_seconds=$(awk -v a="$footprint_seconds" -v b="$((ended - started))" 'BEGIN { printf "%.3f", a + b / 1e9 }')
+            # Once, emit the whole category table plus the kernel's own
+            # phys_footprint high-water mark as a cross-check of the sampled
+            # peak. This is still an observed peak, not a proof about every
+            # instantaneous spike between samples.
+            if [ "$detail_printed" -eq 0 ]; then
+                detail=$(footprint -p "$pid" 2>/dev/null)
+                if [ -n "$detail" ]; then
+                    printf '%s\n' "$detail" | while IFS= read -r row; do
+                        printf 'footprint_detail=%s\n' "$row"
+                    done
+                    peak_line=$(printf '%s\n' "$detail" | sed -n 's/.*phys_footprint_peak: \([0-9.]*\) \([KMG]B\).*/\1 \2/p' | head -1)
+                    if [ -n "$peak_line" ]; then
+                        peak_phys_footprint_kb=$(printf '%s' "$peak_line" | awk '
+                            $2 == "KB" { print $1 }
+                            $2 == "MB" { printf "%d\n", $1 * 1024 }
+                            $2 == "GB" { printf "%d\n", $1 * 1024 * 1024 }
+                        ')
+                    fi
+                    detail_printed=1
+                fi
+            fi
         fi
     fi
     printf 'sample=%d rss_kb=%s footprint_kb=%s\n' "$index" "$rss" "${footprint_kb:--}"
