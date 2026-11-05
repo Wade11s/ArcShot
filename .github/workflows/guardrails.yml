@@ -5,6 +5,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      e2e_tier:
+        description: "Also run the agent-desktop E2E tier that cannot use the keyboard or pointer (quiet or ax); empty skips it"
+        required: false
+        default: ""
+        type: choice
+        options: ["", quiet, ax]
 
 permissions:
   contents: read
@@ -57,3 +64,18 @@ jobs:
         run: cargo fetch --locked
       - name: Run all product guardrails
         run: scripts/check-all.sh
+
+  e2e:
+    name: agent-desktop E2E (self-hosted, quiet/ax tiers)
+    if: github.event_name == 'workflow_dispatch' && inputs.e2e_tier != ''
+    runs-on: [self-hosted, macOS, ARM64, arcshot-macos27]
+    timeout-minutes: 30
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component cargo
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+      - name: Run the selected E2E tier
+        run: scripts/e2e-agent-desktop.py --tier "${{ inputs.e2e_tier }}"

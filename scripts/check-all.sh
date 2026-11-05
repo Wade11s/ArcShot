@@ -21,3 +21,15 @@ scripts/check-text-backend.sh
 scripts/check-startup.sh
 scripts/check-no-network.sh
 scripts/check-startup.sh --release
+
+# Opt-in: the agent-desktop end-to-end tiers that cannot take over the keyboard
+# or pointer (see TEST.md 4.3.1). Off by default because it needs a login
+# session and TCC grants; scripts/e2e-agent-desktop.py stays a separate entry.
+case "${ARCSHOT_E2E_TIER:-}" in
+    "") ;;
+    quiet | ax) scripts/e2e-agent-desktop.py --tier "$ARCSHOT_E2E_TIER" ;;
+    *)
+        printf 'ARCSHOT_E2E_TIER must be quiet or ax, got %s\n' "$ARCSHOT_E2E_TIER" >&2
+        exit 2
+        ;;
+esac
