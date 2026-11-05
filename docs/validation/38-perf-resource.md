@@ -139,6 +139,13 @@ shadowPath 做处理；(3) 增加一个不依赖内嵌预览的 24M 文档构建
 RESOURCE-MAX。在该跟进落地前，PERF-EXPORT-24M 与 RESOURCE-MAX 保持
 **Not tested**，#38 不声明这两项通过。
 
+#59 已按方向 (3) 落地并在同一 Release 产品候选上重跑两项：`docs/validation/59-24m-stitch.md`。
+诊断证明失配是选区贴住夹具窗口顶边时捕获到的整宽顶部重绘瞬态带，而非排除滤镜
+hole。PERF-EXPORT-24M 为 **Pass**（5 次，max 789411 us）；RESOURCE-MAX 为
+**Fail**（观测 peak physical footprint 3742720 KiB = 3.57 GiB > 2 GiB，约
+3.1 GiB `Malloc Large` 来自 24M 拼接的全尺寸表面副本），收窄该峰值属独立后续票。
+本报告的 #38 历史结果保持原样，不因 #59 改写。
+
 ## 稳定自动化子用例（Rust）
 
 前置均为上述 SHA、锁定依赖；「实际」为对应 `cargo test` 的观察行。

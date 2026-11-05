@@ -442,6 +442,19 @@ app 的纯选择分类与控制窗 AX 按钮、自有 GPUI 精确像素夹具的
 权限提示替换竞态的原生冒烟记录见上述验证报告：真实 GPUI Esc 先入队、替换提示后
 消费，旧 Esc 不关闭新提示，当前 Esc 正常关闭；该场景未纳入常驻自动化入口。
 
+### #59 的稳定自动化入口
+
+可配置精确像素夹具几何解锁 24M 文档构建；`image` 新增 `ContentChanged` 的
+失配行/列诊断，不改变严格验证语义。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/image/src/stitch.rs`（模块内单元测试） | IMAGE-STITCH-59-01～03：失配 span 的行/物理列定位、成功提交清除旧 span、模拟内嵌预览下整宽顶部 48 行重绘瞬态带仍严格拒绝不猜补 | 真实 SCK 帧序列、真实长会话内存 |
+| `crates/app/src/bin/scroll-fixture.rs` | `--origin-x/--origin-y/--width/--height/--max-offset/--initial-offset` 可配置几何；默认与既有 E2E 一致 | 产品运行结果（夹具不属产品） |
+| `scripts/perf-measure.py`、`scripts/resource-footprint.sh` | PERF-EXPORT-24M-59-01（5 次 24M 导出）、RESOURCE-MAX-59-01/02（100/50 ms RSS + `footprint` + kernel `phys_footprint_peak`）、24M-BUILD-59-01 | 全矩阵 30 样本指标、瞬时尖峰全覆盖 |
+
+实测记录见 `docs/validation/59-24m-stitch.md`。
+
 新增子用例必须记录稳定 ID、前置、步骤、预期与实际，不通过删除规格边界来减少
 测试。模拟成功不能证明权限、焦点、IME、原生捕获或真实资源生命周期成功。
 
@@ -777,6 +790,21 @@ scripts/resource-footprint.sh <arcshot-pid> 0.1 <seconds>
 目录锁下串行执行。注意驱动每次运行会清空日志，需要保留原样本时先复制日志或
 用 `--log` 指定独立路径。
 
+24M 专用入口（#59，夹具几何见 `fixture_24m_args()`）：
+
+```sh
+# 性能：不启动资源采样器，连续 5 次独立 24M 会话
+scripts/perf-measure.py --configuration release --metrics export_24m \
+  --samples 5 --runs 5 --log target/perf-24m-59-perf.log --no-build --no-sampler
+# 资源：同一命令去掉 --no-sampler，采样器另写 target/perf-24m-resource-samples.log
+scripts/perf-measure.py --configuration release --metrics export_24m \
+  --samples 5 --runs 5 --log target/perf-24m-59-resource.log --no-build
+```
+
+子集运行时 `perf-gate.sh` 的全矩阵判定只是信息性输出（未采集的指标为
+Not tested，长采集的 event-preview 样本含长尾）；24M 门槛用只含 5 条
+`output_encode_us` 的过滤日志单独判定。
+
 | 稳定 ID | 测量接缝 | 结果 |
 | --- | --- | --- |
 | PERF-INTERACT-38-01 | `interact_commit_us` | Pass（n=31，p95 1 ms） |
@@ -789,11 +817,20 @@ scripts/resource-footprint.sh <arcshot-pid> 0.1 <seconds>
 | PERF-EXPORT-6M-38-01 | `output_encode_us`（≤6M 桶） | Pass（n=30，p95 59241 us） |
 | PERF-CLIPBOARD-38-01 | `clipboard_accept_us` | Pass（n=60，p95 609 us） |
 | PERF-SCROLL-START-38-01 | `scroll_start_us` | Not tested（n=1 < 30） |
-| PERF-EXPORT-24M-38-01 | `output_encode_us`（24M 桶） | Not tested（内嵌预览拼接拒绝，阻塞） |
-| RESOURCE-MAX-38-01 | `resource-footprint.sh` | Not tested（依赖 PERF-EXPORT-24M） |
+| PERF-EXPORT-24M-38-01 | `output_encode_us`（24M 桶） | Not tested（内嵌预览拼接拒绝，阻塞；历史记录） |
+| RESOURCE-MAX-38-01 | `resource-footprint.sh` | Not tested（依赖 PERF-EXPORT-24M；历史记录） |
+| PERF-EXPORT-24M-59-01 | `output_encode_us`（24M 桶） | Pass（n=5，median 662950 us，nearest-rank p95/max 789411 us） |
+| RESOURCE-MAX-59-01 | `resource-footprint.sh` | Fail（观测 peak physical footprint 3742720 KiB = 3.57 GiB > 2 GiB） |
+| RESOURCE-MAX-59-02 | 50 ms 节奏确认运行 | Not tested（第 3/5 次导出后中止） |
 
-PERF-EXPORT-24M 与 RESOURCE-MAX 的阻塞与窄跟进见
-`docs/validation/38-perf-resource.md`。
+PERF-EXPORT-24M 与 RESOURCE-MAX 已被 #59 解锁并实测：前者 Pass，后者 Fail
+（约 3.1 GiB `Malloc Large` 来自 24M 拼接的全尺寸表面副本，收窄属独立后续票）。
+24M 夹具几何与完整原始样本见 `docs/validation/59-24m-stitch.md`；#38 的阻塞
+诊断保留在 `docs/validation/38-perf-resource.md`。
+
+性能与资源分开运行：`--no-sampler` 的性能运行给出 5 次导出耗时，资源运行
+单独采样 RSS（50 ms 目标节奏）并用 macOS `footprint` 与 kernel
+`phys_footprint_peak` 交叉检查；只称观测峰值。
 
 ## 7. 证据、隐私与放行
 
