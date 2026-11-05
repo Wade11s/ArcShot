@@ -407,6 +407,22 @@ app 的纯选择分类与控制窗 AX 按钮、自有 GPUI 精确像素夹具的
 
 实测记录见 `docs/validation/35-long-image-preview.md`。
 
+### #37 的稳定自动化入口
+
+回归票：重跑全部 T-02/T-03，不新增产品功能，只补组合 E2E 并修复一个
+实际缺陷——文字提交后窗口焦点滞留在已移除的编辑器元素上，覆盖层键
+（撤销/重做/Esc 分层）失效。`sync_text_editor` 在观察到编辑消失时把
+焦点返回覆盖层根（`window.focus(&self.focus, cx)`，只有该路径拥有
+`Window`）；`commit_editor` 不再提前清除 `text_focus`，以便同步路径
+能识别编辑器曾持有焦点。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/app/src/ui.rs`（`sync_text_editor`） | 文字提交后焦点返回覆盖层根；撤销/重做/Esc 恢复可达 | GPUI 窗口级 Rust 测试（由 MAC-E2E-32/35 守护） |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-32～36 与 MAC-E2E-37（TextEdit/Safari 完成预览标注）：Region/长图五工具与历史、密度+文字焦点、保存取消/选定与剪贴板、热键重启/Esc 分层 | 指针控制点拖动、IME 候选窗、TCC 切换（见 §4.4/§4.5） |
+
+实测记录见 `docs/validation/37-regression.md`。
+
 ### #29 的稳定自动化入口
 
 选项密度只走已确认接缝：core 的权威会话状态、app 的注入式偏好流、原生偏好域往返
@@ -540,6 +556,12 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-29 | 由脚本启动自有夹具；进入滚动采集后直接 Enter 完成可信单帧，断言 `completion_preview shown`，再 AX 点击 `arcshot.completion.preview` 进入共享文档；AX 点击仅长图模式存在的 `arcshot.overlay.completion.add_rectangle` 添加一个 Rectangle；AX 点击 `arcshot.overlay.finish` 重新完成。随后再进行一轮：完成→点击缩略图→`press escape --headed` 取消 | 第一次出现 `a11y_action=arcshot.completion.preview action=Click`、`completion_annotation_opened document=WxH zoom=…` 与恢复的 `group "ArcShot 截图覆盖层"`；`capture_edit action=AddDefaultRectangle … annotations=1`；第二次 `output_publish target=Clipboard … pixels=<整 crop 宽>x<整 crop 高> annotations=1`，随后 `from=Frozen to=Resident action=OutputCompleted`；取消轮出现 `from=Frozen to=Resident action=CancelAttempt` 且真实剪贴板 PNG 逐字节不变 | 带滚动的整图扩展（由 #33 的像素真值与本票 IMAGE-COMPOSE-35 覆盖）、悬停不延长、动画观感、TextEdit/Safari 第三方目标 |
 | MAC-E2E-30 | TextEdit 固定几何纯文本（`textedit-36-v1`，System Events 固定 `200,120 1000x700`，预滚到文档中部）；开始截图后 `--headed` 拖拽建内侧选区（`400,350→1000,650`），AX 激活滚动入口；采集中点击选区、慢速滚 1 下 1 上、Enter、双击、Esc 分别验证 | `scroll_target owner=com.apple.TextEdit` 与帧 `[200,120,1000,700]`；`scroll_preview placed=inner` 且预览可寻址并在 `scroll_exclusion_fixed` 排除集中；采集中前台为 TextEdit；点击后滚动条不变且退役 `clicks_blocked≥1`；慢速下滚出现 `scroll_stitch extended`（`bottom` 增长）后上滚出现 `scroll_stitch duplicate` 且扩展数不增；无滚动 Enter 与双击各一次 Clipboard 输出，内存 PNG 解码为选区物理宽 `1200`、`sRGB`、全不透明且高度等于已验证底（单帧 `600`）；Esc 放弃且选区返回、无输出 | 真机滚轮手感、三秒完成预览与长图标注（#37）、视觉观感、IME |
 | MAC-E2E-31 | Safari `file://` 静态页（`safari-36-v1`，无远端资源，System Events 固定 `100,80 1200x800`）；同上选区（`300,350→900,650`）与流程，滚轮轴点 `600,600` | `scroll_target owner=com.apple.Safari`；`scroll_preview placed=inner` 且预览可寻址并在排除集中；地址栏仍为 `file://` 且前台为 Safari；点击不改地址且退役 `clicks_blocked≥1`；慢速双向滚动扩展与反向去重（同 MAC-E2E-30）；无滚动 Enter、双击（滚动区双击）各一次 sRGB PNG 解码（`1200×600` 单帧）；Esc 放弃回原选区 | 动态内容、联网行为（夹具无远端、未启 HTTP 服务）、视觉观感 |
+| MAC-E2E-32 | Region 大选区（`200,200→1100,750`）；依次 AX 激活 Rectangle/Line/Arrow/Blur/Text 并以 `--headed` 拖拽/点击作创建前置；`cmd+z` / `cmd+shift+z`；选对象后 AX 删除；AX 完成 | `capture_edit annotations` 1→5→4→5→4；`output_publish target=Clipboard pixels=1800x1100 annotations=4`；内存 PNG 解码等大 sRGB；仓库树 PNG 文件集不变 | 指针控制点拖动、选区移动/调整/重选指针手势、IME |
+| MAC-E2E-33 | Text 创建后状态菜单切密度；悬停 Text 字号步进；工具切换提交；切回密度 | 编辑器、字号 `16` 与 Text 工具在密度切换后保持；同套选项在新密度可达；`TextOption size=16.5`；`TextCommit annotations=1` | 密度像素观感、键盘单独访问选项 |
+| MAC-E2E-34 | Region：AX 保存后原生面板 AX 取消；新会话 AX 保存后 `set-value` 改名并 AX 保存 | 取消：`save_panel_outcome=cancelled`、无输出、剪贴板 hash 不变、会话保留；选定：`save_panel_outcome=chosen`、`output_publish target=SaveFile pixels=1200x700`、文件内存解码等大 sRGB、剪贴板不变（文件随后删除） | 保存覆盖写提示、保存失败原生形态 |
+| MAC-E2E-35 | 自有夹具扩展拼接后完成→预览→进入标注；长图上 AX 激活五工具并以居中视图公式换算的 `--headed` 拖拽创建（Rectangle 走 a11y 路径）；撤销/重做；AX 重新完成 | 文档 `230×196/212`；滚动入口缺席；`annotations` 1→5→4→5；`output_publish pixels=460×392/424 annotations=5` 等于已验证底；解码高度一致 | 长图指针控制点拖动、视觉观感 |
+| MAC-E2E-36 | Region 建对象后全局热键重启；工具激活时 Esc；自有夹具采集中全局热键重启 | 重启后无旧选区且 `SelectRegion annotations=0`；首 Esc 只回 Select 工具且会话保留；采集中重启后 `scroll_input_retired` 且无旧票输出、新会话需重选 | 迟到结果原生注入（仅注入式 APP-ASYNC）、目标关闭原生复现 |
+| MAC-E2E-37 | TextEdit/Safari 各一轮：单帧完成→缩略图→AX 进入标注→a11y 矩形→AX 完成 | `AddDefaultRectangle annotations=1`；`output_publish pixels=1200x600 annotations=1`；内存 PNG 解码整图 sRGB | 真机滚轮手感、视觉观感 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -650,6 +672,7 @@ agent-desktop press escape --headed
   修复帧边缘空白行与历史底部空白行的 1–2 行重合把唯一大重叠误判为歧义的
   实际缺陷；TextEdit/Safari 各以一步一条慢行完成启动、慢速双向、反向去重、
   无滚动单帧、Enter、双击、Esc、点击拦截与 PNG 输出（MAC-E2E-30/31）。
+- 已落地（#37）：组合回归接缝。删除按钮 `arcshot.overlay.delete` 在有选中对象时可 AX 激活；原生 `NSSavePanel` 经 `snapshot --app` 暴露 AppKit 自带 `CancelButton` / `OKButton` / `saveAsNameTextField`，取消与选定（`set-value` 改名 + 点保存）均可 AX 驱动，面板无标题窗口不适用 `wait_frontmost`；长图拖拽坐标按居中公式换算（`drag_long`）。另修复文字提交后的焦点滞留：`sync_text_editor` 在编辑消失时把窗口焦点返回覆盖层根（`window.focus(&self.focus, cx)`），此后撤销/重做/Esc 可达（MAC-E2E-32/35 守护）。文字提交统一用工具切换（AX 证据），不用选区内点击（Text 工具下会开始新编辑器）。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
@@ -693,18 +716,18 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | --- | --- | --- |
 | MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、两个偏好项与完成音效跨重启见 §4.3（MAC-E2E-01/15/16/17），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；Scroll 三权限预检诊断与入口闸门见 MAC-E2E-24；本机三项权限均已授权，缺失通知/设置返回重检/运行中失效属 §4.4，保持 **Not tested** |
-| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
-| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分：五个工具与矩形/直线/箭头样式选项、模糊三档可 AX 驱动；绘制、对象命中与端点拖动仍无 AX 节点 |
-| MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
-| MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 部分（#36）：MAC-E2E-30/31 在两第三方目标各完成启动/目标身份/内侧预览/拦截/慢速双向扩展与反向去重/单帧/Enter/双击/Esc/PNG；真机滚轮手感与完整成功预览/长图标注组合（#37）保持 **Not tested** |
+| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分（#37）：冻结/取消、菜单/热键、选区创建（拖拽前置 + 诊断）、撤销/重做/删除、AX 完成与 2x 输出几何见 §4.3（MAC-E2E-32/34/36）；选区移动/八向调整与重选的指针手势控制点无 AX 节点，保持 Not tested |
+| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分（#37）：五工具在 Region 与长图上各建一对象、对象历史与裁剪输出、密度/悬停与文字焦点见 MAC-E2E-13～25/32/33/35；对象/端点控制点拖动仍无 AX 节点，保持 Not tested |
+| MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 部分（#37）：拉丁文字创建/提交/撤销在 Region 与长图上见 MAC-E2E-25/32/33/35；中文 IME 组合/候选窗与 emoji 原生字形属 §4.4，保持 Not tested |
+| MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 部分（#37）：MAC-E2E-30/31 在两第三方目标各完成启动/目标身份/内侧预览/拦截/慢速双向扩展与反向去重/单帧/Enter/双击/Esc/PNG，MAC-E2E-37 补齐两目标的成功预览与长图标注组合，MAC-E2E-35 在自有夹具补齐扩展长图的五工具标注；真机滚轮手感保持 **Not tested** |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 部分（#36）：内侧预览在 TextEdit/Safari 各一次（`placed=inner`、`scroll_exclusion_fixed` 预览 id、AX `arcshot.scroll.preview` 可寻址）；右/左仍只由自有夹具证实，第三方取内侧以固定几何覆盖，目标不被浮层污染由排除集与解码图证实 |
 | MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分（#36）：MAC-E2E-30/31 在两第三方目标各完成单帧/Enter/双击（TextEdit/Safari 滚动区）/单击拦截/原始滚动达目标/前台与 hit-test/Esc/清理；预览上滚动仍只由自有夹具内侧例证实，第三方未单独投轮于预览区；采集期热键重启仍仅注入式（CORE-SESSION-56） |
 | MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖视觉结果，需 `screenshot` 或人工（§4.4） |
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
 | MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分（#36）：两第三方目标各经命名 sRGB display-filter 接纳后解码 PNG 校验尺寸/不透明/sRGB 块/行纹理（`decode_png_metrics`），剪贴板 `PNGf` 由 osascript 回读证实；非 ArcShot 应用粘贴与显式保存字节一致仍 **Not tested** |
-| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分：保存取消/失败/重试/放弃与文件写入由 core/app/原生自动化覆盖，`save_file_smoke` 验证真实写入；面板显示/取消/覆盖写需有效选区，选区尚无 AX 节点（§4.5），保持 Not tested；#35 的 MAC-E2E-29 已驱动自有夹具完成确认复制→缩略图→点击进入→Rectangle→重新完成（整图带标注输出）与 Esc 取消不再写剪贴板；三秒停留的动画观感与悬停不延长属 §4.4，保持 Not tested |
-| MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分：退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
+| MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分（#37）：原生保存面板的取消与选定（AX 驱动，文件内存解码后删除）、剪贴板不变见 MAC-E2E-34；保存失败/覆盖写原生形态仍 Not tested；复制失败/重试/放弃由自动化覆盖；#35/#37 的 MAC-E2E-29/35/37 驱动确认复制→缩略图→点击进入→标注→重新完成与 Esc 取消保留旧剪贴板；三秒停留的动画观感与悬停不延长属 §4.4，保持 Not tested |
+| MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分（#37）：无新增 PNG 落盘与剪贴板不变见 MAC-E2E-32/34，重启不污染新会话见 MAC-E2E-36，退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
 
 权限切换若先触发焦点停止，只能记录实际时序，不能冒称“运行中直接撤权”已验证。
 负面用例通过只表示安全处理，不外推为任意应用、动态内容、显示器或滚动速度兼容。
