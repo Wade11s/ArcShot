@@ -10,11 +10,12 @@ use crate::{
 use arcshot_app::{
     CaptureSubmitError, CaptureTasks, DensityWriteOutcome, GuideHistory, HotkeyAction,
     HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError,
-    OutputTasks, PendingSave, PermissionAction, PermissionEffect, PermissionFlow,
-    PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice, ScrollFrameQueue,
-    ScrollFrameSubmitError, ScrollFrameTasks, ScrollPermissionAction, ScrollPermissionEffect,
-    ScrollPermissionFlow, ScrollPermissionNotice, ScrollTapCommand, ScrollTargetTasks,
-    encode_document, may_submit_scroll_frame, preview_layout, scroll_tap_action,
+    OutputTasks, PARTIAL_INCOMPLETE_WARNING, PendingSave, PermissionAction, PermissionEffect,
+    PermissionFlow, PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice,
+    ScrollFrameQueue, ScrollFrameSubmitError, ScrollFrameTasks, ScrollPartialChoice,
+    ScrollPermissionAction, ScrollPermissionEffect, ScrollPermissionFlow, ScrollPermissionNotice,
+    ScrollTapCommand, ScrollTargetTasks, encode_document, may_submit_scroll_frame, partial_action,
+    preview_layout, scroll_tap_action,
 };
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CaptureAction, CaptureEffect,
@@ -56,6 +57,8 @@ const SCROLL_COLLECTING_STATUS: &str = "可以滚动";
 const SCROLL_COLLECTING_HINT: &str = "上下滚动采集内容；双击或按回车完成，Esc 取消";
 /// Operation hint after a failed completion; retry and abandon stay explicit.
 const SCROLL_RETRY_HINT: &str = "回车重试复制，Esc 放弃并返回选区";
+/// Operation hint after a failed partial publish; the choice stays explicit.
+const SCROLL_PARTIAL_RETRY_HINT: &str = "复制失败，已验证部分仍在；可重试或放弃返回选区";
 /// Deadline for bringing the locked target to the foreground after preparation.
 const SCROLL_ACTIVATE_DEADLINE: Duration = Duration::from_secs(3);
 /// Bounded release-only drain: a synthetic press whose key-up never arrives
@@ -454,6 +457,21 @@ impl Coordinator {
                 UiCommand::AddDefaultRectangle(ticket) if self.session.may_present(ticket) => {
                     self.action(CaptureAction::AddDefaultRectangle { ticket }, cx);
                 }
+                UiCommand::ScrollPartialAccept(ticket) => {
+                    if self.session.scroll_partial_available() {
+                        log::info!("scroll_partial_choice action=accept ticket={ticket:?}");
+                        self.action(
+                            partial_action(ScrollPartialChoice::UseVerifiedPartial, ticket),
+                            cx,
+                        );
+                    }
+                }
+                UiCommand::ScrollPartialAbandon(ticket) => {
+                    if self.session.scroll_partial_available() {
+                        log::info!("scroll_partial_choice action=abandon ticket={ticket:?}");
+                        self.action(partial_action(ScrollPartialChoice::Abandon, ticket), cx);
+                    }
+                }
                 UiCommand::ScrollControlClosed(window_id, ticket) => {
                     if self
                         .scroll_control
@@ -717,6 +735,14 @@ impl Coordinator {
                 .is_some_and(|d| d == expected)
         {
             self.action(CaptureAction::DisplayInvalidated, cx);
+        }
+        // While awaiting the partial choice, input protection has ended:
+        // retire the tap (drain, then drop with counters) but keep the
+        // control window, the verified preview and the stitch builder so
+        // the user can still accept or abandon the verified result.
+        if self.session.scroll_phase() == ScrollPhase::AwaitingPartialChoice {
+            self.retire_scroll_tap();
+            self.scroll_raw_queue.clear();
         }
         // A cancelled or invalidated session must not leave a Scroll control
         // window or session tap behind. A permission notice or a deferred
@@ -1230,6 +1256,15 @@ impl Coordinator {
                             Some(SCROLL_RETRY_HINT),
                             cx,
                         );
+                    } else if self.session.scroll_phase() == ScrollPhase::AwaitingPartialChoice {
+                        // A failed partial publish is not a success: the
+                        // verified result stays for an explicit retry/abandon
+                        // and no success preview is shown.
+                        self.update_scroll_control_partial(
+                            &error.to_string(),
+                            Some(SCROLL_PARTIAL_RETRY_HINT),
+                            cx,
+                        );
                     } else {
                         self.overlay_error = Some(error.to_string());
                     }
@@ -1275,6 +1310,9 @@ impl Coordinator {
                 }
                 CaptureEffect::ScrollRefused(ticket, refusal) => {
                     self.handle_scroll_refusal(ticket, refusal, cx);
+                }
+                CaptureEffect::ScrollPartialChoice(ticket, refusal) => {
+                    self.handle_scroll_partial_choice(ticket, refusal, cx);
                 }
                 CaptureEffect::ScrollRelaunchRequired => {
                     self.close_scroll_ui(cx);
@@ -1794,6 +1832,10 @@ impl Coordinator {
         cx: &mut Context<Self>,
     ) {
         log::info!("scroll_refused reason={}", scroll_refusal_reason(&refusal));
+        log::info!(
+            "scroll_partial_choice available=false reason={}",
+            scroll_refusal_reason(&refusal)
+        );
         self.close_scroll_control(cx);
         self.close_scroll_preview(cx);
         self.scroll_stitch = None;
@@ -1807,6 +1849,38 @@ impl Coordinator {
                 self.overlay_error = Some(scroll_refusal_message(&refusal).to_owned());
             }
         }
+    }
+
+    /// Handles one known-state stop with a verified result (I-11 step 11).
+    ///
+    /// The control window (and the verified preview) stay; input protection
+    /// retires in `tick`. The user must explicitly use the verified partial
+    /// (incomplete, copied only after confirmation) or abandon it. Nothing
+    /// is output here.
+    fn handle_scroll_partial_choice(
+        &mut self,
+        _ticket: CaptureTicket,
+        refusal: ScrollRefusal,
+        cx: &mut Context<Self>,
+    ) {
+        log::info!("scroll_refused reason={}", scroll_refusal_reason(&refusal));
+        let size = self
+            .session
+            .scroll_stitch_frame()
+            .map_or([0, 0], |frame| frame.geometry().pixel_size());
+        log::info!(
+            "scroll_partial_choice available=true reason={} pixels={}x{}",
+            scroll_refusal_reason(&refusal),
+            size[0],
+            size[1]
+        );
+        // Unverified queued frames are discarded; verified history is kept.
+        self.scroll_raw_queue.clear();
+        self.update_scroll_control_partial(
+            scroll_refusal_message(&refusal),
+            Some(PARTIAL_INCOMPLETE_WARNING),
+            cx,
+        );
     }
 
     /// Drives the Scroll permission notice policy and its native effects.
@@ -1923,7 +1997,9 @@ impl Coordinator {
         self.scroll_control_id.borrow_mut().take();
         let queue = Rc::clone(&self.queue);
         let control_id = Rc::clone(&self.scroll_control_id);
-        let bounds = WindowBounds::centered(size(px(320.0), px(110.0)), cx);
+        // Tall enough for the partial-result choice row (two labelled
+        // buttons plus status and hint) as well as the collecting status.
+        let bounds = WindowBounds::centered(size(px(380.0), px(180.0)), cx);
         let result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(bounds),
@@ -1961,6 +2037,7 @@ impl Coordinator {
                 cx.new(|_| ScrollControlView {
                     status: SCROLL_PREPARING_STATUS.to_owned(),
                     hint: None,
+                    partial_choice: false,
                     ticket,
                     focus: focus.clone(),
                     queue,
@@ -2844,6 +2921,29 @@ impl Coordinator {
                 .update(cx, |view, _, cx| {
                     view.status = status.to_owned();
                     view.hint = hint.map(str::to_owned);
+                    view.partial_choice = false;
+                    cx.notify();
+                })
+                .ok()
+        });
+        if updated.is_none() {
+            self.scroll_control = None;
+        }
+    }
+
+    /// Shows the explicit partial-result choices in the control window.
+    fn update_scroll_control_partial(
+        &mut self,
+        status: &str,
+        hint: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let updated = self.scroll_control.as_ref().and_then(|handle| {
+            handle
+                .update(cx, |view, _, cx| {
+                    view.status = status.to_owned();
+                    view.hint = hint.map(str::to_owned);
+                    view.partial_choice = true;
                     cx.notify();
                 })
                 .ok()
@@ -3379,6 +3479,8 @@ const fn action_name(action: &CaptureAction) -> &'static str {
         CaptureAction::EnterCompletionAnnotation { .. } => "EnterCompletionAnnotation",
         CaptureAction::AddDefaultRectangle { .. } => "AddDefaultRectangle",
         CaptureAction::CancelScroll { .. } => "CancelScroll",
+        CaptureAction::AcceptScrollPartial { .. } => "AcceptScrollPartial",
+        CaptureAction::AbandonScrollPartial { .. } => "AbandonScrollPartial",
         CaptureAction::ScrollNativeUncertain { .. } => "ScrollNativeUncertain",
     }
 }
