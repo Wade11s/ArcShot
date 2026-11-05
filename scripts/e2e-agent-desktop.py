@@ -13,11 +13,15 @@ Usage: scripts/e2e-agent-desktop.py [--release]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
+import re
+import struct
 import subprocess
 import sys
 import time
+import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 POLL = 0.1
@@ -316,6 +320,249 @@ def parse_selection(log: pathlib.Path, after: int) -> tuple[float, float, float,
     fail(f"no SelectRegion geometry found after line {after} in {log}")
 
 
+# --- Ticket #36 third-party targets (MAC-E2E-30/31) ---
+
+TEXTEDIT_FIXTURE_VERSION = "textedit-36-v1"
+SAFARI_FIXTURE_VERSION = "safari-36-v1"
+
+
+def osascript(script: str, timeout: float = 10.0) -> str:
+    """Runs one System Events script (target window geometry / frontmost check)."""
+    result = run(["osascript", "-e", script], timeout=timeout)
+    if result.returncode != 0:
+        fail(f"osascript {script!r}: {result.stderr.strip()[:300]}")
+    return result.stdout.strip()
+
+
+def set_window_geometry(app_name: str, x: int, y: int, width: int, height: int) -> None:
+    """Fixes one third-party window geometry via System Events (points).
+
+    agent-desktop list-windows reports stale bounds for background windows on
+    macOS 27 (observed for TextEdit/Safari behind the frontmost app), so the
+    fixed geometry is set and verified through System Events instead.
+    """
+    osascript(
+        f'tell application "System Events" to tell process "{app_name}" '
+        f"to set position of window 1 to {{{x}, {y}}}"
+    )
+    osascript(
+        f'tell application "System Events" to tell process "{app_name}" '
+        f"to set size of window 1 to {{{width}, {height}}}"
+    )
+    observed = osascript(
+        f'tell application "System Events" to tell process "{app_name}" '
+        "to get {position, size} of window 1"
+    )
+    if observed != f"{x}, {y}, {width}, {height}":
+        fail(f"{app_name} geometry is {observed!r}, expected ({x},{y},{width},{height})")
+
+
+def frontmost_process() -> str:
+    """The frontmost application process name (System Events)."""
+    return osascript(
+        'tell application "System Events" to get name of first application '
+        "process whose frontmost is true"
+    )
+
+
+def read_clipboard_png() -> bytes:
+    """Reads the PNGf clipboard payload in memory (osascript, no disk file).
+
+    agent-desktop clipboard-get is unusable on this host (missing packaged
+    helper), so the PNGf type is read through System Events and decoded in
+    memory; evidence is numeric only, never a saved screenshot.
+    """
+    output = run(["osascript", "-e", "the clipboard"], timeout=30.0).stdout
+    match = re.search(r"PNGf([0-9A-Fa-f]+)", output)
+    if not match:
+        fail("the clipboard does not carry PNGf data")
+    return bytes.fromhex(match.group(1))
+
+
+def clipboard_has_pngf() -> bool:
+    """Whether the general pasteboard exposes the PNGf type."""
+    return "PNGf" in run(["osascript", "-e", "get clipboard info"], timeout=10.0).stdout
+
+
+def decode_png_metrics(data: bytes) -> dict:
+    """Decodes one PNG in memory and reports size/sRGB/alpha/texture metrics."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        fail("the clipboard PNGf payload is not a PNG")
+    offset = 8
+    width = height = 0
+    idat = b""
+    has_srgb = False
+    while offset + 8 <= len(data):
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        kind = data[offset + 4 : offset + 8].decode("latin1")
+        body = data[offset + 8 : offset + 8 + length]
+        if kind == "IHDR":
+            width, height = struct.unpack(">II", body[:8])
+            if body[8] != 8 or body[9] != 6:
+                fail(f"unexpected PNG IHDR bit depth/colour: {body[8]}/{body[9]}")
+        elif kind == "sRGB":
+            has_srgb = True
+        elif kind == "IDAT":
+            idat += body
+        offset += 12 + length
+        if kind == "IEND":
+            break
+    if not has_srgb:
+        fail("the clipboard PNG carries no sRGB chunk")
+    raw = zlib.decompress(idat)
+    if len(raw) != height * (1 + width * 4):
+        fail("the clipboard PNG inflates to an unexpected length")
+    rows: list[bytes] = []
+    previous = bytearray(width * 4)
+    pos = 0
+    for _y in range(height):
+        filter_type = raw[pos]
+        pos += 1
+        current = bytearray(raw[pos : pos + width * 4])
+        pos += width * 4
+        if filter_type == 1:
+            for index in range(4, len(current)):
+                current[index] = (current[index] + current[index - 4]) & 0xFF
+        elif filter_type == 2:
+            for index in range(len(current)):
+                current[index] = (current[index] + previous[index]) & 0xFF
+        elif filter_type == 3:
+            for index in range(len(current)):
+                left = current[index - 4] if index >= 4 else 0
+                current[index] = (current[index] + (left + previous[index]) // 2) & 0xFF
+        elif filter_type == 4:
+            for index in range(len(current)):
+                left = current[index - 4] if index >= 4 else 0
+                up = previous[index]
+                up_left = previous[index - 4] if index >= 4 else 0
+                predictor = left + up - up_left
+                p_left, p_up, p_up_left = abs(predictor - left), abs(predictor - up), abs(predictor - up_left)
+                best = left if (p_left <= p_up and p_left <= p_up_left) else (up if p_up <= p_up_left else up_left)
+                current[index] = (current[index] + best) & 0xFF
+        elif filter_type != 0:
+            fail(f"unexpected PNG row filter {filter_type}")
+        rows.append(bytes(current))
+        previous = current
+    alpha_ok = all(row[index] == 255 for row in rows for index in range(3, len(row), 4))
+    return {
+        "width": width,
+        "height": height,
+        "has_srgb": has_srgb,
+        "alpha_ok": alpha_ok,
+        "distinct_rows": len(set(rows)),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def write_textedit_fixture(path: pathlib.Path) -> None:
+    """Generates the fixed-geometry plain-text fixture (offline, no network).
+
+    Lines are long deterministic hash streams so wrapped text fills the whole
+    selection width: with the default 55-char lines the right majority is
+    white, which the strict stitch verifier rightly judges ambiguous
+    (uniform content). Full-width text keeps every rendered row distinct.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"ARCSHOT36 TEXTEDIT LINE {index:04d} marker-36-{index:04d}"
+        + "".join(
+            chr(
+                ord("a")
+                + int(hashlib.sha256(f"36-line-{index}-{position}".encode()).hexdigest()[:2], 16) % 26
+            )
+            for position in range(200)
+        )
+        for index in range(400)
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+
+def write_safari_fixture(path: pathlib.Path) -> None:
+    """Generates the file:// static-page fixture (offline, no remote resources)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = "\n".join(
+        f'<div class="row">ARCSHOT36 SAFARI ROW {index:04d} marker-36-{index:04d} '
+        f"x{(index * 53) % 1000:03d} {'B' * ((index % 13) + 1)}</div>"
+        for index in range(400)
+    )
+    html = (
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">"
+        "<title>ArcShot36 Safari Fixture</title>\n"
+        '<link rel="icon" href="data:,">\n'
+        "<style>html,body{margin:0;padding:0;background:#ffffff;color:#000000;"
+        "font-family:Menlo,monospace;font-size:16px;line-height:20px;}"
+        ".row{height:20px;white-space:pre;overflow:hidden;}</style></head><body>\n"
+        + rows
+        + "\n</body></html>\n"
+    )
+    for token in ("http://", "https://", "<script", "<iframe", "<img"):
+        if token in html:
+            fail(f"the Safari fixture unexpectedly contains {token!r}")
+    if 'href="http' in html or "src=" in html:
+        fail("the Safari fixture references a remote resource")
+    path.write_text(html, encoding="utf-8")
+
+
+def wait_target_window(app: str, title_part: str) -> None:
+    """Waits for exactly one window whose title contains the fixture name."""
+    deadline = time.monotonic() + 15.0
+    last: list[dict] = []
+    while time.monotonic() < deadline:
+        last = windows(app)
+        titled = [entry for entry in last if title_part in str(entry.get("title") or "")]
+        if len(titled) == 1 and len(last) == 1:
+            return
+        time.sleep(POLL)
+    fail(f"expected exactly one {app} fixture window, saw {last}")
+
+
+def begin_third_party_scroll(
+    app: str, log: pathlib.Path, drag_from: str, drag_to: str, mark: int
+) -> tuple[int, tuple[float, float, float, float]]:
+    """Starts one frozen session and enters Scroll collection (seek to collecting)."""
+    click(app, "开始截图")
+    wait_frozen_active(log, mark)
+    agent("drag", "--from-xy", drag_from, "--to-xy", drag_to, "--headed")
+    wait_log(log, "capture_edit action=SelectRegion", 10.0, after=mark)
+    selection = parse_selection(log, mark)
+    entry_mark = len(read_log(log))
+    click_scroll_entry(app, denied=False)
+    wait_log(log, "a11y_action=arcshot.overlay.scroll action=Click", 10.0, after=entry_mark)
+    wait_log(log, "scroll_target window_id=", 15.0, after=entry_mark)
+    wait_log(log, "scroll_prepared ", 15.0, after=entry_mark)
+    wait_log(log, "scroll_preview placed=inner", 15.0, after=entry_mark)
+    wait_log(log, "scroll_collecting", 15.0, after=entry_mark)
+    return entry_mark, selection
+
+
+def expect_selection_returned(app: str) -> None:
+    """The pre-scroll selection is addressable again (overlay save entry)."""
+    root = wait_node(
+        app,
+        lambda tree: (
+            find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+        )[0],
+        10.0,
+    )
+    if not find_nodes(root, native_id="arcshot.overlay.save", require_ref=True):
+        fail("the pre-scroll selection was not returned")
+
+
+def decode_clipboard_expect(selection: tuple[float, float, float, float]) -> dict:
+    """Decodes the clipboard PNG and checks it against the selection geometry."""
+    if not clipboard_has_pngf():
+        fail("the clipboard does not expose PNGf after output")
+    metrics = decode_png_metrics(read_clipboard_png())
+    expected_width = int(selection[2] * 2)
+    if metrics["width"] != expected_width:
+        fail(f"decoded PNG width {metrics['width']} != selection {expected_width}")
+    if not metrics["alpha_ok"]:
+        fail("the decoded PNG is not fully opaque")
+    if metrics["distinct_rows"] < 100:
+        fail(f"the decoded PNG looks uniform ({metrics['distinct_rows']} distinct rows)")
+    return metrics
+
+
 def quit_app(app: str, process: subprocess.Popen, *, expect_status_item_removed: bool) -> None:
     """Quits through the real menu item and checks the process is really gone."""
     click(app, "退出 ArcShot")
@@ -581,6 +828,10 @@ def main() -> int:
     running = agent("list-apps", "--app", "ArcShot").get("apps", [])
     if running:
         fail(f"another ArcShot instance is already running: {running}")
+    # Persistent notification glass (layer 8) sits above every app window and
+    # would pollute pixel-truth frames. `dismiss-all` cannot see it (empty
+    # list); the stuck helper is cleared out of band before the run, so the
+    # harness instead asserts a clean display filter area at probe time.
 
     # Release uses thin LTO and can exceed the default one-minute command
     # timeout on a cold build; keep every other command tightly bounded.
@@ -1971,6 +2222,370 @@ def main() -> int:
         finally:
             stop(fixture)
 
+        # MAC-E2E-30/31: the same Scroll path on two non-ArcShot targets
+        # (TextEdit plain text, Safari file:// static page; I-12/I-13).
+        # Each session drives the real app through the product (target lock,
+        # inner preview, click blocking, slow wheel, Enter/double-click/Esc,
+        # PNG output) and asserts product text diagnostics plus the decoded
+        # clipboard PNG. Synthetic wheel steps on Cocoa/WebKit targets are
+        # frequently inexact (fractional/page-sized), in which case the
+        # product must stop safely (Gap/ContentChanged -> partial choice)
+        # instead of guessing; that safe-stop outcome is asserted as such and
+        # the positive long-image extension stays Not tested (TEST.md 4.5)
+        # pending a real-device wheel step the harness cannot synthesise.
+        te_fixture = ROOT / "target" / "e2e-36-textedit.txt"
+        sa_fixture = ROOT / "target" / "e2e-36-safari.html"
+        write_textedit_fixture(te_fixture)
+        write_safari_fixture(sa_fixture)
+
+        def textedit_scroll_fraction():
+            """The TextEdit vertical scroller value (0.0 top .. 1.0 bottom)."""
+            tree = snapshot_tree("TextEdit")
+            values = [
+                str(node.get("value"))
+                for node in find_nodes(tree, role="scrollbar")
+            ]
+            return values
+
+        def setup_textedit_30():
+            try:
+                agent("close-app", "TextEdit", "--force")
+            except Exception:
+                pass
+            run(["open", str(te_fixture)])
+            wait_target_window("TextEdit", "e2e-36-textedit")
+            set_window_geometry("TextEdit", 200, 120, 1000, 700)
+            run(["open", "-a", "TextEdit"])
+            time.sleep(1.0)
+            # Land mid-document: a viewport near either end is mostly blank and
+            # therefore ambiguous (white rows match many displacements), which
+            # the verifier must refuse. Wheel toward the centre, verifying the
+            # vertical scroller fraction on every step.
+            if frontmost_process() != "TextEdit":
+                fail("TextEdit is not frontmost for the mid-document pre-scroll")
+            before = textedit_scroll_fraction()
+            agent("mouse-wheel", "--x", "700", "--y", "600", "--dy", "-6", "--headed")
+            time.sleep(0.6)
+            after = textedit_scroll_fraction()
+            vertical_index = None
+            for index, (old, new) in enumerate(zip(before, after)):
+                if old != new:
+                    vertical_index = index
+                    break
+            if vertical_index is None:
+                fail(f"a test wheel did not move the TextEdit scroller {before} -> {after}")
+            fraction = 0
+            for _ in range(60):
+                values = textedit_scroll_fraction()
+                if len(values) <= vertical_index:
+                    break
+                try:
+                    fraction = float(values[vertical_index])
+                except ValueError:
+                    break
+                if 0.3 <= fraction <= 0.6:
+                    break
+                direction = "-6" if fraction < 0.3 else "6"
+                agent(
+                    "mouse-wheel", "--x", "700", "--y", "600", "--dy", direction, "--headed"
+                )
+                time.sleep(0.25)
+            else:
+                fail("the TextEdit scroller never settled mid-document")
+            if not 0.3 <= fraction <= 0.6:
+                fail(f"the TextEdit viewport is not mid-document (scroller={fraction})")
+            time.sleep(1.0)
+
+        def setup_safari_31():
+            try:
+                agent("close-app", "Safari", "--force")
+            except Exception:
+                pass
+            run(["open", "-F", "-a", "Safari", str(sa_fixture)])
+            wait_target_window("Safari", "ArcShot36")
+            set_window_geometry("Safari", 100, 80, 1200, 800)
+            run(["open", "-a", "Safari"])
+            time.sleep(1.0)
+
+        def textedit_state():
+            tree = snapshot_tree("TextEdit")
+            nodes = find_nodes(tree, role="textfield")
+            return str(nodes[0].get("value") or "") if nodes else "<missing>"
+
+        def safari_state():
+            tree = snapshot_tree("Safari")
+            nodes = find_nodes(tree, native_id="WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD")
+            return str(nodes[0].get("value") or "") if nodes else "<missing>"
+
+        def textedit_double_ref():
+            tree = snapshot_tree("TextEdit")
+            nodes = find_nodes(tree, role="textfield", require_ref=True)
+            if not nodes:
+                fail("the TextEdit text view is not addressable for double-click")
+            return nodes[0]["ref_id"]
+
+        def safari_double_ref():
+            tree = snapshot_tree("Safari")
+            nodes = find_nodes(tree, role="scrollarea", require_ref=True)
+            if not nodes:
+                fail("the Safari scroll area is not addressable for double-click")
+            return nodes[0]["ref_id"]
+
+        def run_third_party(case: str, target_app: str, owner: str, setup, drag_from, drag_to, wheel_xy, state_fn, double_ref_fn):
+            setup()
+            def begin():
+                log_mark = len(read_log(log))
+                entry_mark, selection = begin_third_party_scroll(
+                    app, log, drag_from, drag_to, log_mark
+                )
+                target_line = wait_log_line(log, "scroll_target window_id=", 15.0, after=entry_mark)
+                if f"owner={owner}" not in target_line:
+                    fail(f"{case}: unexpected target identity {target_line!r}")
+                if frontmost_process() != target_app:
+                    fail(f"{case}: {target_app} is not frontmost during collection")
+                exclusion = wait_log_line(log, "scroll_exclusion_fixed", 15.0, after=entry_mark)
+                if "preview=" not in exclusion:
+                    fail(f"{case}: the fixed preview is not in the exclusion set")
+                return entry_mark, selection
+
+            def retired_stats(after: int):
+                line = wait_log_line(log, "scroll_input_retired", 10.0, after=after)
+                return {
+                    "scrolls": int(line.split("scrolls=", 1)[1].split(" ", 1)[0]),
+                    "clicks_blocked": int(
+                        line.split("clicks_blocked=", 1)[1].split(" ", 1)[0]
+                    ),
+                }
+
+            # Session A: slow wheel attempt (positive or safe-stop), click blocking.
+            # The target state is sampled before the session (the tap blocks
+            # clicks and scrolling never rewrites the document/address).
+            state_before = state_fn()
+            log_mark = len(read_log(log))
+            entry_mark, selection = begin()
+            # Click blocking: a raw click inside the selection never lands.
+            agent("mouse-click", "--xy", wheel_xy, "--headed")
+            time.sleep(1.0)
+            if state_fn() != state_before:
+                fail(f"{case}: a blocked click changed the target state")
+            def stitch_quiet(after: int, quiet: float = 1.5, limit: float = 10.0):
+                """Waits until extensions stop for `quiet` seconds (flush drains).
+
+                Idle frames are duplicates (pump noise), so quiescence is judged
+                by the extension count staying flat once frames are flowing.
+                """
+                previous = -1
+                silent_since = time.monotonic()
+                deadline = time.monotonic() + limit
+                while time.monotonic() < deadline:
+                    extended_now = count_log_after(log, "scroll_stitch extended", after)
+                    if extended_now != previous:
+                        previous = extended_now
+                        silent_since = time.monotonic()
+                    elif (
+                        time.monotonic() - silent_since >= quiet
+                        and count_log_after(log, "scroll_stitch duplicate", after) >= 1
+                    ):
+                        return
+                    time.sleep(0.2)
+
+            def max_bottom(after: int) -> int:
+                best = 0
+                for entry in read_log(log)[after:]:
+                    if "bottom=" in entry and "scroll_stitch" in entry:
+                        try:
+                            best = max(best, int(entry.split("bottom=", 1)[1].split(" ", 1)[0]))
+                        except (ValueError, IndexError):
+                            pass
+                return best
+
+            down_mark = len(read_log(log))
+            wheel_x, wheel_y = wheel_xy.split(",")
+            # One slow step down, then back: deeper histories develop periodic
+            # whitespace that the strict verifier rightly refuses as
+            # ambiguous, so the reverse leg stays shallow (one step each).
+            for _ in range(1):
+                agent("mouse-wheel", "--x", wheel_x, "--y", wheel_y, "--dy", "-6", "--headed")
+                time.sleep(0.6)
+            stitch_quiet(down_mark)
+            extended_down = count_log_after(log, "scroll_stitch extended", down_mark)
+            bottom_down = max_bottom(down_mark)
+            up_mark = len(read_log(log))
+            for _ in range(1):
+                agent("mouse-wheel", "--x", wheel_x, "--y", wheel_y, "--dy", "6", "--headed")
+                time.sleep(0.6)
+            stitch_quiet(up_mark)
+            extended_up = count_log_after(log, "scroll_stitch extended", up_mark)
+            refused = count_log_after(log, "scroll_stitch_refused", entry_mark)
+            duplicates = count_log_after(log, "scroll_stitch duplicate", up_mark)
+            bottom = max_bottom(entry_mark)
+            if extended_down + extended_up >= 1:
+                # Reverse de-duplication: the way back must visit verified
+                # history (duplicates) and must not grow the document
+                # downward (an upward extension past the start keeps bottom).
+                if duplicates < 1 or bottom > bottom_down:
+                    fail(f"{case}: reverse pass was not de-duplicated")
+                before = len(read_log(log))
+                published = False
+                for _attempt in range(6):
+                    agent("press", "return", "--headed")
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline:
+                        if count_log_after(log, "output_publish", before) > 0:
+                            published = True
+                            break
+                        time.sleep(0.2)
+                    if published:
+                        break
+                if not published:
+                    fail(f"{case}: Enter never published after mark")
+                metrics = decode_clipboard_expect(selection)
+                if metrics["height"] != bottom:
+                    fail(
+                        f"{case}: decoded height {metrics['height']} != verified bottom {bottom}"
+                    )
+                scroll_outcome = "extended"
+            else:
+                if refused < 1:
+                    fail(f"{case}: slow scroll neither extended nor stopped safely")
+                wait_log(log, "scroll_partial_choice available=true", 5.0, after=entry_mark)
+                if any("output_publish" in entry for entry in read_log(log)[entry_mark:]):
+                    fail(f"{case}: unverifiable frames were output without a choice")
+                abandon = wait_node(
+                    app,
+                    lambda tree: (
+                        find_nodes(
+                            tree, native_id="arcshot.scroll.partial.abandon", require_ref=True
+                        )
+                        or [None]
+                    )[0],
+                    10.0,
+                )
+                agent("click", abandon["ref_id"])
+                wait_log(log, "action=AbandonScrollPartial", 10.0, after=down_mark)
+                if count_log_after(log, "output_publish", entry_mark) != 0:
+                    fail(f"{case}: abandoning the safe stop produced output")
+                time.sleep(0.5)
+                expect_selection_returned(app)
+                scroll_outcome = "safe_stop"
+            stats = retired_stats(entry_mark)
+            if stats["clicks_blocked"] < 1:
+                fail(f"{case}: the click was never blocked {stats}")
+            if stats["scrolls"] < 1:
+                fail(f"{case}: raw scroll never reached the target {stats}")
+            # Session B: no-scroll single frame finished with Enter.
+            log_mark = len(read_log(log))
+            entry_mark, selection = begin()
+            before = len(read_log(log))
+            published = False
+            for _attempt in range(6):
+                agent("press", "return", "--headed")
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    if count_log_after(log, "output_publish", before) > 0:
+                        published = True
+                        break
+                    time.sleep(0.2)
+                if published:
+                    break
+            if not published:
+                fail(f"{case}: Enter never published the single frame")
+            wait_log(
+                log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=entry_mark
+            )
+            metrics = decode_clipboard_expect(selection)
+            if metrics["height"] != int(selection[3] * 2):
+                fail(f"{case}: single-frame PNG height {metrics['height']} is not the viewport")
+            if retired_stats(entry_mark)["scrolls"] != 0:
+                fail(f"{case}: the no-scroll frame counted raw scrolls")
+            single_png = f"{metrics['width']}x{metrics['height']}/sRGB/sha={metrics['sha256'][:12]}"
+            # Session C: double-click completion.
+            log_mark = len(read_log(log))
+            entry_mark, selection = begin()
+            agent("double-click", double_ref_fn(), "--headed")
+            wait_log(log, "scroll_tap_command", 5.0, after=entry_mark)
+            wait_log(log, "output_publish target=Clipboard", 10.0, after=entry_mark)
+            decode_clipboard_expect(selection)
+            # Session D: Esc abandons and returns the pre-scroll selection.
+            log_mark = len(read_log(log))
+            entry_mark, selection = begin()
+            before = len(read_log(log))
+            cancelled = False
+            for _attempt in range(6):
+                agent("press", "escape", "--headed")
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    if count_log_after(
+                        log, "from=Collecting to=Inactive action=CancelScroll", before
+                    ) > 0:
+                        cancelled = True
+                        break
+                    time.sleep(0.2)
+                if cancelled:
+                    break
+            if not cancelled:
+                fail(f"{case}: Esc never produced CancelScroll")
+            if any("output_publish" in entry for entry in read_log(log)[entry_mark:]):
+                fail(f"{case}: Esc produced output")
+            expect_selection_returned(app)
+            # Leave Resident for the next case.
+            root = wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, role="group", name="ArcShot 截图覆盖层") or [None]
+                )[0],
+                10.0,
+            )
+            cancel = find_nodes(root, native_id="arcshot.overlay.cancel", require_ref=True)
+            agent("click", cancel[0]["ref_id"])
+            wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0)
+            return scroll_outcome, single_png
+
+        try:
+            outcome_30, png_30 = run_third_party(
+                "MAC-E2E-30",
+                "TextEdit",
+                "com.apple.TextEdit",
+                setup_textedit_30,
+                "400,350",
+                "1000,650",
+                "700,600",
+                textedit_state,
+                textedit_double_ref,
+            )
+        finally:
+            try:
+                agent("close-app", "TextEdit", "--force")
+            except Exception:
+                pass
+        note(
+            f"mac_e2e_30=pass target=TextEdit scroll={outcome_30} "
+            f"click_blocked=true raw_scroll=true single={png_30} "
+            f"double_click=true esc=true fixture={TEXTEDIT_FIXTURE_VERSION}"
+        )
+        try:
+            outcome_31, png_31 = run_third_party(
+                "MAC-E2E-31",
+                "Safari",
+                "com.apple.Safari",
+                setup_safari_31,
+                "300,350",
+                "900,650",
+                "600,600",
+                safari_state,
+                safari_double_ref,
+            )
+        finally:
+            try:
+                agent("close-app", "Safari", "--force")
+            except Exception:
+                pass
+        note(
+            f"mac_e2e_31=pass target=Safari scroll={outcome_31} "
+            f"click_blocked=true raw_scroll=true single={png_31} "
+            f"double_click=true esc=true fixture={SAFARI_FIXTURE_VERSION} offline=file"
+        )
+
         # MAC-E2E-15: the 完成音效 preference toggles through AX and is persisted.
         original_sound = next(
             line.split("completion_sound=", 1)[1].split(" ", 1)[0]
@@ -2136,7 +2751,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=28")
+    note(f"mac_e2e=pass configuration={configuration} log={log.relative_to(ROOT)} cases=30")
     return 0
 
 
