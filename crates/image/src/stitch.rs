@@ -291,28 +291,14 @@ impl StitchBuilder {
         self.check_extension(new_height)?;
         let old_height =
             u32::try_from(self.bottom - self.top).map_err(|_| StitchRefusal::ResourceLimit)?;
-        let mut surface = vec![
-            0_u8;
-            self.row_bytes
-                .checked_mul(new_height as usize)
-                .ok_or(StitchRefusal::ResourceLimit)?
-        ];
-        let mut hashes = vec![0_u64; new_height as usize];
-        let old_offset = (self.top - new_top) as usize;
-        surface[old_offset * self.row_bytes..old_offset * self.row_bytes + self.surface.len()]
-            .copy_from_slice(&self.surface);
-        hashes[old_offset..old_offset + self.hashes.len()].copy_from_slice(&self.hashes);
-        let frame_offset = (s - new_top) as usize;
-        for row in 0..viewport as usize {
-            let start = row * frame.stride();
-            let target = (frame_offset + row) * self.row_bytes;
-            surface[target..target + self.row_bytes]
-                .copy_from_slice(&frame.bgra()[start..start + self.row_bytes]);
-            hashes[frame_offset + row] = frame_hashes[row];
-        }
+        // Grow the verified surface in place instead of rebuilding a fresh
+        // buffer for every extension: a new allocation per frame both copies
+        // the whole document each time and makes the allocator hold every
+        // intermediate size, which is what pushed a 24 M document to several
+        // GiB of physical footprint. Reserving geometrically bounds both the
+        // copies and the live surfaces to the document itself.
+        self.extend_surface(new_height, new_top, s, viewport, frame, &frame_hashes)?;
         let added = new_height - old_height;
-        self.surface = surface;
-        self.hashes = hashes;
         self.top = new_top;
         self.bottom = new_bottom;
         self.extensions += 1;
@@ -324,6 +310,12 @@ impl StitchBuilder {
     }
 
     /// Returns the verified document as one packed opaque BGRA frame.
+    ///
+    /// The copy is sized to the surface capacity the builder already grows
+    /// geometrically, not to the exact document height. A caller that keeps the
+    /// latest verified frame (the session does) then re-uses a handful of
+    /// allocation sizes instead of allocating a slightly larger buffer for
+    /// every single frame, which is what bloated the observed footprint.
     ///
     /// # Errors
     /// Returns [`StitchRefusal::ResourceLimit`] when the checked construction fails.
@@ -339,20 +331,20 @@ impl StitchBuilder {
             self.scale,
         )
         .map_err(|_| StitchRefusal::ResourceLimit)?;
-        CapturedFrame::try_from_srgb_bgra(
-            geometry,
-            self.width,
-            height,
-            self.row_bytes,
-            self.surface.clone(),
-        )
-        .map_err(|error| match error {
-            FrameError::Budget
-            | FrameError::Dimensions
-            | FrameError::Stride
-            | FrameError::ByteLength => StitchRefusal::ResourceLimit,
-            FrameError::Geometry | FrameError::Alpha => StitchRefusal::Geometry,
-        })
+        let mut bytes = Vec::new();
+        let capacity = self.surface.capacity().max(self.surface.len());
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| StitchRefusal::ResourceLimit)?;
+        bytes.extend_from_slice(&self.surface);
+        CapturedFrame::try_from_srgb_bgra(geometry, self.width, height, self.row_bytes, bytes)
+            .map_err(|error| match error {
+                FrameError::Budget
+                | FrameError::Dimensions
+                | FrameError::Stride
+                | FrameError::ByteLength => StitchRefusal::ResourceLimit,
+                FrameError::Geometry | FrameError::Alpha => StitchRefusal::Geometry,
+            })
     }
 
     /// Builds a deterministic nearest-neighbour thumbnail within `max_pixels`.
@@ -441,6 +433,71 @@ impl StitchBuilder {
         self.added_rows
     }
 
+    /// Appends or prepends the new rows of one verified extension in place.
+    ///
+    /// The surface keeps every row in content order; an upward extension shifts
+    /// the verified rows to their new offset and writes the frame above them.
+    /// Capacity grows geometrically up to the document budget, so repeated
+    /// extensions never allocate a fresh full-size buffer.
+    fn extend_surface(
+        &mut self,
+        new_height: u32,
+        new_top: i64,
+        placement: i64,
+        viewport: u32,
+        frame: &CapturedFrame,
+        frame_hashes: &[u64],
+    ) -> Result<(), StitchRefusal> {
+        let old_rows =
+            usize::try_from(self.bottom - self.top).map_err(|_| StitchRefusal::ResourceLimit)?;
+        let new_rows = new_height as usize;
+        let new_len = self
+            .row_bytes
+            .checked_mul(new_rows)
+            .ok_or(StitchRefusal::ResourceLimit)?;
+        self.reserve_rows(new_height)?;
+        self.surface.resize(new_len, 0);
+        self.hashes.resize(new_rows, 0);
+        let shift_rows =
+            usize::try_from(self.top - new_top).map_err(|_| StitchRefusal::ResourceLimit)?;
+        if shift_rows > 0 {
+            self.surface
+                .copy_within(0..old_rows * self.row_bytes, shift_rows * self.row_bytes);
+            self.hashes.copy_within(0..old_rows, shift_rows);
+        }
+        let frame_offset =
+            usize::try_from(placement - new_top).map_err(|_| StitchRefusal::ResourceLimit)?;
+        for (row, &hash) in frame_hashes.iter().enumerate().take(viewport as usize) {
+            let start = row * frame.stride();
+            let target = (frame_offset + row) * self.row_bytes;
+            self.surface[target..target + self.row_bytes]
+                .copy_from_slice(&frame.bgra()[start..start + self.row_bytes]);
+            self.hashes[frame_offset + row] = hash;
+        }
+        Ok(())
+    }
+
+    /// Reserves room for `rows` verified rows, doubling up to the budget.
+    fn reserve_rows(&mut self, rows: u32) -> Result<(), StitchRefusal> {
+        let needed = self
+            .row_bytes
+            .checked_mul(rows as usize)
+            .ok_or(StitchRefusal::ResourceLimit)?;
+        if self.surface.capacity() >= needed {
+            return Ok(());
+        }
+        let limit = document_surface_limit(self.width, self.row_bytes);
+        let target = needed.saturating_mul(2).min(limit.max(needed)).max(needed);
+        let additional = target - self.surface.len();
+        let needed_additional = needed - self.surface.len();
+        if self.surface.try_reserve_exact(additional).is_err()
+            && self.surface.try_reserve_exact(needed_additional).is_err()
+        {
+            return Err(StitchRefusal::ResourceLimit);
+        }
+        Ok(())
+    }
+
     fn check_extension(&self, new_height: u32) -> Result<(), StitchRefusal> {
         if new_height > MAX_EDGE {
             return Err(StitchRefusal::ResourceLimit);
@@ -451,6 +508,13 @@ impl StitchBuilder {
             .then_some(())
             .ok_or(StitchRefusal::ResourceLimit)
     }
+}
+
+/// Largest packed surface one verified document may hold, in bytes.
+fn document_surface_limit(width: u32, row_bytes: usize) -> usize {
+    let rows_by_edge = MAX_EDGE as usize;
+    let rows_by_pixels = MAX_PIXELS / (width as usize).max(1);
+    rows_by_edge.min(rows_by_pixels).saturating_mul(row_bytes)
 }
 
 fn exact_rows_match(
@@ -886,6 +950,33 @@ mod tests {
         let geometry = ScreenGeometry::try_new(1, 0.0, 0.0, 0.5, f64::from(height) / 2.0, 2.0)
             .expect("test geometry");
         CapturedFrame::try_from_srgb_bgra(geometry, 1, height, 4, bgra).expect("test frame")
+    }
+
+    #[test]
+    fn image_limit_38_02_alternating_extensions_keep_content_order_in_place() {
+        // The verified surface grows in place now, so upward extensions shift
+        // the existing rows instead of rebuilding the buffer. Alternating up and
+        // down extensions must still keep every row in content order exactly once.
+        let origin = make_frame(&[0, 1, 2, 3]);
+        let mut builder = StitchBuilder::new(&origin).expect("origin");
+        builder.submit(&make_frame(&[2, 3, 4, 5])).expect("down");
+        builder.submit(&make_frame(&[254, 255, 0, 1])).expect("up");
+        assert_eq!(
+            document_rows(&builder.current_frame().expect("frame")),
+            vec![254, 255, 0, 1, 2, 3, 4, 5]
+        );
+        builder.submit(&make_frame(&[4, 5, 6, 7])).expect("down");
+        builder
+            .submit(&make_frame(&[252, 253, 254, 255]))
+            .expect("up");
+        assert_eq!(
+            document_rows(&builder.current_frame().expect("frame")),
+            vec![252, 253, 254, 255, 0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(builder.top(), -4);
+        assert_eq!(builder.bottom(), 8);
+        assert_eq!(builder.extensions(), 4);
+        assert_eq!(builder.added_rows(), 8);
     }
 
     #[test]

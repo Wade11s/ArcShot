@@ -188,7 +188,7 @@ outcome=Applied`、`login_item_status state=Disabled source=verify`），随后�
 
 ## Not tested
 
-- **`physical` 与 `full` 档的 17 + 1 个单元**：未运行。它们会冻结内置屏、出现自有窗口或发送真实键鼠，
+- **`physical` 与 `full` 档的 17 + 1 个单元**：当时未运行（已由下文“`physical` / `full` 档实机通过”一节取代）。它们会冻结内置屏、出现自有窗口或发送真实键鼠，
   而使用者正在同一台机器上工作。拆分重构对这些单元的运行时行为（作用域、提升到 `main()` 外层的
   `drag_doc`/`activate_tool`、`density_prefs` 的前置退出）只经过静态检查（符号解析、逐行 `diff -w`），
   **没有实机证据**。完整运行 `mac_e2e=pass … cases=37` 之前，不得把本分支视为已回归。新增的
@@ -197,3 +197,57 @@ outcome=Applied`、`login_item_status state=Disabled source=verify`），随后�
 - **CI `e2e` 作业**：未触发。`gh api repos/Wade11s/ArcShot/actions/runners` 当前没有任何已注册的
   runner，因此手动派发也只会排队；`needs: native` 的串行假设因此未在 CI 上验证。
 - **产品侧 AX 接缝**（悬停选项与选区）：不在本票范围，未实现。
+
+## `physical` / `full` 档实机通过（#38 候选，Debug）
+
+早前记录里的“17 + 1 个单元未运行”已被本轮的完整运行取代。候选产品代码为
+`50719ac`（Release 侧同源，见 `docs/validation/38-resource-budget.md`），Debug bundle
+由 `scripts/check-all.sh` 重建；E2E 脚本为同一提交附带的前置加固（见下）。
+
+```sh
+scripts/e2e-agent-desktop.py --no-build     # 完整矩阵，Debug
+```
+
+结果：退出码 0，`mac_e2e=pass configuration=debug log=target/e2e-agent-desktop-debug.log
+cases=37`。完整运行两次通过：`e2e_timing total_s=318.8 agent_desktop_calls=624`
+（`target/e2e-full-60-run7.log`，脚本 `6f3c20f`，含“三次稳定读数”的前置）与 `total_s=320.6
+agent_desktop_calls=622`（`target/e2e-full-60-run6.log`，前一版脚本的两次读数前置）。
+20 个单元、37 条用例
+全部在**一次运行内**通过，包含 `physical` 与 `full` 两档（冻结内置屏、真实键鼠、
+TextEdit/Safari 第三方目标）。
+
+| ID | 步骤 | 预期 | 实际 | 结果 |
+| --- | --- | --- | --- | --- |
+| FULL-RUN-60-01 | `scripts/e2e-agent-desktop.py --no-build` | `mac_e2e=pass … cases=37` | exit 0，320.6 s，622 次 `agent-desktop` 调用 | Pass |
+| MAC-E2E-26 | 同轮 `scroll_fixture` 单元的 Esc 放弃分支 | 每次捕获只上报一条 `capture_wake_window_submit_us` | `mac_e2e_26_esc=pass … wake_reported=1` | Pass |
+| MAC-E2E-34 | `save_panel` 单元的保存/剪贴板像素断言 | 解码 PNG 与选区等大、sRGB、非均匀 | `mac_e2e_34_save=pass pixels=1200x700 sRGB=true clipboard_unchanged=true file_removed=true` | Pass |
+
+### 为可重复运行做的前置加固
+
+本轮把三类“取决于当时桌面”的前置变成确定性前置，断言本身没有放宽：
+
+1. **区域捕捉的像素质断言**（MAC-E2E-32/34）：`open_textedit_backdrop()` 在该单元内用
+   固定文案夹具在选区下铺一层可复现文本，结束后 `close_textedit_backdrop()` 关闭。
+   此前这些用例解码“用户当时桌面上有什么”，只要覆盖窗口是纯色（实测：浏览器
+   New Tab 占满屏幕，解码得到 1 个不同行）就会把前置失败当成像素失败。
+2. **TextEdit 滚轮余速**（MAC-E2E-30）：中途定位后改为等两次相隔 0.6 s 的滚动条读数
+   相同再采样，避免把余速漂移误判成“被拦截的点击改变了目标状态”。
+3. **Safari 冷启动**（MAC-E2E-31）：强制关闭后先等旧实例消失、再单独启动 Safari、
+   等窗口出现后才用 `open -F` 交付 `file://` 夹具，窗口等待上限 25 s。此前冷启动
+   偶发拿到空窗口列表。
+
+这些加固之前，同一矩阵在本轮先后因下列**前置**原因中止（均非产品断言失败，
+原始日志保留在 `target/e2e-full-60-run1..run4.log`）：Safari 夹具窗口未出现、
+`scroll_stitch_refused` 等待超时（夹具原子跳变的物理按键未送达）、第三方
+CodexBar 浮层出现在屏幕上、上述纯色桌面导致的行多样性断言、TextEdit 余速漂移。
+每次中止后先以 `--only <unit> --no-build` 重跑该单元并通过，最终得到上面这次
+一次性完整通过。
+
+## Not tested（更新）
+
+- **Release 配置的完整矩阵**：本轮完整运行使用 Debug bundle；Release 的
+  `--release` 全矩阵未运行（Release 侧 T-04 与启动冒烟另见 #38 记录）。
+- **CI `e2e` 作业**：仍未触发；本机没有注册 runner，`needs: native` 串行假设
+  只在本地串行运行中成立。
+- **产品侧 AX 接缝**（悬停选项与选区）：仍不在本票范围；上文的前置加固是测试
+  侧确定性，不改变“`--headed` 坐标拖拽不算指针手势验收证据”的结论。

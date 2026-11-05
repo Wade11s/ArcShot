@@ -457,6 +457,19 @@ app 的纯选择分类与控制窗 AX 按钮、自有 GPUI 精确像素夹具的
 
 实测记录见 `docs/validation/59-24m-stitch.md`。
 
+### #38 的稳定自动化入口
+
+最大长图资源预算与 T-04 门槛：拼接表面在原位几何增长，验证时间戳按会话归零。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `crates/image/tests/stitch_budget.rs` | IMAGE-LIMIT-38-01：合成 24,000,000 像素文档时破纪录大分配 ≤12 次、累计 ≤3 倍文档字节（旧实现 123 次，已确认红→绿） | 真实 SCK 帧序列、macOS 常驻页行为 |
+| `crates/image/src/stitch.rs`（模块内单元测试） | IMAGE-LIMIT-38-02：下→上→下→上交替扩展后内容顺序每行恰好一次 | 真实长会话内存 |
+| `scripts/perf-measure.py`、`scripts/perf-gate.sh` | `--metrics` 新增 `scroll_start`（每次独立进入滚动一条 `scroll_start_us`）；PERF-SCROLL-START、PERF-REGION/FRAME/EVENT-PREVIEW、PERF-EXPORT-24M、RESOURCE-MAX 按场景分开测量 | 单日志全矩阵判定（会混合不同场景的样本） |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-26 的 Esc 放弃分支断言每次捕获只上报一条 `capture_wake_window_submit_us`（`wake_reported=1`） | 迟到结果注入、目标关闭复现 |
+
+实测记录见 `docs/validation/38-resource-budget.md`。
+
 新增子用例必须记录稳定 ID、前置、步骤、预期与实际，不通过删除规格边界来减少
 测试。模拟成功不能证明权限、焦点、IME、原生捕获或真实资源生命周期成功。
 
@@ -565,7 +578,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
 | MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `drag --from-xy 400,300 --to-xy 700,500 --headed` 作为前置创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；拖拽后出现 `capture_edit action=SelectRegion` 与 `selection=Some([…])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared`；`--headed` 拖拽只是选区前置，不作为指针手势的验收证据 |
 | MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
-| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `completion_preview shown`，会话保持冻结，固定停留后 `completion_preview_expired`；`scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址 | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
+| MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `completion_preview shown`，会话保持冻结，固定停留后 `completion_preview_expired`；`scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址；该次捕获只上报一条 `capture_wake_window_submit_us`（`wake_reported=1`，PERF-REGION 样本不得按二次呈现重新计时） | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
 | MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 并出现 `completion_preview shown`，固定停留后 `completion_preview_expired` | 三秒完成预览的视觉动画与悬停计时、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
 | MAC-E2E-28 | 由脚本启动同一夹具；选区内慢速下滚 2 次扩展已验证历史，按键 `j` 触发夹具原子跳变 +1000 行造成无重叠 Gap 停止；AX 读控制窗选择；分别点击放弃与接受 | `scroll_stitch_refused … gap` 与 `scroll_phase … to=AwaitingPartialChoice`；`scroll_partial_choice available=true … pixels=460x424`；点击前无 `output_publish`；`arcshot.scroll.partial.use` / `.abandon` 均可寻址且 `arcshot.scroll.hint` 含“不完整”；放弃出现 `scroll_partial_choice action=abandon` 与 `action=AbandonScrollPartial`，覆盖层与选区返回且无输出；接受出现 `action=accept` 后才 `output_publish target=Clipboard`，随后按 #35 共享后处理出现 `completion_preview shown`，固定停留后 `completion_preview_expired` 与 `CancelAttempt` | 其余负例（动态/固定表头/重复低纹理/横向·对角·嵌套/目标·权限·输入保护失效）的实机通过仅由注入式用例证明安全处理；真实 TCC 切换、TextEdit/Safari、原生故障注入与视觉观感 |
 | MAC-E2E-29 | 由脚本启动自有夹具；进入滚动采集后直接 Enter 完成可信单帧，断言 `completion_preview shown`，再 AX 点击 `arcshot.completion.preview` 进入共享文档；AX 点击仅长图模式存在的 `arcshot.overlay.completion.add_rectangle` 添加一个 Rectangle；AX 点击 `arcshot.overlay.finish` 重新完成。随后再进行一轮：完成→点击缩略图→`press escape --headed` 取消 | 第一次出现 `a11y_action=arcshot.completion.preview action=Click`、`completion_annotation_opened document=WxH zoom=…` 与恢复的 `group "ArcShot 截图覆盖层"`；`capture_edit action=AddDefaultRectangle … annotations=1`；第二次 `output_publish target=Clipboard … pixels=<整 crop 宽>x<整 crop 高> annotations=1`，随后 `from=Frozen to=Resident action=OutputCompleted`；取消轮出现 `from=Frozen to=Resident action=CancelAttempt` 且真实剪贴板 PNG 逐字节不变 | 带滚动的整图扩展（由 #33 的像素真值与本票 IMAGE-COMPOSE-35 覆盖）、悬停不延长、动画观感、TextEdit/Safari 第三方目标 |
@@ -838,11 +851,14 @@ scripts/resource-footprint.sh <arcshot-pid> 0.1 <seconds>
 自有 GPUI 夹具，采集 `interact_commit_us`、`capture_wake_window_submit_us`、
 `scroll_start_us`、`frame_preview_us`、`event_preview_us`、`capture_request_us`、
 `scroll_stitch_verify_us`、`output_encode_us`、`clipboard_accept_us` 等文本诊断，
-再由 `perf-gate.sh` 计算 n/median/nearest-rank p95/max 并判定门槛。资源采样与
-性能采样分开：RSS 用 `ps` 以 100 ms 轮询，physical footprint 用 macOS
-`footprint` 交叉检查。所有原生门禁运行在 `mkdir /tmp/arcshot-native-gate.lock`
-目录锁下串行执行。注意驱动每次运行会清空日志，需要保留原样本时先复制日志或
-用 `--log` 指定独立路径。
+再由 `perf-gate.sh` 计算 n/median/nearest-rank p95/max 并判定门槛。`--metrics`
+按场景分组（`region_sck`/`interact`/`clipboard_export`、`scroll`、`scroll_start`、
+`export_24m`）：一个日志里只能有一组场景，否则 `perf-gate.sh` 会把不同场景的
+样本混在一起（#38 实测：滚动取消的收尾样本会进入 PERF-REGION，24M 采集样本
+会进入 PERF-EVENT-PREVIEW）。资源采样与性能采样分开：RSS 用 `ps` 以 100 ms 轮询，
+physical footprint 用 macOS `footprint` 交叉检查。所有原生门禁运行在
+`mkdir /tmp/arcshot-native-gate.lock` 目录锁下串行执行。注意驱动每次运行会清空
+日志，需要保留原样本时先复制日志或用 `--log` 指定独立路径。
 
 24M 专用入口（#59，夹具几何见 `fixture_24m_args()`）：
 
@@ -870,17 +886,16 @@ Not tested，长采集的 event-preview 样本含长尾）；24M 门槛用只含
 | PERF-EXPORT-2M-38-01 | `output_encode_us`（≤2M 桶） | Pass（n=30，p95 43548 us） |
 | PERF-EXPORT-6M-38-01 | `output_encode_us`（≤6M 桶） | Pass（n=30，p95 59241 us） |
 | PERF-CLIPBOARD-38-01 | `clipboard_accept_us` | Pass（n=60，p95 609 us） |
-| PERF-SCROLL-START-38-01 | `scroll_start_us` | Not tested（n=1 < 30） |
-| PERF-EXPORT-24M-38-01 | `output_encode_us`（24M 桶） | Not tested（内嵌预览拼接拒绝，阻塞；历史记录） |
-| RESOURCE-MAX-38-01 | `resource-footprint.sh` | Not tested（依赖 PERF-EXPORT-24M；历史记录） |
+| PERF-SCROLL-START-38-01 | `scroll_start_us` | Pass（#38 修复后 n=30，median 335498 us，nearest-rank p95 356100 us，max 367714 us） |
+| PERF-EXPORT-24M-38-01 | `output_encode_us`（24M 桶） | Pass（#38 修复后 n=5，597610/597789/595516/594349/599819 us） |
+| RESOURCE-MAX-38-01 | `resource-footprint.sh` | Pass（#38 修复后观测 peak physical footprint 1593344 KiB = 1.52 GiB，`Malloc Large` 970 MB） |
 | PERF-EXPORT-24M-59-01 | `output_encode_us`（24M 桶） | Pass（n=5，median 662950 us，nearest-rank p95/max 789411 us） |
-| RESOURCE-MAX-59-01 | `resource-footprint.sh` | Fail（观测 peak physical footprint 3742720 KiB = 3.57 GiB > 2 GiB） |
+| RESOURCE-MAX-59-01 | `resource-footprint.sh` | Fail（观测 peak physical footprint 3742720 KiB = 3.57 GiB > 2 GiB；历史记录） |
 | RESOURCE-MAX-59-02 | 50 ms 节奏确认运行 | Not tested（第 3/5 次导出后中止） |
 
-PERF-EXPORT-24M 与 RESOURCE-MAX 已被 #59 解锁并实测：前者 Pass，后者 Fail
-（约 3.1 GiB `Malloc Large` 来自 24M 拼接的全尺寸表面副本，收窄属独立后续票）。
-24M 夹具几何与完整原始样本见 `docs/validation/59-24m-stitch.md`；#38 的阻塞
-诊断保留在 `docs/validation/38-perf-resource.md`。
+PERF-EXPORT-24M 与 RESOURCE-MAX 由 #59 解锁、由 #38 修复资源预算后在 1.52 GiB
+通过；两者的实测数值、场景划分与 Not tested 见 `docs/validation/38-resource-budget.md`，
+24M 夹具几何与 #59 的原始样本见 `docs/validation/59-24m-stitch.md`。
 
 性能与资源分开运行：`--no-sampler` 的性能运行给出 5 次导出耗时，资源运行
 单独采样 RSS（50 ms 目标节奏）并用 macOS `footprint` 与 kernel

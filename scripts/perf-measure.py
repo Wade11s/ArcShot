@@ -30,7 +30,14 @@ SELECTION_WIDTH_PHYSICAL = 1500
 MAX_DOCUMENT_HEIGHT = 24_000_000 // SELECTION_WIDTH_PHYSICAL
 
 TOOLS = ["select", "rectangle", "line", "arrow", "blur", "text"]
-ALL_METRICS = ["region_sck", "interact", "clipboard_export", "scroll", "export_24m"]
+ALL_METRICS = [
+    "region_sck",
+    "interact",
+    "clipboard_export",
+    "scroll",
+    "scroll_start",
+    "export_24m",
+]
 
 
 class Failure(Exception):
@@ -427,6 +434,39 @@ def measure_scroll(app: str, log: pathlib.Path, samples: int) -> None:
         stop(fixture)
 
 
+def measure_scroll_start(app: str, log: pathlib.Path, samples: int) -> None:
+    """Samples one independent Scroll entry per sample (PERF-SCROLL-START).
+
+    The first frame is covered by PERF-REGION, so each sample stops as soon as
+    the product reports "can scroll" (`scroll_start_us`), cancels back to the
+    pre-scroll selection and ends the region session before the next entry.
+    """
+    note(f"scroll_start: {samples} scroll entries")
+    fixture_log = ROOT / "target" / "perf-scroll-fixture.log"
+    fixture = start(ROOT / "target" / "release" / "arcshot-scroll-fixture", fixture_log)
+    try:
+        wait_log(fixture_log, "fixture_window", 10.0)
+        time.sleep(1.0)
+        for index in range(samples):
+            mark = enter_fixture_scroll(
+                app, log, drag_from=(620, 200), drag_to=(1000, 600)
+            )
+            wait_log(log, "scroll_start_us=", 20.0, after=mark)
+            press_until_log(
+                "escape", log, "from=Collecting to=Inactive action=CancelScroll",
+                timeout=5.0, after=mark,
+            )
+            wait_log(log, "scroll_input_retired", 10.0, after=mark)
+            press_until_log(
+                "escape", log, "from=Frozen to=Resident action=CancelAttempt",
+                timeout=5.0, after=mark,
+            )
+            if (index + 1) % 10 == 0:
+                note(f"  scroll_start sample {index + 1}/{samples}")
+    finally:
+        stop(fixture)
+
+
 def fixture_24m_args() -> list[str]:
     """The #59 24M fixture geometry: wider window, exact clamped range.
 
@@ -618,6 +658,8 @@ def main() -> int:
             )
         if "scroll" in metrics:
             measure_scroll(app_name, log, options.samples)
+        if "scroll_start" in metrics:
+            measure_scroll_start(app_name, log, options.samples)
         if "export_24m" in metrics:
             measure_export_24m(app_name, log, options.runs, sampler, process.pid)
     finally:
