@@ -20,7 +20,7 @@ E2E，以及 Debug/Release 两套完整 `scripts/check-all.sh`。
 - 实测实现/脚本 SHA：`2ff9b864bfbad7460e60155bc4f660dd772aedee`
   （`merge: align #34 partial-accept with the #35 completion preview`）。
   产品功能提交为 `4484a972cb706ce6dcbf877e774084598afc0735`；本证据文档是
-  后续纯文档提交 `9cadf26f04b6b20d7376bbf3ec5d0b9435f4c1b0`。
+  后续纯文档提交 `136f6bf`（前序文档提交 `9cadf26`）。
 - 时间：2026-11-05T00:35:00Z–2026-11-05T00:48:00Z（合并、Debug E2E 与
   Release E2E 依次完成）。
 - 构建配置：Debug 与 Release。Debug 为 `dev.arcshot.app.debug` / `ArcShot Debug`，
@@ -50,7 +50,7 @@ E2E，以及 Debug/Release 两套完整 `scripts/check-all.sh`。
   MAX_OFFSET=7400；#34 增加按键 `j` 的原子跳变 +1000 行）。像素真值由
   `fixture_pixel` 确定性函数计算。
 - 日志：`target/e2e-agent-desktop-debug.log`、
-  `target/e2e-agent-desktop-release.log`、`/tmp/35-check-all-merged.log`、
+  `target/e2e-agent-desktop-release.log`、`/tmp/35-check-all-final.log`、
   `/tmp/35-e2e-debug-final.log`、`/tmp/35-e2e-release-final.log`。日志是本地
   构建产物，不入库；本报告只保存文本/数值/hash 摘要。
 - 实测时产品源码、`scripts/` 与 `TEST.md` 与上述实现 SHA 完全一致。
