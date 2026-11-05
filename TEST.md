@@ -371,6 +371,23 @@ app 的纯选择分类与控制窗 AX 按钮、自有 GPUI 精确像素夹具的
 
 实测记录见 `docs/validation/34-scroll-partial-recovery.md`。
 
+### #36 的稳定自动化入口
+
+第三方目标（TextEdit 纯文本、Safari `file://` 静态页）只走已确认接缝：
+产品不新增捕获/输入路线（SCK display filter + Quartz tap），#36 只补齐
+两个非 ArcShot 目标的受控 E2E、夹具生成器与内存 PNG 解码断言。采集轮为
+一步一条慢行（`--dy -1`/`1`）：拼接器要求重叠占视口相当比例，快速合成
+步进只留几行重叠时产品按无法验证安全停止（走显式部分选择），不猜补。
+
+| 文件 | 稳定 ID 与覆盖 | 不覆盖 |
+| --- | --- | --- |
+| `scripts/e2e-agent-desktop.py` | 夹具 `textedit-36-v1`（400 行编号纯文本）与 `safari-36-v1`（400 行编号静态页、仅内联样式、禁止远端 token）；`write_textedit_fixture`/`write_safari_fixture`、`osascript` 窗口几何与前台采样、`read_clipboard_png`/`decode_png_metrics`（osascript PNGf 内存解码：IHDR/sRGB/alpha/尺寸/纹理行数）；`begin_third_party_scroll` 与目标形状 MAC-E2E-30/31：目标身份/前台/内侧预览、单击拦截、慢速双向滚动与反向去重、无滚动单帧 + Enter、双击完成、Esc 取消、PNGf/sRGB 输出 | 真机滚轮手感、三秒完成预览与长图标注（#37）、动态内容/固定表头/低纹理等负面场景 |
+| `crates/image/src/stitch.rs` | 唯一位移验证新增最小可靠重叠（≥1/4 视口）：帧边缘的空白行与历史底部空白行的 1–2 行重合不再把唯一的大重叠误判为歧义；`tiny_uniform_edge_overlap_does_not_make_a_unique_extension_ambiguous` 回归 | 任意应用兼容、动态内容 |
+
+窗口几何经 System Events 固定并回读（`agent-desktop` 对后台窗口的 `list-windows` 界限过期不可用，见 §4.5）；滚动轮轴点均置于居中控制窗（380×180，y 388–568）之下（y 600），拖拽尾点在目标窗口内。Safari 以 `open -a Safari <file>` 打开（裸 `open` 会投递给默认浏览器）；`osascript` 剪贴板 PNGf 绕过失效的 `clipboard-get` helper，只存文本/数值/hash，不落盘截图。
+
+实测记录见 `docs/validation/36-third-party-scroll.md`。
+
 ### #35 的稳定自动化入口
 
 完成预览、长图标注与整图输出只走已确认接缝：core 的成功后处理（真实复制成功才
@@ -521,6 +538,8 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 并出现 `completion_preview shown`，固定停留后 `completion_preview_expired` | 三秒完成预览的视觉动画与悬停计时、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
 | MAC-E2E-28 | 由脚本启动同一夹具；选区内慢速下滚 2 次扩展已验证历史，按键 `j` 触发夹具原子跳变 +1000 行造成无重叠 Gap 停止；AX 读控制窗选择；分别点击放弃与接受 | `scroll_stitch_refused … gap` 与 `scroll_phase … to=AwaitingPartialChoice`；`scroll_partial_choice available=true … pixels=460x424`；点击前无 `output_publish`；`arcshot.scroll.partial.use` / `.abandon` 均可寻址且 `arcshot.scroll.hint` 含“不完整”；放弃出现 `scroll_partial_choice action=abandon` 与 `action=AbandonScrollPartial`，覆盖层与选区返回且无输出；接受出现 `action=accept` 后才 `output_publish target=Clipboard`，随后按 #35 共享后处理出现 `completion_preview shown`，固定停留后 `completion_preview_expired` 与 `CancelAttempt` | 其余负例（动态/固定表头/重复低纹理/横向·对角·嵌套/目标·权限·输入保护失效）的实机通过仅由注入式用例证明安全处理；真实 TCC 切换、TextEdit/Safari、原生故障注入与视觉观感 |
 | MAC-E2E-29 | 由脚本启动自有夹具；进入滚动采集后直接 Enter 完成可信单帧，断言 `completion_preview shown`，再 AX 点击 `arcshot.completion.preview` 进入共享文档；AX 点击仅长图模式存在的 `arcshot.overlay.completion.add_rectangle` 添加一个 Rectangle；AX 点击 `arcshot.overlay.finish` 重新完成。随后再进行一轮：完成→点击缩略图→`press escape --headed` 取消 | 第一次出现 `a11y_action=arcshot.completion.preview action=Click`、`completion_annotation_opened document=WxH zoom=…` 与恢复的 `group "ArcShot 截图覆盖层"`；`capture_edit action=AddDefaultRectangle … annotations=1`；第二次 `output_publish target=Clipboard … pixels=<整 crop 宽>x<整 crop 高> annotations=1`，随后 `from=Frozen to=Resident action=OutputCompleted`；取消轮出现 `from=Frozen to=Resident action=CancelAttempt` 且真实剪贴板 PNG 逐字节不变 | 带滚动的整图扩展（由 #33 的像素真值与本票 IMAGE-COMPOSE-35 覆盖）、悬停不延长、动画观感、TextEdit/Safari 第三方目标 |
+| MAC-E2E-30 | TextEdit 固定几何纯文本（`textedit-36-v1`，System Events 固定 `200,120 1000x700`，预滚到文档中部）；开始截图后 `--headed` 拖拽建内侧选区（`400,350→1000,650`），AX 激活滚动入口；采集中点击选区、慢速滚 1 下 1 上、Enter、双击、Esc 分别验证 | `scroll_target owner=com.apple.TextEdit` 与帧 `[200,120,1000,700]`；`scroll_preview placed=inner` 且预览可寻址并在 `scroll_exclusion_fixed` 排除集中；采集中前台为 TextEdit；点击后滚动条不变且退役 `clicks_blocked≥1`；慢速下滚出现 `scroll_stitch extended`（`bottom` 增长）后上滚出现 `scroll_stitch duplicate` 且扩展数不增；无滚动 Enter 与双击各一次 Clipboard 输出，内存 PNG 解码为选区物理宽 `1200`、`sRGB`、全不透明且高度等于已验证底（单帧 `600`）；Esc 放弃且选区返回、无输出 | 真机滚轮手感、三秒完成预览与长图标注（#37）、视觉观感、IME |
+| MAC-E2E-31 | Safari `file://` 静态页（`safari-36-v1`，无远端资源，System Events 固定 `100,80 1200x800`）；同上选区（`300,350→900,650`）与流程，滚轮轴点 `600,600` | `scroll_target owner=com.apple.Safari`；`scroll_preview placed=inner` 且预览可寻址并在排除集中；地址栏仍为 `file://` 且前台为 Safari；点击不改地址且退役 `clicks_blocked≥1`；慢速双向滚动扩展与反向去重（同 MAC-E2E-30）；无滚动 Enter、双击（滚动区双击）各一次 sRGB PNG 解码（`1200×600` 单帧）；Esc 放弃回原选区 | 动态内容、联网行为（夹具无远端、未启 HTTP 服务）、视觉观感 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release]`：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -622,6 +641,15 @@ agent-desktop press escape --headed
   控制窗与已验证预览保留、未验证队列清空；无已验证结果时写
   `available=false` 并直接返回覆盖层（只放弃）。夹具按键 `j` 的原子跳变写
   `fixture_jump offset_points=…`，供 MAC-E2E-28 的 Gap 受控停止。
+- 已落地（#36）：第三方目标的受控滚动 E2E 接缝。窗口几何经 System Events
+  固定并回读：`agent-desktop list-windows` 对后台窗口返回过期界限（实测前台回
+  正确值、切后台后为小尺寸负坐标），故几何与前台断言一律用 System Events；
+  `open -a Safari <file>` 打开 Safari 夹具（裸 `open` 投默认浏览器）；剪贴板
+  PNGf 经 osascript 内存解码（`agent-desktop clipboard-get` 在本机缺 helper
+  失效），只记文本/数值/hash、不落盘。拼接器新增最小可靠重叠（≥1/4 视口），
+  修复帧边缘空白行与历史底部空白行的 1–2 行重合把唯一大重叠误判为歧义的
+  实际缺陷；TextEdit/Safari 各以一步一条慢行完成启动、慢速双向、反向去重、
+  无滚动单帧、Enter、双击、Esc、点击拦截与 PNG 输出（MAC-E2E-30/31）。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
@@ -668,13 +696,13 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分：冻结/取消与菜单/热键见 §4.3；选区拖动、八向调整、重选与 `Cmd+Z` 只有指针/键盘手势，控制点无 AX 节点，保持 Not tested |
 | MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分：五个工具与矩形/直线/箭头样式选项、模糊三档可 AX 驱动；绘制、对象命中与端点拖动仍无 AX 节点 |
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 否：文本编辑尚未实现；IME 候选窗另属 §4.4 |
-| MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 未实测：目标应用侧滚动可由 `agent-desktop scroll`/`press` 投递，产品侧结果仍只能由日志证明 |
-| MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 否：浮层尚未实现，落地时须补 AX 标注 |
-| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分：自有 GPUI 夹具上 MAC-E2E-26 验证了准备→输入保护→可信首帧→采集→Enter 完成/Esc 放弃、单击拦截、原始滚动放行、tap 计数器与清理；双击完成与全局热键重启只有注入式门缝测试（APP-EFFECT-42～44、CORE-SESSION-56），真实物理双击/热键重启仍 **Not tested** |
+| MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 部分（#36）：MAC-E2E-30/31 在两第三方目标各完成启动/目标身份/内侧预览/拦截/慢速双向扩展与反向去重/单帧/Enter/双击/Esc/PNG；真机滚轮手感与完整成功预览/长图标注组合（#37）保持 **Not tested** |
+| MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 部分（#36）：内侧预览在 TextEdit/Safari 各一次（`placed=inner`、`scroll_exclusion_fixed` 预览 id、AX `arcshot.scroll.preview` 可寻址）；右/左仍只由自有夹具证实，第三方取内侧以固定几何覆盖，目标不被浮层污染由排除集与解码图证实 |
+| MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分（#36）：MAC-E2E-30/31 在两第三方目标各完成单帧/Enter/双击（TextEdit/Safari 滚动区）/单击拦截/原始滚动达目标/前台与 hit-test/Esc/清理；预览上滚动仍只由自有夹具内侧例证实，第三方未单独投轮于预览区；采集期热键重启仍仅注入式（CORE-SESSION-56） |
 | MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖视觉结果，需 `screenshot` 或人工（§4.4） |
 | MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
-| MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分：本机 `agent-desktop 1.1.0` 无剪贴板子命令，字节比对仍需脚本 |
+| MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分（#36）：两第三方目标各经命名 sRGB display-filter 接纳后解码 PNG 校验尺寸/不透明/sRGB 块/行纹理（`decode_png_metrics`），剪贴板 `PNGf` 由 osascript 回读证实；非 ArcShot 应用粘贴与显式保存字节一致仍 **Not tested** |
 | MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分：保存取消/失败/重试/放弃与文件写入由 core/app/原生自动化覆盖，`save_file_smoke` 验证真实写入；面板显示/取消/覆盖写需有效选区，选区尚无 AX 节点（§4.5），保持 Not tested；#35 的 MAC-E2E-29 已驱动自有夹具完成确认复制→缩略图→点击进入→Rectangle→重新完成（整图带标注输出）与 Esc 取消不再写剪贴板；三秒停留的动画观感与悬停不延长属 §4.4，保持 Not tested |
 | MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分：退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
 

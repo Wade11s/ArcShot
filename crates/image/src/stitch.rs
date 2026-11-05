@@ -167,17 +167,23 @@ impl StitchBuilder {
             return Err(StitchRefusal::Geometry);
         }
 
+        // A displacement is only reliable when the overlap is a substantial
+        // part of the viewport. A one- or two-row overlap of uniform content
+        // (a blank margin at a frame edge) matches many displacements and must
+        // not make a uniquely verified large overlap look ambiguous.
+        let min_overlap = (viewport / 4).max(1) as usize;
+
         let mut exact: Option<i64> = None;
         let mut ambiguous = false;
 
         // s is the document row of the frame's top edge. Every candidate with
-        // at least one overlapping row is shortlisted by row-hash equality,
-        // then verified byte-for-byte; disjoint jumps are gaps.
+        // a reliable overlap is shortlisted by row-hash equality, then
+        // verified byte-for-byte; disjoint jumps are gaps.
         for s in (self.top - i64::from(viewport) + 1)..=(self.bottom - 1) {
             let overlap_start = self.top.max(s);
             let overlap_end = self.bottom.min(s + i64::from(viewport));
             let overlap_rows = (overlap_end - overlap_start) as usize;
-            if overlap_rows == 0 {
+            if overlap_rows < min_overlap {
                 continue;
             }
             let frame_start = (overlap_start - s) as usize;
@@ -217,7 +223,7 @@ impl StitchBuilder {
                 let overlap_start = self.top.max(candidate);
                 let overlap_end = self.bottom.min(candidate + i64::from(viewport));
                 let overlap_rows = (overlap_end - overlap_start) as usize;
-                if overlap_rows == 0 {
+                if overlap_rows < min_overlap {
                     continue;
                 }
                 let frame_start = (overlap_start - candidate) as usize;
@@ -566,6 +572,29 @@ mod tests {
             Err(StitchRefusal::Ambiguous)
         );
         assert_eq!(builder.height(), 4);
+    }
+
+    #[test]
+    fn tiny_uniform_edge_overlap_does_not_make_a_unique_extension_ambiguous() {
+        // A real text viewport has blank rows at its edges. After a normal
+        // extension, the new frame's blank top row can coincide with the
+        // history's blank bottom row; that one-row coincidence used to look
+        // like a second displacement and refuse a uniquely verified large
+        // overlap as ambiguous.
+        let origin = make_frame(&[0, 1, 99, 3, 4, 5, 6, 99]);
+        let mut builder = StitchBuilder::new(&origin).expect("origin");
+        let decision = builder
+            .submit(&make_frame(&[99, 3, 4, 5, 6, 99, 8, 9]))
+            .expect("extend");
+        assert_eq!(
+            decision,
+            StitchDecision::Extended {
+                placement: StitchPlacement { offset: 2 },
+                added_rows: 2
+            }
+        );
+        assert_eq!(builder.height(), 10);
+        assert_eq!(builder.extensions(), 1);
     }
 
     #[test]
