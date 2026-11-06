@@ -192,6 +192,50 @@ pub fn may_submit_scroll_frame(in_flight: bool, queued: usize) -> bool {
     !in_flight && queued < MAX_RAW_FRAMES
 }
 
+/// A capture restart requested while a Scroll frame request owns the single
+/// native slot (I-12/I-13).
+///
+/// Abandoning a Scroll session does not cancel a native request already in
+/// flight, so the restart waits for that request to settle. While the request
+/// is pending no new Scroll frame may be queued behind it, or the restart could
+/// never observe a free gate.
+#[derive(Debug, Default)]
+pub struct RestartGate {
+    pending: bool,
+}
+
+impl RestartGate {
+    /// Whether a restart is waiting for the native slot.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Records a restart request and reports whether it may start now.
+    ///
+    /// A busy native slot defers the restart; a free slot clears any earlier
+    /// request and lets the caller start immediately.
+    pub fn request(&mut self, native_busy: bool) -> bool {
+        self.pending = native_busy;
+        !native_busy
+    }
+
+    /// Reports whether a deferred restart may start now, consuming the request.
+    pub fn resume(&mut self, native_busy: bool) -> bool {
+        if self.pending && !native_busy {
+            self.pending = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Withdraws a deferred restart, for an explicit cancel.
+    pub fn cancel(&mut self) {
+        self.pending = false;
+    }
+}
+
 /// Submission failed before starting any additional native operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollFrameSubmitError {

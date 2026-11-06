@@ -12,7 +12,7 @@ use arcshot_app::{
     HotkeyEffect, HotkeyFlow, HotkeyNotice, HotkeyOutcome, LoginItemOutcome, OutputSubmitError,
     OutputTasks, PARTIAL_INCOMPLETE_WARNING, PendingSave, PermissionAction, PermissionEffect,
     PermissionFlow, PreferencesAction, PreferencesEffect, PreferencesFlow, PreferencesNotice,
-    ScrollFrameQueue, ScrollFrameSubmitError, ScrollFrameTasks, ScrollPartialChoice,
+    RestartGate, ScrollFrameQueue, ScrollFrameSubmitError, ScrollFrameTasks, ScrollPartialChoice,
     ScrollPermissionAction, ScrollPermissionEffect, ScrollPermissionFlow, ScrollPermissionNotice,
     ScrollTapCommand, ScrollTargetTasks, encode_document, may_submit_scroll_frame, partial_action,
     preview_layout, scroll_tap_action,
@@ -61,9 +61,6 @@ const SCROLL_RETRY_HINT: &str = "回车重试复制，Esc 放弃并返回选区"
 const SCROLL_PARTIAL_RETRY_HINT: &str = "复制失败，已验证部分仍在；可重试或放弃返回选区";
 /// Deadline for bringing the locked target to the foreground after preparation.
 const SCROLL_ACTIVATE_DEADLINE: Duration = Duration::from_secs(3);
-/// Bounded release-only drain: a synthetic press whose key-up never arrives
-/// must not keep the native tap installed forever.
-const SCROLL_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 /// Cadence of the public target-integrity re-check during collection; not a
 /// performance assertion, just a slow poll of public window state.
 const SCROLL_TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
@@ -161,8 +158,8 @@ struct Coordinator {
     scroll_control_id: Rc<RefCell<Option<u32>>>,
     /// The installed Quartz session tap and the preparation owning it.
     scroll_tap: Option<(CaptureTicket, native::ScrollInputTap)>,
-    /// When the tap first entered release-only drain, for bounded cleanup.
-    scroll_drain_started: Option<Instant>,
+    /// A capture restart waiting for the Scroll frame slot to settle.
+    restart_gate: RestartGate,
     /// When the public target-integrity check last ran during collection.
     scroll_target_checked: Option<Instant>,
     /// Region overlay to restore when a Scroll permission notice closes.
@@ -276,7 +273,7 @@ pub(crate) fn launch(cx: &mut App) {
         scroll_frame_tasks: ScrollFrameTasks::default(),
         scroll_control_id: Rc::new(RefCell::new(None)),
         scroll_tap: None,
-        scroll_drain_started: None,
+        restart_gate: RestartGate::default(),
         scroll_target_checked: None,
         scroll_restore: None,
         scroll_exclusion: Vec::new(),
@@ -660,6 +657,11 @@ impl Coordinator {
                 self.handle_scroll_frame_result(ticket, result, cx);
             }
         }
+        // A restart deferred by an in-flight Scroll request resumes only once
+        // that request has settled, so no two native requests ever coexist.
+        if self.restart_gate.resume(self.scroll_frame_tasks.busy()) {
+            self.start_capture(cx);
+        }
         // One bounded request at a time, at most two raw frames queued. New
         // requests are submitted only while collection is live and no output
         // owns the completion snapshot (I-13 backpressure).
@@ -814,6 +816,14 @@ impl Coordinator {
 
     /// The shared entry for the menu command and the global hotkey.
     fn start_capture(&mut self, cx: &mut Context<Self>) {
+        // I-12/I-13: the single SCK slot must be free before a new capture may
+        // start. Abandoning a Scroll session does not cancel a frame request
+        // already in flight, so the restart waits for that request to settle
+        // instead of opening a second concurrent native request.
+        if !self.restart_gate.request(self.scroll_frame_tasks.busy()) {
+            log::info!("capture_restart_deferred reason=scroll_frame_in_flight");
+            return;
+        }
         self.close_scroll_ui(cx);
         self.close_completion_preview(cx);
         self.completion_preview_png = None;
@@ -1173,6 +1183,11 @@ impl Coordinator {
     }
 
     fn action(&mut self, action: CaptureAction, cx: &mut Context<Self>) {
+        // An explicit cancel withdraws a restart the user asked for while a
+        // native request was still settling.
+        if matches!(action, CaptureAction::Cancel) {
+            self.restart_gate.cancel();
+        }
         let mut effects = self.dispatch(action);
         while let Some(effect) = effects.pop_front() {
             match effect {
@@ -2263,9 +2278,12 @@ impl Coordinator {
     ) -> anyhow::Result<()> {
         self.close_completion_preview(cx);
         let display = native::builtin_display()?;
-        let image = image::load_from_memory(&png)
+        let mut image = image::load_from_memory(&png)
             .map_err(|error| anyhow::anyhow!("completion preview decode: {error}"))?
             .to_rgba8();
+        // The decoder yields RGBA; GPUI's `RenderImage` reads BGRA, the same
+        // layout every other preview surface hands it.
+        arcshot_image::rgba_to_bgra_in_place(&mut image);
         let (pixels_width, pixels_height) = (image.width(), image.height());
         // V1 captures are fixed at 2x, so the logical image is half the pixels.
         const CAPTURE_SCALE: f64 = 2.0;
@@ -2790,6 +2808,11 @@ impl Coordinator {
         if self.session.scroll_phase() != ScrollPhase::Collecting || self.session.output_busy() {
             return;
         }
+        // A deferred restart is waiting for the slot: do not queue another
+        // request behind it, or the restart could never observe a free gate.
+        if self.restart_gate.is_pending() {
+            return;
+        }
         let Some(ticket) = self.scroll_tap.as_ref().map(|(ticket, _)| *ticket) else {
             return;
         };
@@ -3061,18 +3084,18 @@ impl Coordinator {
             return;
         };
         tap.begin_drain();
-        let started = *self.scroll_drain_started.get_or_insert_with(Instant::now);
-        let force = started.elapsed() >= SCROLL_DRAIN_DEADLINE;
-        if tap.drained() || force {
+        // I-12: never drop the tap while it still owns a press, or that press's
+        // release would reach the target. A tap the system disabled cannot
+        // intercept anything, so dropping it cannot leak a release either.
+        if tap.drained() || tap.protection_lost() {
             let stats = tap.stats();
             log::info!(
-                "scroll_input_retired ticket={ticket:?} scrolls={} clicks_blocked={} keys_owned={} drain_forced={}",
+                "scroll_input_retired ticket={ticket:?} scrolls={} clicks_blocked={} keys_owned={} protection_lost={}",
                 stats.scrolls_passed,
                 stats.clicks_blocked,
                 stats.keys_owned,
-                force
+                tap.protection_lost()
             );
-            self.scroll_drain_started = None;
             self.reset_scroll_latency();
             // `tap` drops here: the run-loop source is removed and the port
             // invalidated before the gate's memory is released.

@@ -22,7 +22,7 @@ mod scroll_target_tasks;
 pub use scroll_target_tasks::{ScrollTargetSubmitError, ScrollTargetTasks};
 mod scroll_frame_tasks;
 pub use scroll_frame_tasks::{
-    MAX_RAW_FRAMES, ScrollFrameQueue, ScrollFrameQueueError, ScrollFrameSubmitError,
+    MAX_RAW_FRAMES, RestartGate, ScrollFrameQueue, ScrollFrameQueueError, ScrollFrameSubmitError,
     ScrollFrameTasks, admit_scroll_capture, may_submit_scroll_frame,
 };
 mod scroll_input_flow;

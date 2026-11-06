@@ -273,6 +273,36 @@ fn core_edit_39_a_text_edit_commits_when_the_tool_changes() {
     assert!(document.annotations().is_empty());
 }
 
+#[test]
+fn core_edit_40_a_select_tool_re_edit_commits_when_the_tool_changes() {
+    let mut document = selected();
+    let index = create_text(&mut document, "Re-edit");
+    document.set_tool(Tool::Select);
+
+    // A re-edit under Select starts without making the text tool active.
+    assert!(document.begin_text_edit([12.0, 8.0]));
+    assert_eq!(document.tool(), Tool::Select);
+    assert!(document.text_edit().is_some());
+    document.update_text_edit("Changed", bounds_for([12.0, 8.0], 20.0, 16.0));
+
+    // Switching tools commits it as one modification step, not a creation.
+    let version = document.version();
+    document.set_tool(Tool::Rectangle);
+    assert_eq!(document.version(), version + 1);
+    assert_eq!(document.annotations().len(), 1);
+    assert_eq!(document.tool(), Tool::Rectangle);
+    assert!(document.text_edit().is_none());
+    let text = document.annotations()[index].shape().text().unwrap();
+    assert_eq!(text.content(), "Changed");
+
+    // The first press after the switch creates an object instead of being
+    // consumed by a still-pending commit.
+    assert_eq!(
+        document.begin_pointer([20.0, 12.0]),
+        Some(arcshot_core::DragTarget::CreateObject)
+    );
+}
+
 fn frozen() -> (CaptureSession, CaptureTicket) {
     let mut session = CaptureSession::default();
     let CaptureEffect::CheckPermission(ticket) = session.dispatch(CaptureAction::Start)[0] else {
