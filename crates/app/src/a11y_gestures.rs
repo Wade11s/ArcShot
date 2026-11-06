@@ -151,24 +151,26 @@ pub(crate) fn anchor_point(context: &GestureContext<'_>, anchor: A11yAnchor) -> 
 }
 
 /// Parses a comma-separated AX value payload into document points.
+///
+/// Exactly two or exactly four finite numbers are accepted; anything else is
+/// rejected whole, so a malformed value can never half-apply a gesture.
 #[must_use]
 pub(crate) fn parse_geometry(text: &str) -> Option<A11yGeometry> {
-    let mut fields = text.split(',');
-    let mut number = || -> Option<f64> {
-        let value: f64 = fields.next()?.trim().parse().ok()?;
-        value.is_finite().then_some(value)
-    };
-    let first = [number()?, number()?];
-    match number() {
-        None => Some(A11yGeometry::Point(first)),
-        Some(x2) => {
-            let second = [x2, number()?];
-            // A trailing field means the payload is neither point nor corners.
-            fields
-                .next()
-                .is_none()
-                .then_some(A11yGeometry::Corners(first, second))
-        }
+    let values: Option<Vec<f64>> = text
+        .split(',')
+        .map(|field| {
+            field
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+        })
+        .collect();
+    let values = values?;
+    match values.as_slice() {
+        [x, y] => Some(A11yGeometry::Point([*x, *y])),
+        [x1, y1, x2, y2] => Some(A11yGeometry::Corners([*x1, *y1], [*x2, *y2])),
+        _ => None,
     }
 }
 
@@ -451,6 +453,9 @@ mod tests {
         assert_eq!(parse_geometry("nan,300"), None);
         assert_eq!(parse_geometry("inf,300"), None);
         assert_eq!(parse_geometry("200,,300"), None);
+        // A trailing separator is not a shorter payload; it is malformed.
+        assert_eq!(parse_geometry("200,300,"), None);
+        assert_eq!(parse_geometry("200,300,500,400,"), None);
     }
 
     #[test]
