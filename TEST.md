@@ -768,7 +768,8 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
 - 已落地（#63）：选区与标注对象的 AX 手势词表。节点都是 `textfield`
   （`agent-desktop` 只对可编辑角色提供 `set-value`；`group`/`button` 拿不到 ref 或
   `SetValue`），`value` 为文档逻辑点几何（点 `"x,y"`，矩形/线段 `"x1,y1,x2,y2"`），
-  `SetValue` 由产品翻译成与指针相同的 `UiCommand` 序列后进入权威 `CaptureAction`：
+  `SetValue` 由产品翻译成与指针相同的 `UiCommand` 序列后进入权威 `CaptureAction`。
+
   | `accessibility_id` | 存在条件 | 载荷 | 动作 |
   | --- | --- | --- | --- |
   | `arcshot.overlay.selection` | 冻结且非长图（无选区时 value=`none`） | 两角 | 框选/重选 |
@@ -794,9 +795,9 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
 - 已落地（#53/#54/#55）：权限提示、快捷键设置与冻结覆盖层的元素都有
   `id` + `role` + `aria_label` + `accessibility_id` + `on_a11y_action`，
   `snapshot --app` 可见、可驱动。#23 的“保存”控件在有效选区且输出空闲时注册为
-  `button arcshot.overlay.save`，但打开保存面板需要有效选区，而选区本身尚无 AX
-  节点（需先完成拖拽）。因此 MAC-RECOVERY 的保存面板显示/取消/覆盖写仍为
-  **Not tested**，不能用 `--headed` 拖拽补足。#25/#26/#27 另外标注了左侧工具坞
+  `button arcshot.overlay.save`；选区自 #63 起可经 `set-value` 建立，但 MAC-E2E-34
+  还需要确定性的 TextEdit 背景（`open`/`osascript`），因此该单元仍是 `physical`，
+  其保存面板显示/取消/覆盖写在 `ax` 档保持 **Not tested**。#25/#26/#27 另外标注了左侧工具坞
   （`arcshot.overlay.tool.*`）、矩形/直线/箭头/模糊各自的悬停选项
   （`arcshot.overlay.option.rectangle.*`、`.line.*`、`.arrow.*`、`.blur.*`）与有选中对象时的删除
   按钮（`arcshot.overlay.delete`），并用 `aria_toggled` 让 macOS AX 暴露选中态
