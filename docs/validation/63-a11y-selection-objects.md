@@ -7,9 +7,9 @@ Mac），`physical` / `full` 未运行。
 
 ## 环境
 
-- 实测实现/脚本 SHA：`e4cb5428ff9fd73696a74b5200aae5755562baba`（产品、脚本与
-  `TEST.md` 同一次提交；`worktree_dirty=false`）。
-- 时间：2026-11-06T06:55:37Z（`scripts/record-validation.sh` 采集）。
+- 实测实现/脚本 SHA：`e9fde1a8c2d445b33a085575b6cca9f5e47d1f32`（`worktree_dirty=false`；
+  产品与脚本在此提交，`TEST.md` 与本文档的后续 `docs:` 提交不改行为）。
+- 时间：2026-11-06T07:02:35Z（`scripts/record-validation.sh` 采集）。
 - 构建配置：Debug。bundle `dev.arcshot.app.debug` / 显示名 `ArcShot Debug`，签名身份 `ArcShot Dev`。
 - Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
 - Xcode：27.0 (Build version 27A266a)。
@@ -168,7 +168,7 @@ cargo test --workspace
 | 单测 | `cargo test --workspace` | Pass | 全部 `test result: ok`；`arcshot-app` 26 项含 24 项 `a11y_gestures` |
 | 架构 | `./scripts/check-architecture.sh` | Pass | `architecture check passed: app -> core/image/macos; image/macos -> core; core has no product dependencies` |
 | 完整入口 | `./scripts/check-all.sh` | Pass | `target/63-check-all.log`，exit 0（含 fmt/clippy/test/doc/依赖/架构/文字后端/启动/禁网/Release 启动与 `validation_reports=pass`） |
-| E2E（ax 档） | `scripts/e2e-agent-desktop.py --tier ax --no-build` | Pass（部分运行） | `target/e2e-63-ax.log`，exit 0，`mac_e2e=partial … cases=10/38 acceptance=false`，`total_s=23.4 agent_desktop_calls=107` |
+| E2E（ax 档） | `scripts/e2e-agent-desktop.py --tier ax --no-build` | Pass（部分运行） | `target/e2e-63-ax.log`，exit 0，`mac_e2e=partial … cases=10/38 acceptance=false`，`total_s=23.1 agent_desktop_calls=108` |
 
 ## 未能验证与残余风险
 
