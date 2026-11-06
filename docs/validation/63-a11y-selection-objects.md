@@ -7,15 +7,24 @@ Mac），`physical` / `full` 未运行。
 
 ## 环境
 
-| 项 | 值 |
-| --- | --- |
-| macOS | 27.2 (26B123)，arm64 |
-| rustc / cargo | 1.99.1 (`58cf8f9c3` 2026-10-13) / 1.99.1 (`5f94df478` 2026-08-27) |
-| `agent-desktop` | 1.2.0（envelope 2.6） |
-| 构建 | Debug bundle `dev.arcshot.app.debug` / `ArcShot Debug`，签名身份 `ArcShot Dev` |
-| 显示器 | 内建单屏 1470×956 逻辑点，scale=2（选区节点 AX bounds 1470×956 与之一致） |
-| 权限 | `accessibility=granted`、`screen_recording=granted`；未改动任何 TCC 设置 |
-| 被测提交 | 见本分支 HEAD（`Refs #63`）；日志为本地构建产物，不入库 |
+- 实测实现/脚本 SHA：`e4cb5428ff9fd73696a74b5200aae5755562baba`（产品、脚本与
+  `TEST.md` 同一次提交；`worktree_dirty=false`）。
+- 时间：2026-11-06T06:55:37Z（`scripts/record-validation.sh` 采集）。
+- 构建配置：Debug。bundle `dev.arcshot.app.debug` / 显示名 `ArcShot Debug`，签名身份 `ArcShot Dev`。
+- Rust/Cargo：rustc 1.99.1 (`58cf8f9c3` 2026-10-13)；cargo 1.99.1 (`5f94df478` 2026-08-27)。
+- Xcode：27.0 (Build version 27A266a)。
+- SDK：27.0 (26A425)。
+- Swift：Apple Swift version 6.4 (`swiftlang-6.4.0.34.1 clang-2100.3.34.1`)。
+- Metal/AIR-LLD：Apple metal version 32023.921 (`metalfe-32023.921.6`)。
+- 机器：Mac14,2，arm64。
+- macOS：27.2 (26B123)。
+- 显示器：内建单屏 1470×956 逻辑点，scale=2（选区节点 AX bounds 1470×956 与之一致）。
+- 权限：`accessibility=granted`、`screen_recording=granted`；未改动任何 TCC 设置。
+- 夹具：本票不使用夹具；MAC-E2E-38 与 MAC-E2E-24 在真实冻结帧上运行，不涉及
+  `arcshot-scroll-fixture`、TextEdit 或 Safari。
+- 日志：`target/e2e-63-ax.log`（脚本 stdout）、`target/e2e-agent-desktop-debug.log`
+  （产品 stderr）、`target/63-check-all.log`（仓库门）。日志是本地构建产物，不入库。
+- `agent-desktop`：1.2.0（envelope 2.6）。
 
 ## 两个决定
 
@@ -76,29 +85,34 @@ mac_e2e_16=pass restart_restored=false restart_restored=true preference=local
 
 ```
 30 a11y_action=arcshot.overlay.selection action=SetValue value=200,200,700,600
-31 capture_edit action=SelectRegion version=1 annotations=0 selection=Some([200.0, 200.0, 500.0, 400.0]) tool=Select selected=None
+31 capture_edit action=SelectRegion version=1 annotations=0 selection=Some([200.0, 200.0, 500.0, 400.0])
 33 a11y_action=arcshot.overlay.selection.handle.bottom_right action=SetValue value=800,700
-34 capture_edit action=PointerPressed version=1 annotations=0 selection=Some([200.0, 200.0, 500.0, 400.0])
-36 capture_edit action=PointerReleased version=2 annotations=0 selection=Some([200.0, 200.0, 600.0, 500.0])
+34 capture_edit action=PointerPressed version=1 … selection=Some([200.0, 200.0, 500.0, 400.0])
+36 capture_edit action=PointerReleased version=2 … selection=Some([200.0, 200.0, 600.0, 500.0])
 38 a11y_action=arcshot.overlay.selection.body action=SetValue value=500,430
-40 capture_edit action=PointerReleased version=3 annotations=0 selection=Some([200.0, 180.0, 600.0, 500.0])
-42 a11y_action=arcshot.overlay.selection action=SetValue value=20,30,320,330
-43 capture_edit action=SelectRegion version=4 annotations=0 selection=Some([20.0, 30.0, 300.0, 300.0])
-45 a11y_action=arcshot.overlay.tool.rectangle action=Click
-46 capture_edit action=SelectTool version=4 … tool=Rectangle
-48 a11y_action=arcshot.overlay.object.new action=SetValue value=40,50,140,120
-51 capture_edit action=PointerReleased version=5 annotations=1 … selected=Some(0)
-54 a11y_action=arcshot.overlay.object.0 action=Click
-56 capture_edit action=PointerPressed version=5 annotations=1 … selected=Some(0)
-58 capture_edit action=PointerReleased version=5 annotations=1 … selected=Some(0)
-60 a11y_action=arcshot.overlay.object.0.handle.bottom_right action=SetValue value=180,150
-63 capture_edit action=PointerReleased version=6 annotations=1 … selected=Some(0)
-65 a11y_action=arcshot.overlay.object.0 action=SetValue value=60,70,200,170
-68 capture_edit action=PointerReleased version=7 annotations=1 … selected=Some(0)
-71 a11y_action=arcshot.overlay.object.1.endpoint.end action=SetValue value=120,130
-74 capture_edit action=PointerReleased version=9 annotations=2 … selected=Some(1)
-76 a11y_action=arcshot.overlay.cancel action=Click
-77 capture_phase from=Frozen to=Resident action=CancelAttempt
+41 capture_edit action=PointerReleased version=3 … selection=Some([200.0, 180.0, 600.0, 500.0])
+43 a11y_action=arcshot.overlay.selection action=SetValue value=20,30,320,330
+44 capture_edit action=SelectRegion version=4 … selection=Some([20.0, 30.0, 300.0, 300.0])
+46 a11y_action=arcshot.overlay.tool.rectangle action=Click
+47 capture_edit action=SelectTool version=4 … tool=Rectangle
+49 a11y_action=arcshot.overlay.object.new action=SetValue value=40,50,140,120
+52 capture_edit action=PointerReleased version=5 annotations=1 … selected=Some(0)
+57 a11y_action=arcshot.overlay.object.0 action=Click
+60 capture_edit action=PointerReleased version=5 annotations=1 … selected=Some(0)
+62 a11y_action=arcshot.overlay.object.0.handle.bottom_right action=SetValue value=180,150
+65 capture_edit action=PointerReleased version=6 annotations=1 … selected=Some(0)
+67 a11y_action=arcshot.overlay.object.0 action=SetValue value=60,70,200,170
+70 capture_edit action=PointerReleased version=7 annotations=1 … selected=Some(0)
+75 a11y_action=arcshot.overlay.object.new action=SetValue value=30,40,110,120
+78 capture_edit action=PointerReleased version=8 annotations=2 … selected=Some(1)
+83 a11y_action=arcshot.overlay.object.1 action=Click
+86 capture_edit action=PointerReleased version=8 annotations=2 … selected=Some(1)
+88 a11y_action=arcshot.overlay.object.1.endpoint.end action=SetValue value=120,130
+91 capture_edit action=PointerReleased version=9 annotations=2 … selected=Some(1)
+93 a11y_action=arcshot.overlay.cancel action=Click
+94 capture_phase from=Frozen to=Resident action=CancelAttempt
+116 a11y_action=arcshot.overlay.selection action=SetValue value=400,300,700,500   # MAC-E2E-24
+117 capture_edit action=SelectRegion version=1 … selection=Some([400.0, 300.0, 300.0, 200.0])
 ```
 
 节点清单（同一轮 `snapshot --app`，`native_id` 即 `AXIdentifier`）：
@@ -138,14 +152,23 @@ textfield  arcshot.overlay.object.1.endpoint.end             value=110,120
 ## 仓库门
 
 ```sh
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ./scripts/check-architecture.sh
 ./scripts/check-all.sh
 ```
 
-结果见本记录的「仓库门结果」小节（下方由实际运行填写）。
+结果（同一候选）：
+
+| 门 | 命令 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| 格式 | `cargo fmt --all --check` | Pass | 无输出，exit 0 |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | Pass | `Finished dev profile`，无 warning |
+| 单测 | `cargo test --workspace` | Pass | 全部 `test result: ok`；`arcshot-app` 26 项含 24 项 `a11y_gestures` |
+| 架构 | `./scripts/check-architecture.sh` | Pass | `architecture check passed: app -> core/image/macos; image/macos -> core; core has no product dependencies` |
+| 完整入口 | `./scripts/check-all.sh` | Pass | `target/63-check-all.log`，exit 0（含 fmt/clippy/test/doc/依赖/架构/文字后端/启动/禁网/Release 启动与 `validation_reports=pass`） |
+| E2E（ax 档） | `scripts/e2e-agent-desktop.py --tier ax --no-build` | Pass（部分运行） | `target/e2e-63-ax.log`，exit 0，`mac_e2e=partial … cases=10/38 acceptance=false`，`total_s=23.4 agent_desktop_calls=107` |
 
 ## 未能验证与残余风险
 
