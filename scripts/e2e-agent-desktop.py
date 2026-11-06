@@ -190,9 +190,12 @@ UNITS = [
     Unit("overlay_tools", "physical", ("12", "13", "14", "18", "19", "20", "21", "23", "25"), True,
          "frozen overlay: tool dock, hover options, text editor, AX cancel",
          "options exist only while hovered; 25 needs a drag and a click to create a selection and editor"),
-    Unit("scroll_gate", "physical", ("24",), True,
+    Unit("selection_ax", "ax", ("38",), True,
+         "selection and object gestures through AX geometry values",
+         "the overlay takes focus; every gesture is a semantic SetValue"),
+    Unit("scroll_gate", "ax", ("24",), True,
          "Scroll entry gate and permission preflight",
-         "a selection can only be created by dragging"),
+         "the selection precondition is an AX SetValue, not a drag"),
     Unit("long_preview", "physical", ("29",), True,
          "confirmed-copy preview, long-image annotation, cancel retention",
          "fixture window plus a dragged selection"),
@@ -210,16 +213,16 @@ UNITS = [
          "opens and moves third-party windows through System Events"),
     Unit("region_combo", "physical", ("32",), True,
          "Region with all five annotation tools, undo/redo, delete",
-         "selection and object creation are drags"),
+         "undo/redo are real cmd+Z key presses and the backdrop needs open/osascript"),
     Unit("text_density", "physical", ("33",), True,
          "density switch while a text editor is open",
-         "selection and text creation are drags and clicks"),
+         "the text editor needs real keystrokes and its options appear only on hover"),
     Unit("save_panel", "physical", ("34",), True,
          "native Save panel: cancel and choose",
-         "a valid selection can only be created by dragging"),
+         "the deterministic TextEdit backdrop needs open/osascript"),
     Unit("long_annotate", "physical", ("35",), True,
          "every annotation tool on the whole long image",
-         "fixture window plus drags"),
+         "own fixture window; non-rectangle creation has no AX anchor"),
     Unit("restart_session", "physical", ("36",), True,
          "hotkey restart, tool-active Esc, restart during collection",
          "global hotkey and headed Esc"),
@@ -517,12 +520,40 @@ def wait_log_line(path: pathlib.Path, needle: str, timeout: float, *, after: int
     return read_log(path)[index]
 
 
-def find_ref(app: str, name: str) -> str:
-    data = agent("find", "--surface", "menu-bar-extras", "--app", app, "--role", "menuitem", "--name", name)
-    matches = data.get("matches", [])
-    if len(matches) != 1:
-        fail(f"expected exactly one menu item named {name!r}, got {len(matches)}")
-    return matches[0]["ref_id"]
+def find_ref(app: str, name: str, timeout: float = 10.0) -> str:
+    """Finds one status-menu item by name.
+
+    macOS publishes a status item's AX subtree asynchronously after launch, so
+    the first read after `hotkey_launch` can legitimately see no menu bar
+    extras. That is an observation race, not a product failure: re-read within
+    a bounded budget, then fail. Every other error still fails immediately.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            data = agent(
+                "find",
+                "--surface",
+                "menu-bar-extras",
+                "--app",
+                app,
+                "--role",
+                "menuitem",
+                "--name",
+                name,
+            )
+        except Failure as error:
+            if "ELEMENT_NOT_FOUND" not in str(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(POLL)
+            continue
+        matches = data.get("matches", [])
+        if len(matches) != 1:
+            if not matches and time.monotonic() < deadline:
+                time.sleep(POLL)
+                continue
+            fail(f"expected exactly one menu item named {name!r}, got {len(matches)}")
+        return matches[0]["ref_id"]
 
 
 def click(app: str, name: str) -> None:
@@ -1210,6 +1241,68 @@ def ax_click(app: str, native_id: str, timeout: float = 10.0) -> dict:
             raise
         return node
     fail(f"{native_id} stayed stale across retries")
+
+
+def ax_set_value(app: str, native_id: str, value: str, timeout: float = 10.0) -> dict:
+    """Writes one AX geometry value; returns the node that was addressed.
+
+    `set-value` is a semantic write (AXSetValue), so it needs no pointer, no
+    key and no foreground change. A stale ref was never delivered, so
+    re-reading and writing again is safe; any other failure is still a failure.
+    """
+    for attempt in range(3):
+        node = wait_node(
+            app,
+            lambda tree: (
+                find_nodes(tree, native_id=native_id, require_ref=True) or [None]
+            )[0],
+            timeout,
+        )
+        if not node.get("ref_id"):
+            fail(f"{native_id} is not addressable")
+        try:
+            agent("set-value", node["ref_id"], value)
+        except Failure as error:
+            if "STALE_REF" in str(error) and attempt < 2:
+                continue
+            raise
+        return node
+    fail(f"{native_id} stayed stale across retries")
+
+
+def ax_value(app: str, native_id: str, timeout: float = 10.0) -> str:
+    """Reads one AX geometry value as text."""
+    node = wait_node(
+        app,
+        lambda tree: (find_nodes(tree, native_id=native_id) or [None])[0],
+        timeout,
+    )
+    return str(node.get("value"))
+
+
+def ax_gesture(
+    app: str,
+    log: pathlib.Path,
+    native_id: str,
+    value: str,
+    *,
+    action: str = "PointerReleased",
+    expect: str | None = None,
+) -> str:
+    """Drives one gesture and returns the resulting `capture_edit` line.
+
+    The product's own diagnostic is the evidence: the AX line proves the
+    activation reached the product, and the `capture_edit` line proves the
+    authoritative document changed through the same entry point a pointer
+    gesture uses.
+    """
+    mark = len(read_log(log))
+    ax_set_value(app, native_id, value)
+    wait_log(log, f"a11y_action={native_id} action=SetValue value={value}", 10.0, after=mark)
+    line = wait_log_line(log, f"capture_edit action={action}", 10.0, after=mark)
+    if expect is not None and expect not in line:
+        fail(f"{native_id} produced {line!r}, want {expect!r}")
+    return line
 
 
 def png_files_on_disk() -> set[str]:
@@ -2376,11 +2469,205 @@ def main() -> int:
             note("mac_e2e_12=pass overlay_cancel=ax phase=Resident")
             unit_done("overlay_tools")
 
+        if want("selection_ax"):
+            # MAC-E2E-38: the selection, its eight control points, every object,
+            # an object's control points and a line's two endpoints are addressable
+            # and drivable through AX alone (#63). Each activation is a semantic
+            # SetValue carrying the target geometry; the product replays the same
+            # PointerPressed -> PointerMoved -> PointerReleased (or SelectRegion)
+            # sequence a pointer at those points would enqueue. The evidence is the
+            # product's own `a11y_action=` line plus the resulting `capture_edit`
+            # line, never a coordinate drag.
+            log_mark = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, log_mark)
+            if ax_value(app, "arcshot.overlay.selection") != "none":
+                fail("a new session already has a selection")
+
+            # Reselect from nothing: the selection node exists before any selection
+            # so the first band needs no drag.
+            line = ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.selection",
+                "200,200,700,600",
+                action="SelectRegion",
+                expect="selection=Some([200.0, 200.0, 500.0, 400.0])",
+            )
+            if "version=1" not in line:
+                fail(f"the first selection is not the first edit: {line!r}")
+            if ax_value(app, "arcshot.overlay.selection") != "200,200,700,600":
+                fail("the selection value does not report its own corners")
+
+            # The eight control points are addressable and sit on the geometry.
+            handles = {
+                "top_left": "200,200",
+                "top": "450,200",
+                "top_right": "700,200",
+                "right": "700,400",
+                "bottom_right": "700,600",
+                "bottom": "450,600",
+                "bottom_left": "200,600",
+                "left": "200,400",
+            }
+            for name, want_value in handles.items():
+                got = ax_value(app, f"arcshot.overlay.selection.handle.{name}")
+                if got != want_value:
+                    fail(f"selection handle {name} reports {got!r}, want {want_value!r}")
+
+            # Resize the selection by dragging one control point.
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.selection.handle.bottom_right",
+                "800,700",
+                action="PointerReleased",
+                expect="selection=Some([200.0, 200.0, 600.0, 500.0])",
+            )
+            if ax_value(app, "arcshot.overlay.selection") != "200,200,800,700":
+                fail("the resized selection value is wrong")
+
+            # Move the selection by dragging its body.
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.selection.body",
+                "500,430",
+                action="PointerReleased",
+                expect="selection=Some([200.0, 180.0, 600.0, 500.0])",
+            )
+
+            # Reselect the region the objects will live in. A control point that
+            # falls outside the selection starts a new band instead of a drag, so
+            # the selection has to contain every object control point used below —
+            # the same rule a pointer press follows.
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.selection",
+                "20,30,320,330",
+                action="SelectRegion",
+                expect="selection=Some([20.0, 30.0, 300.0, 300.0])",
+            )
+
+            # Object creation: the annotation tool exposes one creation node whose
+            # value reports the last object's extent.
+            ax_click(app, "arcshot.overlay.tool.rectangle")
+            wait_log(log, "capture_edit action=SelectTool", 10.0)
+            if ax_value(app, "arcshot.overlay.object.new") != "none":
+                fail("the creation node reports an object before any exists")
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.object.new",
+                "40,50,140,120",
+                action="PointerReleased",
+                expect="annotations=1",
+            )
+            if ax_value(app, "arcshot.overlay.object.0") != "40,50,140,120":
+                fail("the created rectangle does not report its own corners")
+
+            # Object selection through the object node's Click action.
+            ax_click(app, "arcshot.overlay.tool.select")
+            wait_log(log, "capture_edit action=SelectTool", 10.0)
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.object.0")
+            wait_log(log, "a11y_action=arcshot.overlay.object.0 action=Click", 10.0, after=mark)
+            selected = wait_log_line(log, "capture_edit action=PointerReleased", 10.0, after=mark)
+            if "selected=Some(0)" not in selected:
+                fail(f"the object click did not select it: {selected!r}")
+
+            # The selected object's own eight control points.
+            for name, want_value in {
+                "top_left": "40,50",
+                "top": "90,50",
+                "top_right": "140,50",
+                "right": "140,85",
+                "bottom_right": "140,120",
+                "bottom": "90,120",
+                "bottom_left": "40,120",
+                "left": "40,85",
+            }.items():
+                got = ax_value(app, f"arcshot.overlay.object.0.handle.{name}")
+                if got != want_value:
+                    fail(f"object handle {name} reports {got!r}, want {want_value!r}")
+
+            # Resize the object by dragging one of its control points.
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.object.0.handle.bottom_right",
+                "180,150",
+                action="PointerReleased",
+                expect="annotations=1",
+            )
+            if ax_value(app, "arcshot.overlay.object.0") != "40,50,180,150":
+                fail("the resized object value is wrong")
+
+            # Move the object by giving its new corners; its centre follows.
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.object.0",
+                "60,70,200,170",
+                action="PointerReleased",
+                expect="annotations=1",
+            )
+            # The object kept its resized extent (140x100 at 40,50); its centre
+            # moves from 110,100 to the payload's middle 130,120, so the retained
+            # corners become 60,70 to 200,170.
+            if ax_value(app, "arcshot.overlay.object.0") != "60,70,200,170":
+                fail("the moved object value is wrong")
+
+            # A line exposes its two endpoints instead of eight control points.
+            ax_click(app, "arcshot.overlay.tool.line")
+            wait_log(log, "capture_edit action=SelectTool", 10.0)
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.object.new",
+                "30,40,110,120",
+                action="PointerReleased",
+                expect="annotations=2",
+            )
+            ax_click(app, "arcshot.overlay.tool.select")
+            wait_log(log, "capture_edit action=SelectTool", 10.0)
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.object.1")
+            wait_log(log, "a11y_action=arcshot.overlay.object.1 action=Click", 10.0, after=mark)
+            wait_log(log, "capture_edit action=PointerReleased", 10.0, after=mark)
+            if ax_value(app, "arcshot.overlay.object.1.endpoint.start") != "30,40":
+                fail("the line start endpoint is not addressable")
+            if ax_value(app, "arcshot.overlay.object.1.endpoint.end") != "110,120":
+                fail("the line end endpoint is not addressable")
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.object.1.endpoint.end",
+                "120,130",
+                action="PointerReleased",
+                expect="annotations=2",
+            )
+            if ax_value(app, "arcshot.overlay.object.1") != "30,40,120,130":
+                fail("the edited endpoint did not change the line")
+
+            # Cancel through AX so the session returns to Resident.
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.cancel")
+            wait_log(log, "a11y_action=arcshot.overlay.cancel action=Click", 10.0, after=mark)
+            wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=mark)
+            note(
+                "mac_e2e_38=pass selection=ax handles=8 object=ax object_handles=8 "
+                "endpoints=2 annotations=2 gestures=8"
+            )
+            unit_done("selection_ax")
+
         if want("scroll_gate"):
             # MAC-E2E-24: the Scroll entry gate is addressable, is not activatable
             # without a selection, and after a selection drives the three-permission
-            # preflight. The selection drag is a --headed precondition; the
-            # acceptance evidence is the product's AX state and text diagnostics.
+            # preflight. Both the gate and its selection precondition are AX
+            # actions; the acceptance evidence is the product's AX state and text
+            # diagnostics.
             log_mark = len(read_log(log))
             click(app, "开始截图")
             wait_frozen_active(log, log_mark)
@@ -2400,9 +2687,17 @@ def main() -> int:
             click_scroll_entry(app, denied=True)
             if count_log(log, "a11y_action=arcshot.overlay.scroll") != 0:
                 fail("the Scroll entry produced an action without a valid selection")
-            # Create a selection as a precondition for the entry gate.
-            agent("drag", "--from-xy", "400,300", "--to-xy", "700,500", "--headed")
-            wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+            # Create a selection as a precondition for the entry gate. #63 makes
+            # the selection itself an AX geometry value, so the gate needs no
+            # pointer gesture and this unit stays at the ax tier.
+            ax_gesture(
+                app,
+                log,
+                "arcshot.overlay.selection",
+                "400,300,700,500",
+                action="SelectRegion",
+                expect="selection=Some([400.0, 300.0, 300.0, 200.0])",
+            )
             scroll = wait_node(
                 app,
                 lambda tree: (
@@ -2557,7 +2852,7 @@ def main() -> int:
                 10.0,
             )
             note(
-                f"mac_e2e_24=pass entry_gate=ax selection_precondition=headed_drag "
+                f"mac_e2e_24=pass entry_gate=ax selection_precondition=ax_set_value "
                 f"missing={','.join(missing) or 'none'}"
             )
             unit_done("scroll_gate")

@@ -540,6 +540,15 @@ E2E 的观察合同因此是**双通道**：
    `on_a11y_action(AccessibleAction::Click, …)`，且两条路径入同一个 `UiQueue`；每次
    AX 激活另写一行 `a11y_action=<surface>.<control> action=Click`，E2E 以该行证明
    动作真的到达产品。
+6. **AX 手势词表（#63）**：选区、八个选区控制点、每个标注对象、对象控制点与线/箭头
+   端点都是 `textfield` 节点（`agent-desktop` 只对可编辑角色提供 `set-value`），
+   `value` 是文档逻辑点几何：点类 `"x,y"`，矩形/线段类 `"x1,y1,x2,y2"`。写回走
+   `set-value`（AXSetValue），产品把它翻译成与指针**完全相同**的命令序列
+   （`PointerPressed` → `PointerMoved` → `PointerReleased`，框选为 `SelectRegion`，
+   Text 工具为 `BeginText`），因此证明的是 core 手势逻辑与结果文档状态，不是真实
+   拖拽动态。每次激活写一行 `a11y_action=<id> action=SetValue value=<载荷>`，随后
+   的 `capture_edit` 行描述结果；两者缺一不可。`value` 与载荷同形，未被钳制时回读
+   逐字相等。
 6. **懒激活**：Accessibility 在第一个辅助技术客户端连接时才建立，窗口刚打开的第一
    次 `snapshot --app` 可能是空树；必须先重读再下结论（脚本里的 `wait_node`）。
 
@@ -564,7 +573,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-09 | 启动前后 `agent-desktop list-apps --app "ArcShot"` | 只出现被测 `bundle_id` 与显示名（Debug/Release 各一） | 系统按 bundle ID 解析到哪一份拷贝 |
 | MAC-E2E-10 | 点击 屏幕录制权限…，等 AX 建立后 `snapshot --app` | `group "ArcShot 权限提示"`、至少两个 `statictext`（标题与正文可读）、一个 `button` 带 `arcshot.notice.*` 标识；AX 激活后日志出现 `a11y_action=arcshot.notice.<id> action=Click`，窗口消失 | 未授权的变体（需改 TCC）；打开系统设置的分支不驱动 |
 | MAC-E2E-11 | 点击 截图快捷键…，`snapshot --app` 后按节点驱动；每次投递录制组合前先确认 `snapshot --surface focused` 的 `app` 是被测显示名 | 读到当前组合与录入区名称；AX 触发录入 → 名称随状态变化（候选/不合法）→ AX 保存写入 `hotkey_store value=<新组合>`，再用同一路径恢复原组合并以 AX 关闭窗口 | 冲突恢复、暂挂失败（APP-EFFECT 覆盖） |
-| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；选区移动/调整/重选与撤销（控制点无 AX 节点，不能用 `--headed` 坐标）；选区/标注与保存（保存按钮只在有效选区时成为 `button arcshot.overlay.save`，选区尚无 AX 节点） |
+| MAC-E2E-12 | 开始截图后 `snapshot --app` | `group "ArcShot 截图覆盖层"` + `button arcshot.overlay.cancel`；AX 激活后 `a11y_action=arcshot.overlay.cancel action=Click` 与 `capture_phase … to=Resident`，无残留自有窗口 | 覆盖层的 `list-windows` 枚举（见 §4.5）；撤销（真实 cmd+Z，由 MAC-E2E-32 覆盖）；选区移动/调整/重选与对象手势（由 MAC-E2E-38 覆盖） |
 | MAC-E2E-13 | 冻结覆盖层 `snapshot --app` 后按 `arcshot.overlay.tool.*` 驱动 | `group "标注工具"` 含 Select（checked=true）与 Rectangle（checked=false）；AX 激活 Rectangle 后日志 `capture_edit action=SelectTool … tool=Rectangle` 且 checked 状态互换；无选中对象时不出现删除按钮 | 真实指针选择工具、工具图标观感 |
 | MAC-E2E-14 | MAC-E2E-13 后 `hover @<rectangle ref> --headed` 再 `snapshot` | 选项条按 `arcshot.overlay.option.rectangle.*` 可寻址；AX 激活 5 点线宽与蓝色后 `capture_edit action=RectangleOption … style=stroke=#007AFF width=5`，版本不变，选项 checked 状态更新 | 填充开关的像素、选中对象改样式（无对象可选中）、真实指针悬停手感 |
 | MAC-E2E-15 | 读启动日志 `preferences_launch completion_sound=<初始值>`；分别 `find … --name "完成音效"` 后 headless `click` 两次 | 每次出现 `completion_sound enabled=<相反值或初始值> persisted=true`；初始值先被翻转再恢复 | 真实音量/静音观感、通知（不请求通知权限）；偏好域取值另由人工 `defaults read` 交叉核对 |
@@ -576,7 +585,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-21 | MAC-E2E-19/20 后悬停 Rectangle 工具 | Rectangle 的 5 点线宽与蓝色仍为 checked，证明每工具样式记忆互不影响 | 真实悬停手感、视觉排版 |
 | MAC-E2E-22 | 读启动日志 `preferences_launch density=`；冻结后保持 Rectangle 与一个已改样式；状态菜单点击 选项密度 两次并重启一次 | 每次出现 `option_density density=… persisted=true`；工具坞 `arcshot.overlay.density` 的 AX `value` 变为对应密度；`arcshot.overlay.option.rectangle.*` 仍可寻址、工具与样式保持；重启后 `preferences_launch density=` 等于切换值；结束时还原用户原值 | 密度图标/间距的像素观感、悬停收起延迟、键盘单独访问选项 |
 | MAC-E2E-23 | MAC-E2E-21 后 AX 激活 `arcshot.overlay.tool.blur`，`hover @<blur ref> --headed` 再 `snapshot` | 五个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Blur` 且 checked 互换；选项条按 `arcshot.overlay.option.blur.*` 可寻址，默认仅 `medium` 为 checked；AX 激活 `weak`/`strong` 后依次出现 `capture_edit action=BlurOption … level=weak`、`level=strong`，checked 状态更新 | 模糊像素、选区绘制、模糊对象创建/拖动、tooltip 文本（`agent-desktop 1.1.0` 不暴露 GPUI tooltip/`aria_description`） |
-| MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `drag --from-xy 400,300 --to-xy 700,500 --headed` 作为前置创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；拖拽后出现 `capture_edit action=SelectRegion` 与 `selection=Some([…])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared`；`--headed` 拖拽只是选区前置，不作为指针手势的验收证据 |
+| MAC-E2E-24 | 开始截图冻结后 `snapshot --app`；先对 `arcshot.overlay.scroll` 发 AX 点击（无选区），再以 `set-value` 写 `arcshot.overlay.selection` 为 `400,300,700,500` 创建选区，最后 AX 激活 `arcshot.overlay.scroll` | 入口始终以 `button` 可寻址；无选区时点击返回 `POLICY_DENIED` 且不产生 `a11y_action=arcshot.overlay.scroll`；写选区后出现 `a11y_action=arcshot.overlay.selection action=SetValue` 与 `capture_edit action=SelectRegion … selection=Some([400.0, 300.0, 300.0, 200.0])`，入口点击出现 `a11y_action=arcshot.overlay.scroll action=Click` 与 `scroll_permission screen_recording=… input_monitoring=… accessibility=… missing=…`；随后出现 `scroll_target…` 或 `scroll_refused reason=Target …`；区域覆盖层与选区保留 | 三权限缺失通知的 AX 驱动（本机三项权限均已授权，TCC 切换属 §4.4）；目标锁定成功后的控制窗与 `scroll_prepared` |
 | MAC-E2E-25 | MAC-E2E-23 后 AX 激活 `arcshot.overlay.tool.text`，`--headed` 拖拽建选区并点击创建文字（前置），`hover @<text ref> --headed` 再 `snapshot` | 六个工具均可寻址；激活后 `capture_edit action=SelectTool … tool=Text` 且 checked 互换；文字输入 `arcshot.overlay.text.input` 可寻址；选项条按 `arcshot.overlay.option.text.*` 可寻址，默认字号 `16`；AX 激活 `size.up` 后 `capture_edit action=TextOption … size=16.5` 且字号值变为 `16.5`；AX 激活 `color.blue` 后 `stroke=#007AFF` 且 checked 更新；点击别处出现 `capture_edit action=TextCommit … annotations=1` | 真实指针文字创建/拖动、直接输入字号、原生系统字体/IME 候选框与焦点、预览像素 |
 | MAC-E2E-26 | 由脚本以独立进程启动自有 GPUI 精确像素夹具 `arcshot-scroll-fixture`；开始截图后 `--headed` 拖拽建选区（前置），AX 激活 `arcshot.overlay.scroll`；采集后 `mouse-click`/`mouse-wheel`/`press return --headed`/`press escape --headed` 作为物理输入前置 | `scroll_target window_id=…`、`scroll_prepared`、`scroll_exclusion_fixed`、`scroll_input installed=true`、`scroll_frame_request_us=`、`scroll_phase … to=Collecting`、`scroll_collecting`；`arcshot.scroll.status` 为“可以滚动”且 `arcshot.scroll.hint` 可寻址；`capture_probe_grid` 与夹具像素真值逐格相等；夹具日志无 `fixture_click_received`、出现 `fixture_key_received` 与 `fixture_scroll`；`output_publish target=Clipboard` 后 `completion_preview shown`，会话保持冻结，固定停留后 `completion_preview_expired`；`scroll_input_retired … drain_forced=false`；第二轮 Esc 出现 `from=Collecting to=Inactive action=CancelScroll` 且 `arcshot.overlay.save` 重新可寻址；该次捕获只上报一条 `capture_wake_window_submit_us`（`wake_reported=1`，PERF-REGION 样本不得按二次呈现重新计时） | 真实 TCC 切换、TextEdit/Safari 第三方目标、IME 候选框、视觉观感 |
 | MAC-E2E-27 | 由脚本启动同一夹具；分别以右侧、左侧、选区内右下三个选区进入滚动；右 case 慢速下滚 4 次、反向回滚 4 次后 Enter 完成；左 case 同链路；内侧 case 指针在固定预览上滚 3 次后 Enter 完成 | `scroll_preview placed=right/left/inner frame=[…]`；`scroll_exclusion_fixed … preview=<id>`；`scroll_stitch extended offset=… added_rows=…`；反向 `scroll_stitch duplicate offset=…` 且扩展计数不增；夹具出现 `fixture_scroll`（含指针在预览上的情况）；每个位置的 `capture_probe_grid` 与该偏移的夹具像素真值逐格相等（其下捕获正确、预览不入图）；三次均 `output_publish target=Clipboard` 并出现 `completion_preview shown`，固定停留后 `completion_preview_expired` | 三秒完成预览的视觉动画与悬停计时、TextEdit/Safari、真实 TCC 切换、长会话资源峰值、视觉观感 |
@@ -584,12 +593,13 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-29 | 由脚本启动自有夹具；进入滚动采集后直接 Enter 完成可信单帧，断言 `completion_preview shown`，再 AX 点击 `arcshot.completion.preview` 进入共享文档；AX 点击仅长图模式存在的 `arcshot.overlay.completion.add_rectangle` 添加一个 Rectangle；AX 点击 `arcshot.overlay.finish` 重新完成。随后再进行一轮：完成→点击缩略图→`press escape --headed` 取消 | 第一次出现 `a11y_action=arcshot.completion.preview action=Click`、`completion_annotation_opened document=WxH zoom=…` 与恢复的 `group "ArcShot 截图覆盖层"`；`capture_edit action=AddDefaultRectangle … annotations=1`；第二次 `output_publish target=Clipboard … pixels=<整 crop 宽>x<整 crop 高> annotations=1`，随后 `from=Frozen to=Resident action=OutputCompleted`；取消轮出现 `from=Frozen to=Resident action=CancelAttempt` 且真实剪贴板 PNG 逐字节不变 | 带滚动的整图扩展（由 #33 的像素真值与本票 IMAGE-COMPOSE-35 覆盖）、悬停不延长、动画观感、TextEdit/Safari 第三方目标 |
 | MAC-E2E-30 | TextEdit 固定几何纯文本（`textedit-36-v1`，System Events 固定 `200,120 1000x700`，预滚到文档中部）；开始截图后 `--headed` 拖拽建内侧选区（`400,350→1000,650`），AX 激活滚动入口；采集中点击选区、慢速滚 1 下 1 上、Enter、双击、Esc 分别验证 | `scroll_target owner=com.apple.TextEdit` 与帧 `[200,120,1000,700]`；`scroll_preview placed=inner` 且预览可寻址并在 `scroll_exclusion_fixed` 排除集中；采集中前台为 TextEdit；点击后滚动条不变且退役 `clicks_blocked≥1`；慢速下滚出现 `scroll_stitch extended`（`bottom` 增长）后上滚出现 `scroll_stitch duplicate` 且扩展数不增；无滚动 Enter 与双击各一次 Clipboard 输出，内存 PNG 解码为选区物理宽 `1200`、`sRGB`、全不透明且高度等于已验证底（单帧 `600`）；Esc 放弃且选区返回、无输出 | 真机滚轮手感、三秒完成预览与长图标注（#37）、视觉观感、IME |
 | MAC-E2E-31 | Safari `file://` 静态页（`safari-36-v1`，无远端资源，System Events 固定 `100,80 1200x800`）；同上选区（`300,350→900,650`）与流程，滚轮轴点 `600,600` | `scroll_target owner=com.apple.Safari`；`scroll_preview placed=inner` 且预览可寻址并在排除集中；地址栏仍为 `file://` 且前台为 Safari；点击不改地址且退役 `clicks_blocked≥1`；慢速双向滚动扩展与反向去重（同 MAC-E2E-30）；无滚动 Enter、双击（滚动区双击）各一次 sRGB PNG 解码（`1200×600` 单帧）；Esc 放弃回原选区 | 动态内容、联网行为（夹具无远端、未启 HTTP 服务）、视觉观感 |
-| MAC-E2E-32 | Region 大选区（`200,200→1100,750`）；依次 AX 激活 Rectangle/Line/Arrow/Blur/Text 并以 `--headed` 拖拽/点击作创建前置；`cmd+z` / `cmd+shift+z`；选对象后 AX 删除；AX 完成 | `capture_edit annotations` 1→5→4→5→4；`output_publish target=Clipboard pixels=1800x1100 annotations=4`；内存 PNG 解码等大 sRGB；仓库树 PNG 文件集不变 | 指针控制点拖动、选区移动/调整/重选指针手势、IME |
+| MAC-E2E-32 | Region 大选区（`200,200→1100,750`）；依次 AX 激活 Rectangle/Line/Arrow/Blur/Text 并以 `--headed` 拖拽/点击作创建前置；`cmd+z` / `cmd+shift+z`；选对象后 AX 删除；AX 完成 | `capture_edit annotations` 1→5→4→5→4；`output_publish target=Clipboard pixels=1800x1100 annotations=4`；内存 PNG 解码等大 sRGB；仓库树 PNG 文件集不变 | 真实指针拖拽动态（结果与命令序列由 MAC-E2E-38 覆盖）、IME |
 | MAC-E2E-33 | Text 创建后状态菜单切密度；悬停 Text 字号步进；工具切换提交；切回密度 | 编辑器、字号 `16` 与 Text 工具在密度切换后保持；同套选项在新密度可达；`TextOption size=16.5`；`TextCommit annotations=1` | 密度像素观感、键盘单独访问选项 |
 | MAC-E2E-34 | Region：AX 保存后原生面板 AX 取消；新会话 AX 保存后 `set-value` 改名并 AX 保存 | 取消：`save_panel_outcome=cancelled`、无输出、剪贴板 hash 不变、会话保留；选定：`save_panel_outcome=chosen`、`output_publish target=SaveFile pixels=1200x700`、文件内存解码等大 sRGB、剪贴板不变（文件随后删除） | 保存覆盖写提示、保存失败原生形态 |
 | MAC-E2E-35 | 自有夹具扩展拼接后完成→预览→进入标注；长图上 AX 激活五工具并以居中视图公式换算的 `--headed` 拖拽创建（Rectangle 走 a11y 路径）；撤销/重做；AX 重新完成 | 文档 `230×196/212`；滚动入口缺席；`annotations` 1→5→4→5；`output_publish pixels=460×392/424 annotations=5` 等于已验证底；解码高度一致 | 长图指针控制点拖动、视觉观感 |
 | MAC-E2E-36 | Region 建对象后全局热键重启；工具激活时 Esc；自有夹具采集中全局热键重启 | 重启后无旧选区且 `SelectRegion annotations=0`；首 Esc 只回 Select 工具且会话保留；采集中重启后 `scroll_input_retired` 且无旧票输出、新会话需重选 | 迟到结果原生注入（仅注入式 APP-ASYNC）、目标关闭原生复现 |
 | MAC-E2E-37 | TextEdit/Safari 各一轮：单帧完成→缩略图→AX 进入标注→a11y 矩形→AX 完成 | `AddDefaultRectangle annotations=1`；`output_publish pixels=1200x600 annotations=1`；内存 PNG 解码整图 sRGB | 真机滚轮手感、视觉观感 |
+| MAC-E2E-38 | 冻结后 `snapshot --app`；`set-value` 写 `arcshot.overlay.selection` 建选区，再依次写八个 `arcshot.overlay.selection.handle.*`、`arcshot.overlay.selection.body`、`arcshot.overlay.object.new`、`arcshot.overlay.object.0` 与其 `.handle.*`、`arcshot.overlay.object.1.endpoint.*`；AX 点击对象节点选中；AX 取消 | 选区节点在无选区时 value=`none` 且可写；每次写出现 `a11y_action=<id> action=SetValue value=<载荷>` 与对应 `capture_edit`（`SelectRegion`/`PointerPressed`+`PointerReleased`），几何逐项等于预期（选区 `200,200,700,600`→`200,200,800,700`→移动→`20,30,320,330`；矩形 `40,50,140,120`→`40,50,180,150`→`60,70,200,170`；直线端点 `110,120`→`120,130`）；八个选区控制点与八个对象控制点各有稳定 id 与中心值；对象节点 `Click` 写 `a11y_action=arcshot.overlay.object.<i> action=Click` 且 `selected=Some(i)`；取消后 `from=Frozen to=Resident action=CancelAttempt` | 真实指针的按下—移动—释放动态与手感、命中容差（core 单测覆盖）、长图上非矩形工具的创建（无 AX 锚点，见 §4.5） |
 
 入口是 `scripts/e2e-agent-desktop.py [--release] [--tier … --only … --skip … --no-build]`（见 §4.3.1）：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -612,7 +622,7 @@ agent-desktop press escape --headed
 
 ### 4.3.1 单元、分档与重跑
 
-37 个用例按源码顺序切成 20 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
+38 个用例按源码顺序切成 21 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
 （`identity` 结束时应用仍在驻留，`sound_prefs`、`density_prefs` 以退出应用结束），因此可单独运行；
 有连续冻结会话的用例（12/13/14/18/19/20/21/23/25）同属
 `overlay_tools`，15/08/16 同属 `sound_prefs`。每个单元标注一个**档位**，说明它对与人共用的桌面做什么：
@@ -620,8 +630,8 @@ agent-desktop press escape --headed
 | 档位 | 对桌面的影响 | 当前单元 |
 | --- | --- | --- |
 | `quiet` | 无窗口、无覆盖层、不改前台、无真实键鼠 | `identity`（09/01/17/02）、`sound_prefs`（15/08/16） |
-| `ax` | 可出现自有窗口或覆盖层并取得焦点，但只用语义（AX）动作 | `notice_ax`（10） |
-| `physical` | 需要真实按键/指针（`--headed`、全局热键、拖拽、悬停）或自有夹具窗口 | 其余 17 个单元 |
+| `ax` | 可出现自有窗口或覆盖层并取得焦点，但只用语义（AX）动作 | `notice_ax`（10）、`selection_ax`（38）、`scroll_gate`（24） |
+| `physical` | 需要真实按键/指针（`--headed`、全局热键、拖拽、悬停）或自有夹具窗口 | 其余 16 个单元 |
 | `full` | 另外打开并移动 TextEdit/Safari 窗口 | `third_party`（30/31/37） |
 
 档位**由脚本强制**：低于 `physical` 时，`agent()` 与 `run()` 拒绝 `press`/`hover`/`drag`/`mouse-*`、
@@ -639,9 +649,9 @@ scripts/e2e-agent-desktop.py --only 36 --no-build        # 单元 id 或用例�
 scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可省略第三方目标
 ```
 
-- 部分运行打印 `mac_e2e=partial … cases=n/37 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
-  覆盖 37 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=37`。
-- 任何失败都以非零退出并打印 `mac_e2e=fail … cases=n/37 acceptance=false`；失败发生在单元内时，
+- 部分运行打印 `mac_e2e=partial … cases=n/38 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
+  覆盖 38 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=38`。
+- 任何失败都以非零退出并打印 `mac_e2e=fail … cases=n/38 acceptance=false`；失败发生在单元内时，
   其前另有一条 `e2e_timing unit=… failed=true`。参数与选择错误（如 `--only` 超出 `--tier`）在运行开始前退出，
   不带汇总行。
 - 只运行 `quiet`/`ax` 单元时，门禁只要求辅助功能权限；含截图的单元仍要求屏幕录制。
@@ -656,9 +666,11 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
 - `ax_click` 遇到 `STALE_REF`（未送达）会重新读树再点，最多 3 次；其他失败照常失败。
 - `ARCSHOT_E2E_TIER=quiet|ax scripts/check-all.sh` 在完整入口末尾追加对应档位的 E2E；默认关闭。
   CI 的手动 `e2e` 作业（`-f e2e_tier=quiet|ax`）见 `docs/agents/ci.md`。
-- 阻止单元降档的原因记在 `--list` 的 `blocker` 列：悬停才出现的选项、没有 AX 节点的选区、
-  真实按键语义、真实滚轮。前两类是产品侧 AX 接缝，需要各自的票据；落地前这些单元
-  保持 `physical`，不得用 `--headed` 结果冒充 `ax`。
+- 阻止单元降档的原因记在 `--list` 的 `blocker` 列：悬停才出现的选项、真实按键语义
+  （`cmd+Z`、Esc、录入组合）、真实滚轮、自有夹具窗口、`open`/`osascript` 打开第三方背景。
+  悬停与真实按键是尚未补齐的产品侧接缝；落地前这些单元保持 `physical`，不得用
+  `--headed` 结果冒充 `ax`。#63 落地后，选区与对象手势不再是降档原因：`selection_ax`
+  与 `scroll_gate` 已在 `ax` 档通过（§4.5）。
 
 ### 4.4 仍属用户或人工的项目
 
@@ -753,6 +765,26 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   实际缺陷；TextEdit/Safari 各以一步一条慢行完成启动、慢速双向、反向去重、
   无滚动单帧、Enter、双击、Esc、点击拦截与 PNG 输出（MAC-E2E-30/31）。
 - 已落地（#37）：组合回归接缝。删除按钮 `arcshot.overlay.delete` 在有选中对象时可 AX 激活；原生 `NSSavePanel` 经 `snapshot --app` 暴露 AppKit 自带 `CancelButton` / `OKButton` / `saveAsNameTextField`，取消与选定（`set-value` 改名 + 点保存）均可 AX 驱动，面板无标题窗口不适用 `wait_frontmost`；长图拖拽坐标按居中公式换算（`drag_long`）。另修复文字提交后的焦点滞留：`sync_text_editor` 在编辑消失时把窗口焦点返回覆盖层根（`window.focus(&self.focus, cx)`），此后撤销/重做/Esc 可达（MAC-E2E-32/35 守护）。文字提交统一用工具切换（AX 证据），不用选区内点击（Text 工具下会开始新编辑器）。
+- 已落地（#63）：选区与标注对象的 AX 手势词表。节点都是 `textfield`
+  （`agent-desktop` 只对可编辑角色提供 `set-value`；`group`/`button` 拿不到 ref 或
+  `SetValue`），`value` 为文档逻辑点几何（点 `"x,y"`，矩形/线段 `"x1,y1,x2,y2"`），
+  `SetValue` 由产品翻译成与指针相同的 `UiCommand` 序列后进入权威 `CaptureAction`：
+  | `accessibility_id` | 存在条件 | 载荷 | 动作 |
+  | --- | --- | --- | --- |
+  | `arcshot.overlay.selection` | 冻结且非长图（无选区时 value=`none`） | 两角 | 框选/重选 |
+  | `arcshot.overlay.selection.body` | 有选区、Select 工具 | 目标中心点 | 移动选区 |
+  | `arcshot.overlay.selection.handle.{top_left,top,top_right,right,bottom_right,bottom,bottom_left,left}` | 同可见控制点 | 目标点 | 调整选区 |
+  | `arcshot.overlay.object.new` | 有选区、标注工具激活 | 两角（value 报最后一个对象的范围） | 创建对象（Text 工具为 `BeginText`） |
+  | `arcshot.overlay.object.<i>` | 第 i 个对象（含长图表面） | 两角 | Click 选中；SetValue 移动 |
+  | `arcshot.overlay.object.<i>.handle.<八名>` | 矩形/模糊对象被选中 | 目标点 | 调整对象 |
+  | `arcshot.overlay.object.<i>.endpoint.{start,end}` | 直线/箭头被选中 | 目标点 | 编辑端点 |
+
+  每次激活写 `a11y_action=<id> action=SetValue value=<载荷>`（或 `action=Click`），随后
+  的 `capture_edit` 行描述结果文档状态。证据边界：这证明 core 手势逻辑（命中、钳制、
+  最小尺寸、单条历史步）经权威入口执行并改变文档，**不**证明真实指针的按下—移动—释放
+  动态或手感；后者仍属物理输入，不作为验收证据。控制点落在选区外时与指针一致地开始
+  新框选（MAC-E2E-38 的几何因此必须落在选区内）。长图表面不注册选区与创建节点，
+  非矩形工具在长图上仍只能拖拽创建，保持 **Not tested**。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
@@ -773,12 +805,11 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   AX id 与 `capture_edit` 诊断，tooltip 文案由 `ui::blur_tooltip_tests` 守护。#28 另外标注了
   文字工具（`arcshot.overlay.tool.text`）、文字色板/字号步进
   （`arcshot.overlay.option.text.*`）、字号值（`arcshot.overlay.text.size`）与文字输入
-  （`arcshot.overlay.text.input`）。**尚未**标注的是区域选区与八个调整控制点、标注对象本身与其控制点
-  （含线/箭头的两个端点）；#33 已把滚动预览标注为 `arcshot.scroll.preview`
-  （role image）。#24 已画出控制点并把移动/调整/重选接到 core，但控制点
-  不是 AX 节点；#25/#27 的对象绘制、移动、调整、删除仍依赖指针拖拽或只有选中对象后才出现
-  的删除按钮，而选中对象又只能通过指针命中。这些产品面落地时必须沿用 §4.2 的约定，
-  否则 MAC-REGION / MAC-ANNOTATION 的指针手势仍无法进入 E2E。
+  （`arcshot.overlay.text.input`）。区域选区、八个调整控制点、标注对象本身与其控制点
+  （含线/箭头的两个端点）已由 #63 补齐（见下条）；#33 已把滚动预览标注为
+  `arcshot.scroll.preview`（role image）。对象现在可经 `arcshot.overlay.object.<i>` 的
+  `Click` 选中，因此删除按钮不再需要指针命中；#25/#27 的创建、移动与调整也可在
+  `ax` 档驱动（MAC-E2E-38），但真实拖拽动态仍属物理输入。
 - 本机全局窗口清单不稳定、`snapshot --window-id` 不可用：E2E 不得依赖它；需要窗口
   级引用时先用 `list-windows --app` 取 id。
 
@@ -796,8 +827,8 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | --- | --- | --- |
 | MAC-START | 菜单驻留、无 Dock 主窗口、全部菜单命令、默认/自定义热键、冲突恢复、偏好跨重启、真实登录项状态/失败 | 部分：菜单、默认热键、退出、偏好项与完成音效/选项密度跨重启见 §4.3（MAC-E2E-01/15/16/17/22），热键录入与保存由 MAC-E2E-11 驱动；热键冲突恢复与登录项真实切换/失败仍不可驱动（会改动系统状态） |
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；Scroll 三权限预检诊断与入口闸门见 MAC-E2E-24；本机三项权限均已授权，缺失通知/设置返回重检/运行中失效属 §4.4，保持 **Not tested** |
-| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分（#37）：冻结/取消、菜单/热键、选区创建（拖拽前置 + 诊断）、撤销/重做/删除、AX 完成与 2x 输出几何见 §4.3（MAC-E2E-32/34/36）；选区移动/八向调整与重选的指针手势控制点无 AX 节点，保持 Not tested |
-| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分（#37）：五工具在 Region 与长图上各建一对象、对象历史与裁剪输出、密度/悬停与文字焦点见 MAC-E2E-13～25/32/33/35；对象/端点控制点拖动仍无 AX 节点，保持 Not tested |
+| MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分（#63）：冻结/取消、菜单/热键、选区创建/移动/八向调整/重选、撤销/重做/删除、AX 完成与 2x 输出几何见 §4.3（MAC-E2E-24/32/34/36/38）；真实指针拖拽动态属物理输入，保持 Not tested |
+| MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分（#63）：五工具在 Region 与长图上各建一对象、对象选中/移动/调整/端点编辑、对象历史与裁剪输出、密度/悬停与文字焦点见 MAC-E2E-13～25/32/33/35/38；真实指针拖拽动态与长图非矩形创建属物理输入，保持 Not tested |
 | MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 部分（#37）：拉丁文字创建/提交/撤销在 Region 与长图上见 MAC-E2E-25/32/33/35；中文 IME 组合/候选窗与 emoji 原生字形属 §4.4，保持 Not tested |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 部分（#37）：MAC-E2E-30/31 在两第三方目标各完成启动/目标身份/内侧预览/拦截/慢速双向扩展与反向去重/单帧/Enter/双击/Esc/PNG，MAC-E2E-37 补齐两目标的成功预览与长图标注组合，MAC-E2E-35 在自有夹具补齐扩展长图的五工具标注；真机滚轮手感保持 **Not tested** |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 部分（#36）：内侧预览在 TextEdit/Safari 各一次（`placed=inner`、`scroll_exclusion_fixed` 预览 id、AX `arcshot.scroll.preview` 可寻址）；右/左仍只由自有夹具证实，第三方取内侧以固定几何覆盖，目标不被浮层污染由排除集与解码图证实 |
@@ -811,9 +842,10 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 
 权限切换若先触发焦点停止，只能记录实际时序，不能冒称“运行中直接撤权”已验证。
 负面用例通过只表示安全处理，不外推为任意应用、动态内容、显示器或滚动速度兼容。
-尚未落地或尚无 AX 接缝的产品面（选区指针手势与八个控制点、标注、文字、滚动）
-在落地前保持 **Not tested**；落地时必须
-同时按 §4.2 加 AX 标注，不得用 `--headed` 坐标点击冒充这些用例的通过证据。
+尚未落地或尚无 AX 接缝的产品面（文字输入与 IME、悬停才出现的选项、真实滚轮与按键语义）
+在落地前保持 **Not tested**；落地时必须同时按 §4.2 加 AX 标注，不得用 `--headed`
+坐标点击冒充这些用例的通过证据。#63 之后选区与标注对象的手势已有 AX 词表（§4.5），
+其验收证据是 `a11y_action=` 与 `capture_edit` 两行，而不是坐标拖拽。
 
 ## 6. 性能与资源门槛
 

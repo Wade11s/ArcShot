@@ -1,4 +1,8 @@
 //! GPUI presentation and input; semantic state stays in the capture authority.
+use crate::a11y_gestures::{
+    A11yAffordance, A11yAnchor, GestureContext, affordance_commands, annotation_corners,
+    endpoint_name, format_corners, format_point, handle_name,
+};
 use crate::text_input::{TextInput, text_editor};
 use arcshot_app::{
     CaptureKeyAction, CaptureKeyContext, CapturePressAction, KeyModifiers, PARTIAL_ABANDON_LABEL,
@@ -69,7 +73,7 @@ impl ViewTransform {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum UiCommand {
     CancelCapture(CaptureTicket),
     Permission(WindowId, PermissionAction),
@@ -330,6 +334,59 @@ fn region(x: f32, y: f32, width: f32, height: f32) -> gpui::Div {
 }
 
 impl CaptureView {
+    /// The live mirrors an AX gesture is resolved against.
+    ///
+    /// Resolved per activation, never captured at render time, so a stale
+    /// snapshot cannot make a gesture act on geometry the document no longer has.
+    fn gesture_context(&self) -> GestureContext<'_> {
+        GestureContext {
+            busy: self.busy,
+            long_image: self.long_image,
+            tool: self.tool,
+            selection: self.selection,
+            annotations: &self.annotations,
+            text_editing: self.text_edit.is_some(),
+        }
+    }
+
+    /// The selection's two corners as the canonical AX value form.
+    fn selection_value(&self) -> String {
+        self.selection.map_or_else(
+            || "none".to_owned(),
+            |selection| {
+                format_corners(
+                    [selection.x(), selection.y()],
+                    [
+                        selection.x() + selection.width(),
+                        selection.y() + selection.height(),
+                    ],
+                )
+            },
+        )
+    }
+
+    /// One annotation's two corners in document coordinates as AX value text.
+    fn object_value(annotation: &Annotation) -> String {
+        annotation_corners(annotation)
+            .map_or_else(|| "none".to_owned(), |(a, b)| format_corners(a, b))
+    }
+
+    /// The window-space rect an annotation's AX node occupies.
+    ///
+    /// The node is invisible; it exists so assistive technology can address the
+    /// object where it is drawn. A degenerate extent is widened to one point so
+    /// the node stays addressable.
+    fn object_screen_rect(&self, annotation: &Annotation) -> Option<[f32; 4]> {
+        let (a, b) = annotation_corners(annotation)?;
+        let a = self.screen_point(a);
+        let b = self.screen_point(b);
+        let x = a[0].min(b[0]) as f32;
+        let y = a[1].min(b[1]) as f32;
+        let width = (a[0] - b[0]).abs() as f32;
+        let height = (a[1] - b[1]).abs() as f32;
+        Some([x, y, width.max(1.0), height.max(1.0)])
+    }
+
     fn logical_size(&self) -> [f64; 2] {
         self.screen
             .map(|screen| {
@@ -1063,6 +1120,77 @@ impl Render for TooltipView {
     }
 }
 
+/// One addressable gesture affordance on the overlay.
+///
+/// The node carries a stable `accessibility_id`, a role, a value that mirrors
+/// the authoritative geometry, and the pointer-equivalent action set. It is
+/// never a second editor: every activation is translated into the same
+/// `UiCommand` sequence a pointer gesture at the same points would enqueue.
+struct A11yGesture {
+    id: String,
+    label: String,
+    value: String,
+    /// What `SetValue` with this node's payload does.
+    affordance: A11yAffordance,
+    /// What `Click` does, when the node is clickable at all.
+    click: Option<A11yAffordance>,
+}
+
+/// Builds one gesture node; the caller positions it with the returned div.
+fn a11y_gesture(
+    gesture: A11yGesture,
+    ticket: CaptureTicket,
+    view: Entity<CaptureView>,
+    queue: &UiQueue,
+) -> gpui::Stateful<gpui::Div> {
+    let A11yGesture {
+        id,
+        label,
+        value,
+        affordance,
+        click,
+    } = gesture;
+    let set_id = id.clone();
+    let click_id = id.clone();
+    let set_view = view.clone();
+    let set_queue = Rc::clone(queue);
+    // `textfield` is the only role that both earns a ref and accepts a semantic
+    // write: `group` gets no ref and `button` advertises no `SetValue`, so
+    // neither can carry a gesture payload (#63).
+    let mut node = div()
+        .id(gpui::ElementId::Name(id.clone().into()))
+        .role(Role::TextInput)
+        .aria_label(label)
+        .aria_value(value)
+        .accessibility_id(id)
+        .on_a11y_action(AccessibleAction::SetValue, move |data, _, cx| {
+            let payload = match data {
+                Some(gpui::accesskit::ActionData::Value(text)) => text.to_string(),
+                Some(gpui::accesskit::ActionData::NumericValue(value)) => value.to_string(),
+                _ => String::new(),
+            };
+            log::info!("a11y_action={set_id} action=SetValue value={payload}");
+            let commands = set_view.update(cx, |view, _| {
+                let context = view.gesture_context();
+                affordance_commands(&context, ticket, affordance, &payload)
+            });
+            set_queue.borrow_mut().extend(commands);
+        });
+    if let Some(click_affordance) = click {
+        let click_view = view;
+        let click_queue = Rc::clone(queue);
+        node = node.on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
+            log::info!("a11y_action={click_id} action=Click");
+            let commands = click_view.update(cx, |view, _| {
+                let context = view.gesture_context();
+                affordance_commands(&context, ticket, click_affordance, "")
+            });
+            click_queue.borrow_mut().extend(commands);
+        });
+    }
+    node
+}
+
 impl Render for CaptureView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ticket = self.ticket;
@@ -1495,14 +1623,32 @@ impl Render for CaptureView {
             }
 
             // Eight control points are the visible move/resize affordances; the
-            // same logical centers drive the core hit test.
+            // same logical centers drive the core hit test. Each point is also an
+            // addressable AX node whose SetValue drags it to a new position.
             if show_selection_handles && let Some(selection) = self.selection {
                 for handle in RESIZE_HANDLES {
-                    let [x, y] = self
-                        .screen_point(selection.handle_center(handle))
-                        .map(|value| value as f32);
+                    let center = selection.handle_center(handle);
+                    let [x, y] = self.screen_point(center).map(|value| value as f32);
+                    let node = a11y_gesture(
+                        A11yGesture {
+                            id: format!("arcshot.overlay.selection.handle.{}", handle_name(handle)),
+                            label: format!("选区控制点 {}", handle_name(handle)),
+                            value: format_point(center),
+                            affordance: A11yAffordance::DragFrom(A11yAnchor::SelectionHandle(
+                                handle,
+                            )),
+                            click: None,
+                        },
+                        ticket,
+                        cx.entity(),
+                        &self.queue,
+                    );
                     root = root.child(
-                        region(x - 4.0, y - 4.0, 8.0, 8.0)
+                        node.absolute()
+                            .left(px(x - 4.0))
+                            .top(px(y - 4.0))
+                            .w(px(8.0))
+                            .h(px(8.0))
                             .bg(rgb(0x007aff))
                             .border_1()
                             .border_color(rgb(0xffffff)),
@@ -1512,8 +1658,12 @@ impl Render for CaptureView {
 
             // The selected object's own eight control points use its stroke
             // colour, so object chrome is distinguishable from selection chrome.
+            // Rectangle controls drag a corner/edge; line and arrow controls drag
+            // one endpoint. Both are addressable AX nodes.
             if show_handles
-                && let Some(annotation) = self.selected.and_then(|i| self.annotations.get(i))
+                && let Some((index, annotation)) = self
+                    .selected
+                    .and_then(|index| self.annotations.get(index).map(|object| (index, object)))
             {
                 let [red, green, blue] = match annotation.style().stroke() {
                     Some(color) => color.rgb(),
@@ -1522,26 +1672,176 @@ impl Render for CaptureView {
                     None => [0xFF, 0xFF, 0xFF],
                 };
                 let color = rgb(u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue));
-                let centers: Vec<[f64; 2]> = match annotation.shape() {
+                let controls: Vec<(&'static str, A11yAffordance, [f64; 2])> = match annotation
+                    .shape()
+                {
                     Shape::Rectangle(_) => RESIZE_HANDLES
                         .into_iter()
-                        .filter_map(|handle| annotation.handle_center(handle))
+                        .filter_map(|handle| {
+                            annotation.handle_center(handle).map(|center| {
+                                (
+                                    handle_name(handle),
+                                    A11yAffordance::DragFrom(A11yAnchor::ObjectHandle {
+                                        index,
+                                        handle,
+                                    }),
+                                    center,
+                                )
+                            })
+                        })
                         .collect(),
                     Shape::Line(segment) => [Endpoint::Start, Endpoint::End]
                         .into_iter()
-                        .map(|endpoint| segment.endpoint_center(endpoint))
+                        .map(|endpoint| {
+                            (
+                                endpoint_name(endpoint),
+                                A11yAffordance::DragFrom(A11yAnchor::Endpoint { index, endpoint }),
+                                segment.endpoint_center(endpoint),
+                            )
+                        })
                         .collect(),
                     Shape::Text(_) => Vec::new(),
                 };
-                for [x, y] in centers {
-                    let [x, y] = self.screen_point([x, y]).map(|value| value as f32);
+                for (name, affordance, center) in controls {
+                    let [x, y] = self.screen_point(center).map(|value| value as f32);
+                    // Line and arrow controls are endpoints, not resize handles;
+                    // the id says which so the E2E ids never churn.
+                    let kind = match affordance {
+                        A11yAffordance::DragFrom(A11yAnchor::Endpoint { .. }) => "endpoint",
+                        _ => "handle",
+                    };
+                    let node = a11y_gesture(
+                        A11yGesture {
+                            id: format!("arcshot.overlay.object.{index}.{kind}.{name}"),
+                            label: format!("对象 {index} 控制点 {name}"),
+                            value: format_point(center),
+                            affordance,
+                            click: None,
+                        },
+                        ticket,
+                        cx.entity(),
+                        &self.queue,
+                    );
                     root = root.child(
-                        region(x - 4.0, y - 4.0, 8.0, 8.0)
+                        node.absolute()
+                            .left(px(x - 4.0))
+                            .top(px(y - 4.0))
+                            .w(px(8.0))
+                            .h(px(8.0))
                             .bg(color)
                             .border_1()
                             .border_color(rgb(0xffffff)),
                     );
                 }
+            }
+        }
+
+        // Selection and object gestures have no drag equivalent in assistive
+        // technology, so the surface exposes them as addressable nodes whose
+        // values mirror the authoritative geometry and whose SetValue replays
+        // the pointer command sequence. The selection node exists even without
+        // a selection so the first band can be created without a drag.
+        if frozen && !self.long_image {
+            let node = a11y_gesture(
+                A11yGesture {
+                    id: "arcshot.overlay.selection".to_owned(),
+                    label: "选区".to_owned(),
+                    value: self.selection_value(),
+                    affordance: A11yAffordance::Band,
+                    click: None,
+                },
+                ticket,
+                cx.entity(),
+                &self.queue,
+            );
+            root = root.child(node.absolute().left(px(0.0)).top(px(0.0)).size_full());
+            if let Some(selection) = self.selection {
+                // Moving the selection is a press on its body; the node only
+                // exists where that gesture is legal (the select tool).
+                if show_selection_handles && self.tool == Tool::Select {
+                    let center = [
+                        selection.x() + selection.width() / 2.0,
+                        selection.y() + selection.height() / 2.0,
+                    ];
+                    let [x, y] = self.screen_point(center).map(|value| value as f32);
+                    let node = a11y_gesture(
+                        A11yGesture {
+                            id: "arcshot.overlay.selection.body".to_owned(),
+                            label: "移动选区".to_owned(),
+                            value: format_point(center),
+                            affordance: A11yAffordance::DragFrom(A11yAnchor::SelectionCenter),
+                            click: None,
+                        },
+                        ticket,
+                        cx.entity(),
+                        &self.queue,
+                    );
+                    root = root.child(
+                        node.absolute()
+                            .left(px(x - 4.0))
+                            .top(px(y - 4.0))
+                            .w(px(8.0))
+                            .h(px(8.0)),
+                    );
+                }
+                // Creating an object with an annotation tool is a drag inside
+                // the selection; the value reports the last object's extent so
+                // the caller can see what the previous gesture produced.
+                if show_handles && self.tool.is_annotation() {
+                    let value = self
+                        .annotations
+                        .last()
+                        .map_or_else(|| "none".to_owned(), Self::object_value);
+                    let node = a11y_gesture(
+                        A11yGesture {
+                            id: "arcshot.overlay.object.new".to_owned(),
+                            label: format!("新建{:?}标注", self.tool),
+                            value,
+                            affordance: A11yAffordance::CornersGesture,
+                            click: None,
+                        },
+                        ticket,
+                        cx.entity(),
+                        &self.queue,
+                    );
+                    root = root.child(
+                        node.absolute()
+                            .left(px(4.0))
+                            .top(px(4.0))
+                            .w(px(8.0))
+                            .h(px(8.0)),
+                    );
+                }
+            }
+        }
+
+        // Every annotation object is an addressable node at its drawn extent,
+        // on the region surface and on the whole-image surface alike. A click
+        // selects it; SetValue moves it by dragging its centre.
+        if frozen && !self.busy {
+            for (index, annotation) in self.annotations.iter().enumerate() {
+                let Some([x, y, width, height]) = self.object_screen_rect(annotation) else {
+                    continue;
+                };
+                let node = a11y_gesture(
+                    A11yGesture {
+                        id: format!("arcshot.overlay.object.{index}"),
+                        label: format!("标注对象 {index} {:?}", annotation.style().tool()),
+                        value: Self::object_value(annotation),
+                        affordance: A11yAffordance::MoveObject(index),
+                        click: Some(A11yAffordance::Click(A11yAnchor::ObjectCenter(index))),
+                    },
+                    ticket,
+                    cx.entity(),
+                    &self.queue,
+                );
+                root = root.child(
+                    node.absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(width))
+                        .h(px(height)),
+                );
             }
         }
 
