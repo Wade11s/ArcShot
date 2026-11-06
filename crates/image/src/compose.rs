@@ -150,6 +150,18 @@ pub fn preview_bgra(image: &ComposedImage) -> Result<Vec<u8>, ComposeError> {
     Ok(bytes)
 }
 
+/// Swaps red and blue in place, converting RGBA bytes to the BGRA layout
+/// GPUI's `RenderImage` expects.
+///
+/// Use this for pixels that arrived from a decoder or another RGBA source;
+/// [`compose_document`] output goes through [`preview_bgra`] instead. A
+/// trailing partial pixel is left untouched, so callers pass whole pixels.
+pub fn rgba_to_bgra_in_place(bytes: &mut [u8]) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+}
+
 fn physical(value: f64, scale: f64, origin: u32) -> i64 {
     let limit = f64::from(i32::MAX);
     ((value * scale).round().clamp(-limit, limit) as i64) - i64::from(origin)

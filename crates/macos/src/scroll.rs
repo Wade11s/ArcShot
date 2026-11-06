@@ -350,7 +350,8 @@ fn cg_window_frame(window_id: u32) -> Option<(f64, f64, f64, f64, u32)> {
         found = Some((x, y, width, height, pid));
         break;
     }
-    // SAFETY: The array is a +0 CoreFoundation object returned by a Copy function.
+    // SAFETY: `CGWindowListCopyWindowInfo` follows the Copy rule and returns +1,
+    // so this single release balances it.
     unsafe { CFRelease(array) };
     found
 }
@@ -445,7 +446,8 @@ fn cg_window_list_ids() -> Vec<u32> {
             ids.push(id);
         }
     }
-    // SAFETY: The array is a +0 CoreFoundation object returned by a Copy function.
+    // SAFETY: `CGWindowListCopyWindowInfo` follows the Copy rule and returns +1,
+    // so this single release balances it.
     unsafe { CFRelease(array) };
     ids
 }
@@ -488,7 +490,8 @@ fn cg_window_at(point: [f64; 2]) -> Option<u32> {
             }
         }
     }
-    // SAFETY: The array is a +0 CoreFoundation object returned by a Copy function.
+    // SAFETY: `CGWindowListCopyWindowInfo` follows the Copy rule and returns +1,
+    // so this single release balances it.
     unsafe { CFRelease(array) };
     found
 }

@@ -5,7 +5,7 @@
 //! terminal uncertainty, and admission through the named-sRGB neutral frame
 //! constructor against the fixed display/selection/scale.
 use arcshot_app::{
-    MAX_RAW_FRAMES, ScrollFrameQueue, ScrollFrameQueueError, ScrollFrameSubmitError,
+    MAX_RAW_FRAMES, RestartGate, ScrollFrameQueue, ScrollFrameQueueError, ScrollFrameSubmitError,
     ScrollFrameTasks, admit_scroll_capture, may_submit_scroll_frame,
 };
 use arcshot_core::{
@@ -305,4 +305,30 @@ fn app_frame_05_scroll_admission_requires_full_opacity_under_the_selection_geome
         admit_scroll_capture(region(), crop(), 60, 40, 60 * 4, bytes),
         Err(CaptureFailure::InvalidFrame)
     );
+}
+
+#[test]
+fn app_async_09_restart_waits_for_the_single_native_slot() {
+    let mut gate = RestartGate::default();
+    // A free slot starts immediately and leaves nothing pending.
+    assert!(gate.request(false));
+    assert!(!gate.is_pending());
+    assert!(!gate.resume(false));
+
+    // A busy slot defers the restart and keeps it pending across ticks.
+    assert!(!gate.request(true));
+    assert!(gate.is_pending());
+    assert!(!gate.resume(true));
+    assert!(gate.is_pending());
+
+    // The restart resumes exactly once, when the slot is free.
+    assert!(gate.resume(false));
+    assert!(!gate.is_pending());
+    assert!(!gate.resume(false));
+
+    // An explicit cancel withdraws a deferred restart.
+    assert!(!gate.request(true));
+    gate.cancel();
+    assert!(!gate.is_pending());
+    assert!(!gate.resume(false));
 }

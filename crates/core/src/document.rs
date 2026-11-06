@@ -515,11 +515,13 @@ impl Document {
     /// Switches the active pointer tool; this is interaction state, not history.
     ///
     /// A tool change never clears objects, styles or the selection, and a held
-    /// drag keeps its original tool until release. Leaving the text tool with a
-    /// pending edit commits that edit first, as one history step.
+    /// drag keeps its original tool until release. Any tool change with a
+    /// pending edit commits that edit first, as one history step — including a
+    /// re-edit started under the select tool, which never makes the text tool
+    /// active.
     pub fn set_tool(&mut self, tool: Tool) {
         if self.drag.is_none() {
-            if self.tool == Tool::Text && tool != Tool::Text {
+            if self.tool != tool && self.text_edit.is_some() {
                 let _ = self.commit_edits();
             }
             self.tool = tool;

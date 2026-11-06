@@ -139,3 +139,19 @@ fn image_compose_04_a_moved_and_resized_selection_crops_the_matching_physical_pi
     assert_eq!((composed.width(), composed.height()), (3, 2));
     assert_eq!(&composed.rgba()[0..4], &[0x30, 0x0A, 0x02, 0xFF]);
 }
+
+#[test]
+fn image_compose_12_rgba_to_bgra_swaps_only_red_and_blue() {
+    // Whole pixels swap R and B and keep G/A; a trailing partial pixel is left
+    // untouched so a malformed buffer cannot be silently rewritten.
+    let mut bytes = [10, 20, 30, 40, 50, 60, 70, 80, 99];
+    arcshot_image::rgba_to_bgra_in_place(&mut bytes);
+    assert_eq!(bytes, [30, 20, 10, 40, 70, 60, 50, 80, 99]);
+
+    // The converted bytes are exactly what `preview_bgra` produces for the same
+    // pixels, which is the layout GPUI's `RenderImage` reads.
+    let composed = ComposedImage::try_new(1, 1, vec![10, 20, 30, 40]).unwrap();
+    let mut same = [10, 20, 30, 40];
+    arcshot_image::rgba_to_bgra_in_place(&mut same);
+    assert_eq!(&same[..], arcshot_image::preview_bgra(&composed).unwrap());
+}

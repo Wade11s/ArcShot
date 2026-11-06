@@ -6,7 +6,7 @@ mod stitch;
 mod text;
 pub use compose::{
     ComposeError, ComposedImage, compose_crop, compose_document, compose_document_with_font,
-    encode_png, preview_bgra,
+    encode_png, preview_bgra, rgba_to_bgra_in_place,
 };
 pub use preview::{CapturePreview, PreviewError, capture_preview};
 pub use stitch::{
