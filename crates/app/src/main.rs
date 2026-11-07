@@ -1,5 +1,6 @@
 //! ArcShot's native menu-bar application.
 
+mod a11y_gestures;
 mod coordinator;
 mod logging;
 mod text_input;
