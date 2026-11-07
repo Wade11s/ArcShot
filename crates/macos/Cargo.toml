@@ -8,38 +8,67 @@ publish.workspace = true
 
 [dependencies]
 arcshot-core.workspace = true
+core-foundation = { version = "=0.10.0", default-features = false }
+core-graphics = { version = "=0.24.0", default-features = false }
+core-text = { version = "=21.0.0", default-features = false, features = ["link"] }
 log = "0.4"
 screencapturekit = { version = "=11.1.1", default-features = false, features = ["macos_15_0"] }
 apple-cf = { version = "=0.11.7", default-features = false, features = ["cg"] }
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
+block2 = { version = "0.6", default-features = false, features = ["alloc"] }
+objc2-service-management = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "SMAppService",
+    "objc2",
+    "objc2-foundation",
+] }
+objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "UTType",
+    "UTCoreTypes",
+] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSApplication",
+    "NSBitmapImageRep",
+    "NSCell",
     "NSButton",
     "NSControl",
     "NSImage",
+    "NSImageRep",
     "NSMenu",
     "NSMenuItem",
+    "NSEvent",
+    "NSPanel",
+    "NSPasteboard",
     "NSResponder",
     "NSRunningApplication",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSSavePanel",
+    "NSSound",
+    "NSUserInterfaceValidation",
     "NSView",
     "NSWorkspace",
     "NSWindow",
+    "block2",
+    "libc",
     "objc2-core-foundation",
+    "objc2-uniform-type-identifiers",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSArray",
     "NSData",
     "NSEnumerator",
+    "NSError",
     "NSGeometry",
     "NSString",
     "NSURL",
     "NSUserDefaults",
+    "alloc",
 ] }
 
 [lints]

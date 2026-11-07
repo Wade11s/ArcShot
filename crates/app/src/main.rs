@@ -1,7 +1,10 @@
 //! ArcShot's native menu-bar application.
 
+mod a11y_gestures;
 mod coordinator;
 mod logging;
+mod text_font;
+mod text_input;
 mod ui;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -77,7 +80,53 @@ fn run_app(mode: RunMode) -> Result<()> {
                         "status-item-only smoke must not expose a capture window"
                     );
                     println!("capture_window_exclusion_smoke=pass visible_owned_windows=0 no_native_capture=true");
-                    println!("capture_menu_smoke=pass queued_commands=3 no_native_capture=true");
+                    println!(
+                        "capture_menu_smoke=pass queued_commands=6 menu_items=7 no_native_capture=true"
+                    );
+                    println!("menu_items_smoke=pass count=7 density_index=3");
+                    // The three preference items show the stored density/sound
+                    // values and the real SMAppService login-item status; the
+                    // smoke only reads.
+                    let login_item = menu_bar.validate_preference_items()?;
+                    println!(
+                        "preference_items_smoke=pass density_selector=toggleDensity: sound_selector=toggleCompletionSound: login_selector=toggleLaunchAtLogin: state_from_system=true"
+                    );
+                    println!(
+                        "login_item_status_smoke=pass state={login_item:?} read_only=true"
+                    );
+                    // The stored completion-sound value round-trips in the real
+                    // per-user preferences domain and is restored afterwards.
+                    let original = arcshot_macos::completion_sound_enabled();
+                    arcshot_macos::store_completion_sound(!original);
+                    ensure!(
+                        arcshot_macos::completion_sound_enabled() == !original,
+                        "completion-sound preference did not round-trip"
+                    );
+                    arcshot_macos::store_completion_sound(original);
+                    ensure!(
+                        arcshot_macos::completion_sound_enabled() == original,
+                        "completion-sound preference was not restored"
+                    );
+                    println!(
+                        "preference_smoke=pass key=CompletionSoundEnabled roundtrip=true restored=true"
+                    );
+                    // The option-density preference round-trips in the same real
+                    // per-user preferences domain and is restored afterwards.
+                    let original_density = arcshot_macos::density()?;
+                    let flipped_density = original_density.toggled();
+                    arcshot_macos::store_density(flipped_density)?;
+                    ensure!(
+                        arcshot_macos::density()? == flipped_density,
+                        "option density did not round-trip"
+                    );
+                    arcshot_macos::store_density(original_density)?;
+                    ensure!(
+                        arcshot_macos::density()? == original_density,
+                        "option density was not restored"
+                    );
+                    println!(
+                        "density_smoke=pass key=OptionDensity roundtrip=true restored=true default=Compact"
+                    );
                     // Native hotkey registration, suspension and cleanup; no
                     // key event is synthesized, so no session can start.
                     let mut hotkeys = arcshot_macos::GlobalHotkeys::install()?;
@@ -87,6 +136,47 @@ fn run_app(mode: RunMode) -> Result<()> {
                     hotkeys.resume()?;
                     drop(hotkeys);
                     println!("hotkey_registration_smoke=pass default={default} suspend_resume_cleanup=clean");
+                    // Native PNGf path plus AppKit in-memory decode on a private
+                    // pasteboard; the user's clipboard is never modified.
+                    let composed = arcshot_image::ComposedImage::try_new(2, 2, vec![255; 16])?;
+                    let png = arcshot_image::encode_png(&composed)?;
+                    let decoded = arcshot_macos::validate_png_pasteboard(&png, 2, 2)?;
+                    println!(
+                        "clipboard_pngf_smoke=pass width={} height={} private_pasteboard=true",
+                        decoded.width, decoded.height
+                    );
+                    // Explicit save writes the same encoded bytes to a real file,
+                    // verifies the roundtrip and removes the probe file. Rejected
+                    // destinations and non-PNG bytes never claim success.
+                    let save_path = std::env::temp_dir()
+                        .join(format!("arcshot-save-smoke-{}.png", std::process::id()));
+                    arcshot_macos::write_png_to_file(&save_path, &png)?;
+                    ensure!(
+                        std::fs::read(&save_path)? == png,
+                        "saved PNG did not read back byte-identically"
+                    );
+                    std::fs::remove_file(&save_path)?;
+                    let missing = std::env::temp_dir().join(format!(
+                        "arcshot-save-smoke-missing-{}/out.png",
+                        std::process::id()
+                    ));
+                    ensure!(
+                        arcshot_macos::write_png_to_file(&missing, &png).is_err()
+                            && !missing.exists(),
+                        "a missing destination must fail without creating a file"
+                    );
+                    ensure!(
+                        arcshot_macos::write_png_to_file(&save_path, b"not a png").is_err()
+                            && !save_path.exists(),
+                        "non-PNG bytes must not create a file"
+                    );
+                    // Configures the real PNG panel without showing it; showing and
+                    // cancelling it is a MAC-RECOVERY manual case.
+                    drop(arcshot_macos::PngSavePanel::try_new("ArcShot.png")?);
+                    println!(
+                        "save_file_smoke=pass bytes={} roundtrip=true rejected_destination=true invalid_bytes=true panel_configured=true",
+                        png.len()
+                    );
                     println!(
                         "startup_smoke=pass activation_policy=Accessory quit_action=terminate:"
                     );

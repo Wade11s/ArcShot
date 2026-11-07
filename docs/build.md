@@ -45,6 +45,10 @@ open target/bundle/release/ArcShot.app
   未创建该身份时回退 ad-hoc；ad-hoc 的指定需求绑定 CDHash，同一配置重新编译也会
   改变它，不能沿用旧签名的权限结论。该身份仅用于本机测试，不可用于发布或分发，
   首次签名时系统可能询问钥匙串访问（选“始终允许”）。
+- 本地偏好写在各自的 bundle 偏好域（`NSUserDefaults`）：热键
+  `CaptureHotkey`、首引导 `ScreenRecordingPermissionGuideSeen`、完成音效
+  `CompletionSoundEnabled`（缺失=开）。不联网、不写共享域；`--smoke-test` 对
+  完成音效做一次写入/读回/还原，不改变用户最终取值。
 - Release 的 bundle ID 为 `dev.arcshot.app`，名称为 ArcShot；Debug 使用独立的
   `dev.arcshot.app.debug` 与 ArcShot Debug。构建脚本在签名前写入 Debug 元数据，
   两者的 LaunchServices 解析、TCC 授权与偏好分别归属，避免系统重开时选错构建。
@@ -60,8 +64,11 @@ open target/bundle/release/ArcShot.app
 | GPUI 基座：`gpui-pre` 0.3.11 + `gpui-pre-platform` 0.3.11（Cargo.toml 中重命名为 `gpui` / `gpui-platform`），默认特性关闭 + `font-kit` | app 的 run loop、文字系统、窗口/渲染，以及 #53 起的可访问性入口 | Zed 官方预发布快照，`=0.3.11` 精确 pin、整族原子升级（ADR-0001，见下节）。pre-1.0 API 与 macOS 生命周期变化风险高；升级须重跑文字、原生与 E2E 矩阵。未采用 `NoopTextSystem`，也未使用会静默关闭可访问性的 `Application::new_inaccessible`。 |
 | anyhow 1.0.104 | 可执行文件启动错误上下文 | 不进入其他 crate 的公共错误 API。 |
 | objc2 0.6.5、objc2-app-kit / foundation 0.3.2 | NSStatusItem、NSMenu、NSImage、NSApplication 的 Rust 绑定 | 替代是更老 cocoa/objc 或手写 FFI；当前选择减少 unsafe 并与主线程类型集成。generated binding feature/可用性风险由锁版与 MAC-START 检查控制。 |
+| objc2-service-management 0.3.2（`=0.3.2`，关闭默认特性，仅 `std`/`SMAppService`/`objc2`/`objc2-foundation`） | #30 的“登录时启动”：`SMAppService.mainAppService` 的只读状态与 register/unregister | 与 objc2 家族同源（madsmtm/objc2）、锁版一致，避免手写 ServiceManagement FFI；不加 block2/sandbox 等未用特性。启动冒烟与 E2E 只读状态，真实注册/注销仍属 MAC-START 人工项。 |
 | dispatch2 0.3.1 | 将退出 action 安全排队回主队列 | 替代为自写 GCD FFI，未采用；`MainThreadBound` 避免自写 `unsafe impl Send`。 |
+| core-text 21.0.0、core-graphics 0.24.0、core-foundation 0.10.0（macos，精确 pin） | #62 的标注文字：用系统无衬线字态度量与栅格化多行文字（CJK/emoji/IME 结果不再是 5x7 方框） | 三者已由 GPUI 基座带入同一锁版，未新增供应链来源；Core Text 无需窗口即可在预览/输出工作线程运行，彩色 emoji 保留自身颜色。替代为手写 CoreText FFI 会增加 unsafe 面积，替代为 AppKit 绘制需要主线程。 |
 | image 0.25.10（app，关闭默认特性） | 把内存 BGRA 预览包装成 GPUI 要求的 Frame 类型 | 已由 GPUI 带入同版本；不使用编码、磁盘或网络加载。替代为 PNG 中转会增加编码和内存副本，未采用。 |
+| png 0.18.1（image） | 把裁剪后的 RGBA 合成为 8-bit sRGB PNG | 只编码内存中的选定区域，不读盘、不联网；写入前用预算 writer 限制 128 MiB。替代为 `image` 的编码特性会扩大依赖与内存副本，未采用。 |
 | log 0.4.34（app） | 文本诊断和捕获/窗口提交耗时 | 已在依赖图中；自有 stderr logger 无网络、遥测和像素日志。替代为每处直接打印未采用。 |
 | log 0.4.34（macos，#21） | Carbon 热键适配器在注销/移除失败与 Drop 异常路径记录诊断 | 与 app 共用同一 crate 与 stderr logger；适配器不做窗口或用户界面，失败仍以 `Result` 返回。 |
 
@@ -133,7 +140,8 @@ facade，但不提供本票的 NSStatusItem 生命周期。#19 时没有 GPUI �
 ## 重要传递原生/构建依赖
 
 - GPUI 基座带入 `gpui-pre-macos` / `gpui-pre-apple`（objc2 0.6.5、core-text 21.0.0、
-  core-graphics 0.24.0、objc2-metal 0.3.2）、`accesskit` 0.24.1 / `accesskit_macos`
+  core-graphics 0.24.0、objc2-metal 0.3.2）；#62 起 `arcshot-macos` 直接依赖同一锁版的
+  core-text/core-graphics/core-foundation 做系统字体栅格化。`accesskit` 0.24.1 / `accesskit_macos`
   0.26.3 与经 `font-kit` 链路的 `zed-font-kit 0.14.1-zed`，分别用于 AppKit 窗口、
   Metal 渲染、可访问性树与真实文字后端。它们链接 Apple 系统框架；升级风险随
   GPUI 锁版管理。0.3.11 已不再拉 `cocoa 0.26` / `block 0.1.6`（0.2.2 有此遗留），

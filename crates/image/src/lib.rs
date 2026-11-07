@@ -1,7 +1,21 @@
-//! Image assets and future image processing for ArcShot.
+//! Image assets, compositing and encoding for ArcShot.
 
+mod compose;
 mod preview;
+mod stitch;
+mod text;
+pub use compose::{
+    ComposeError, ComposedImage, compose_crop, compose_document, compose_document_with_font,
+    encode_png, preview_bgra, rgba_to_bgra_in_place,
+};
 pub use preview::{CapturePreview, PreviewError, capture_preview};
+pub use stitch::{
+    MAX_PREVIEW_PIXELS, StitchBuilder, StitchDecision, StitchPlacement, StitchPreview,
+    StitchRefusal,
+};
+pub use text::{
+    BitmapFont, TextFont, TextGlyphs, TextMetrics, measure_text, measure_text_with_font, tint,
+};
 
 use arcshot_core::StatusItemIcon;
 

@@ -130,3 +130,24 @@ scripts/e2e-agent-desktop.py --release  # Release
 - 真实 TCC 提示、设置返回重检、运行中撤权、热键录入与保存、IME 候选窗：属用户
   授权或无可寻址节点，未覆盖。
 - Release 只跑了同一序列一次；未做重复稳定性统计、性能与资源测量。
+
+## #30 追加：状态菜单两个偏好项与跨重启（2026-11-04）
+
+以上各节记录基座迁移轮（0.2.2 → 0.3.11）的实测，**不覆盖**后续票据新增的可寻址
+产品面。本节只记录 #30 在合并 #25 之后的同一入口上跑出的结果；完整环境、命令与
+子用例见 [`30-sound-login.md`](30-sound-login.md)。
+
+- 实测实现/脚本 SHA：`efa3b7a395080733a902d76bf583454ddaa248b3`。
+- 时间：2026-11-04T06:07:07Z，Debug 配置，`agent-desktop 1.1.0`（envelope `2.6`）。
+- 入口：`scripts/e2e-agent-desktop.py`，17 个用例全部 `pass`，结尾
+  `mac_e2e=pass configuration=debug … cases=17`。
+- 状态菜单现在有六个菜单项：四个既有命令 + `toggleCompletionSound:` +
+  `toggleLaunchAtLogin:`，`native_id` 即 selector；MAC-E2E-01 已同步更新。
+- 新增：MAC-E2E-15（AX 切换完成音效并写偏好）、MAC-E2E-16（两次真实重启验证偏好
+  跨重启并还原）、MAC-E2E-17（菜单打开读取真实 `SMAppService` 状态，全程没有
+  `login_item_set`）。真实登录项注册/注销仍为 **Not tested**。
+- 焦点前置：冻结覆盖层打开后产品写一行 `app_active surface=frozen`，E2E 等它再发
+  `--headed` Esc；带标题窗口改用 `snapshot --surface focused` 确认前台。补此接缝前
+  同一代码上有两轮失败（`--headed` Esc 与录制组合未被前台接收），补后连续 17/17。
+- 日志：`target/e2e-agent-desktop-debug.log` 与
+  `target/e2e-agent-desktop-debug-restart-1/-2.log`（每次重启单独一份）。
