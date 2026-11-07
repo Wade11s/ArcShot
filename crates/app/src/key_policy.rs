@@ -31,6 +31,12 @@ pub struct CaptureKeyContext {
     pub tool: Tool,
     /// A text editor is active; Enter, Delete/Backspace and undo/redo belong to it.
     pub text_editing: bool,
+    /// The system input method owns a marked (preedit) composition.
+    ///
+    /// While composing, Esc cancels the candidate, Enter selects one, and
+    /// digits/space pick candidates. None of those may be turned into an
+    /// overlay action; the IME must see them first.
+    pub ime_composing: bool,
 }
 
 /// What the overlay should queue for a key press, if anything.
@@ -88,6 +94,12 @@ pub fn capture_key_action(
     // with the editor and IME. Esc ends the edit first; every other application
     // shortcut is suppressed so IME composition keys keep priority.
     if context.text_editing && !context.busy && !context.dragging {
+        if context.ime_composing {
+            // The IME owns every key until the composition ends; Esc must
+            // cancel the candidate, not commit the raw Pinyin and close the
+            // editor.
+            return None;
+        }
         return match key {
             "escape" => Some(CaptureKeyAction::EndTextEdit),
             _ => None,

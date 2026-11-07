@@ -62,6 +62,22 @@ impl TextInput {
             Selection::try_new(self.anchor[0], self.anchor[1], 1.0, 1.0)
                 .expect("a unit box at a finite anchor is valid")
         });
+        // Text-only IME acceptance seam: character counts, never the content.
+        let chars = self.content.chars().count();
+        let cjk = self
+            .content
+            .chars()
+            .filter(|character| {
+                matches!(
+                    *character as u32,
+                    0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+                )
+            })
+            .count();
+        log::info!(
+            "text_input_state chars={chars} cjk={cjk} marked={}",
+            self.marked_range.is_some()
+        );
         self.queue.borrow_mut().push(UiCommand::TextEdited {
             ticket: self.ticket,
             content: self.content.clone(),
@@ -444,8 +460,12 @@ pub(crate) fn text_editor(
         .top(px(anchor[1] as f32))
         .w(px(width))
         .h(px(height))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-            // Clicks inside the editor must not commit it as "clicked elsewhere".
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+            // Clicks inside the editor must not commit it as "clicked elsewhere",
+            // but they must reactivate the accessory app so the system input
+            // source (and therefore the IME) follows this text context.
+            window.activate_window();
+            cx.activate(true);
             cx.stop_propagation();
         })
         .child(TextElement { input })

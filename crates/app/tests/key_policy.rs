@@ -834,6 +834,33 @@ fn app_key_16_the_blur_tool_shares_the_annotation_pointer_and_esc_priority() {
 }
 
 #[test]
+fn app_key_19_ime_composition_owns_escape_enter_and_candidate_keys() {
+    let composing = CaptureKeyContext {
+        text_editing: true,
+        ime_composing: true,
+        ..Default::default()
+    };
+    // The IME must see Esc (cancel the candidate), Enter/space/digits (select
+    // one) and every other key before the overlay turns it into an action.
+    for key in ["escape", "enter", "space", "1", "a"] {
+        assert_eq!(
+            capture_key_action(key, KeyModifiers::default(), composing),
+            None,
+            "{key} must stay with the IME while composing"
+        );
+    }
+    // Once the composition ends, Esc ends the text edit again.
+    let editing = CaptureKeyContext {
+        text_editing: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        capture_key_action("escape", KeyModifiers::default(), editing),
+        Some(CaptureKeyAction::EndTextEdit)
+    );
+}
+
+#[test]
 fn app_key_18_long_image_annotation_has_no_selection_or_reselect_gestures() {
     let selection = selection();
     let inside = [12.0, 8.0];

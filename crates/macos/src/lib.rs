@@ -91,6 +91,30 @@ pub fn ns_window_number(ns_view: *mut core::ffi::c_void) -> Option<u32> {
     u32::try_from(number).ok().filter(|number| *number != 0)
 }
 
+/// Sets one owned borderless window's level.
+///
+/// The frozen overlay must stay above normal windows and the status bar but
+/// below the input method's candidate panel, which AppKit places at
+/// NSPopUpMenuWindowLevel (101). GPUI's WindowKind::PopUp defaults to 101,
+/// so the overlay uses 100 to keep the Pinyin candidate list visible.
+///
+/// # Safety
+/// ns_view must be null or a live NSView pointer on the main thread.
+pub fn set_window_level(ns_view: *mut core::ffi::c_void, level: isize) {
+    let Some(_marker) = MainThreadMarker::new() else {
+        return;
+    };
+    if ns_view.is_null() {
+        return;
+    }
+    // SAFETY: The caller guarantees a live NSView on the main thread; window()
+    // returns a retained NSWindow borrowed only for the synchronous call.
+    let view: &NSView = unsafe { &*ns_view.cast::<NSView>() };
+    if let Some(window) = view.window() {
+        window.setLevel(level);
+    }
+}
+
 /// Makes one owned borderless window transparent to mouse events (I-11 §5).
 ///
 /// The fixed live preview is non-interactive: scroll over an inner placement

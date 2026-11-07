@@ -3313,6 +3313,14 @@ impl Coordinator {
                     focus: focus.clone(),
                     queue,
                 });
+                // Keep the frozen image above normal windows/status bar but
+                // below the input method's candidate panel (level 101), so
+                // Pinyin candidates are visible while editing.
+                if let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window)
+                    && let raw_window_handle::RawWindowHandle::AppKit(handle) = handle.as_raw()
+                {
+                    native::set_window_level(handle.ns_view.as_ptr(), 100);
+                }
                 window.focus(&focus, cx);
                 entity
             },

@@ -535,6 +535,13 @@ impl CaptureView {
         });
         self.text_input = Some(input);
         self.text_focus = Some(focus.clone());
+        // The frozen overlay is a non-activating panel. While another app is
+        // frontmost, macOS resolves the input source per active app, so the
+        // system IME would see that app's English layout even though the
+        // overlay has key focus. Activate ArcShot for text editing so Pinyin
+        // (or any system IME) follows this input context.
+        cx.activate(true);
+        window.activate_window();
         window.focus(&focus, cx);
         cx.notify();
     }
@@ -1314,12 +1321,16 @@ impl Render for CaptureView {
                     }
                     // Read the live drag flag rather than the render-time snapshot,
                     // so a key right after release never sees a stale held state.
-                    let context = entity.read_with(cx, |view, _| CaptureKeyContext {
+                    let context = entity.read_with(cx, |view, cx| CaptureKeyContext {
                         busy: view.busy,
                         dragging: view.drag.is_some(),
                         object_selected: view.selected.is_some(),
                         tool: view.tool,
                         text_editing: view.text_edit.is_some(),
+                        ime_composing: view
+                            .text_input
+                            .as_ref()
+                            .is_some_and(|input| input.read(cx).marked_range.is_some()),
                     });
                     let action = capture_key_action(
                         &event.keystroke.key,
