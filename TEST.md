@@ -813,6 +813,11 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   `arcshot.overlay.object.new` 在 `Click` 时于选区中心打开编辑器，因此 MAC-E2E-39
   全程不需要指针或按键。预览/输出/编辑器度量共用 `arcshot-app` 的 `SystemFont`
   （Core Text）；旧 5x7 字体只保留给 image 的 golden 与默认入口。
+- 已落地（#39 IME，未完成手工验收）：文本编辑器打开/点击时激活 ArcShot，冻结覆盖层
+  降到 window level 100（IME 候选窗为 101），ime_composing 期间 Esc/Enter/空格/数字
+  全部交给系统 IME；app_key_19 守护键路由。text_input_state 只记录字符数、CJK 数
+  与 marked 标志，不记录内容。真实 Pinyin 组合曾出现 marked=true，但没有完成一次
+  “选择候选 → 提交中文 → Finish → PNG”；用户明确跳过该手工项，保持 **Not tested**。
 - 已落地（agent-desktop 1.2.0）：启动与激活接缝。1.2.0 对“从未成为前台”的应用窗口只返回
   AppKit 边框按钮，GPUI 子树不出现；应用被激活过一次之后子树才发布，并在失去前台后保持。
   因此 `start_product` 在直接启动被测二进制后，用一次 `osascript` 把该 pid 设为

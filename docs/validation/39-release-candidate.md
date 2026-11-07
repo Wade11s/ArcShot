@@ -4,8 +4,10 @@
 完整 Debug/Release E2E 矩阵、T-04 性能门禁与资源上界，并补齐 #39 的两个阻塞接缝：
 第三方应用实际粘贴（MAC-E2E-40）与采集期目标窗口关闭（MAC-E2E-41）。
 
-结论：**自动化与代理可驱动的实机项全部通过，但 §4.4 用户项与剩余原生故障类仍未验证，
-因此仍不能放行 V1。** 本记录不关闭 #18，也不执行签名、公证或自动更新。
+结论：**自动化与代理可驱动的实机项全部通过；用户明确选择跳过 §4.4 的手工项
+（真实 IME、TCC 往返、视觉判断）。真实 IME 没有完成一次中文提交，保持 Not tested；
+剩余 SCK/worker/内屏断开三类原生故障仍只有注入式证据。** 本记录不关闭 #18，
+也不执行签名、公证或自动更新。
 
 ## 候选与环境
 
@@ -48,8 +50,9 @@ scripts/perf-measure.py --no-build \
   --metrics export_24m --runs 1 --log target/perf-62-24m-resource-1.log
 ```
 
-- `scripts/check-all.sh`：exit 0（fmt、clippy `-D warnings`、348 Rust tests、doc、validation、
-  依赖、架构、文字后端、Debug/Release 启动与隐私冒烟）。
+- `scripts/check-all.sh`：在 `c8abfb9` 上 exit 0（fmt、clippy `-D warnings`、348 Rust tests、
+  doc、validation、依赖、架构、文字后端、Debug/Release 启动与隐私冒烟）。后续 IME 修复
+  `e20d9a0` 只跑了 `cargo fmt/clippy/test`（349 tests）与单测，未重跑 `check-all.sh` 或完整矩阵。
 - `scripts/e2e-agent-desktop.py --no-build`：exit 0，
   `mac_e2e=pass configuration=debug cases=41`，`total_s=409.0`、`agent_desktop_calls=851`。
 - `scripts/e2e-agent-desktop.py --release --no-build`：exit 0，
@@ -94,22 +97,44 @@ RESOURCE-MAX 实测：`peak_phys_footprint_kb=1016832`（0.97 GiB）、
 | MAC-E2E-39（系统字体 CJK/emoji） | Pass | Debug/Release 矩阵均含 `mac_e2e_39`；见 `docs/validation/62-system-text.md` |
 | MAC-E2E-26_esc 等物理输入 | Pass | 完整矩阵一次运行内通过；含 #39 之后的加固：瞬态系统 HUD 等待、TextEdit fresh 重开、滚动惯性容差、frontmost 轮询、丢失 keyup 的二次释放、global hotkey 重投 |
 
+## 真实 IME 尝试（用户跳过）
+
+在候选 `c8abfb9` 之后、`e20d9a0` 之前做了真实 Pinyin 尝试：
+
+- 一次尝试中系统 IME 确实进入了组合态：产品日志出现
+  `text_input_state chars=… cjk=0 marked=true`，说明 GPUI 的 marked-text 路径接到了
+  Pinyin 预编辑文本。
+- 后续尝试只产生英文字符（`marked=false`、`cjk=0`）。根因是覆盖层是**非激活面板**：
+  当另一个应用是前台时，macOS 按“活动应用”解析输入源，ArcShot 即使拿到键盘焦点也
+  沿用那个应用的 ABC 布局。另有两个接线问题：冻结覆盖层与 IME 候选窗同在 window level
+  101，候选窗可能被覆盖；以及组合期间 Esc 被覆盖层当作“结束编辑”，会把原始拼音提交成
+  拉丁字符。
+- `e20d9a0` 修复了这三点：文本编辑器打开/点击时激活 ArcShot；覆盖层降到 level 100
+  （低于 IME 候选窗 101）；`ime_composing` 期间所有键交给 IME（含 Esc/Enter/空格/数字），
+  并加 `app_key_19` 单测与只记字符数/CJK 数的 `text_input_state` 诊断。
+- 用户随后要求跳过该手工验收：**没有完成一次“选择候选 → 提交中文 → Finish → PNG”**
+  的完整路径。上述修复没有经过完整矩阵或真实中文提交验证，真实 IME 保持 **Not tested**。
+
 ## 仍未验证（发布前必须解决或由用户确认）
 
-1. **§4.4 用户项**：真实中文 IME 组合与候选窗、真实 TCC 授权/撤权往返、视觉与审美判断
-   （状态项图标、标注排版、贴边布局、密度观感、三秒预览动画）、多显示器与物理输入设备差异。
+1. **§4.4 用户项**：用户已明确选择**跳过**真实中文 IME、TCC 授权/撤权往返与视觉判断；
+   这些项不记为 Pass。多显示器与物理输入设备差异仍未验证。
 2. **剩余原生故障类**：SCK 错误/超时、捕获 worker panic、内屏断开。目标窗口关闭已由
    MAC-E2E-41 覆盖；其余仍只有注入式策略证据，不能当作实机通过。
 3. **真实指针动态**：选区/对象手势的语义路径已由 MAC-E2E-38 覆盖，真实按下—移动—释放的
    手感与命中容差仍属物理输入。
 4. **系统升级后的重跑**：本记录绑定 macOS 27.2 (26B123)，升级后不能继承。
+5. **候选后的 IME 修复**：`e20d9a0` 的激活/窗口层级/键路由改动尚未重跑完整
+   Debug/Release 矩阵；在下一次候选复评前不能把 41/41 的结果直接套到它上面。
 
 ## 放行判定
 
-自动化与代理可驱动项全部通过；#39 原有的阻塞项 1（指针手势证据）、4（第三方粘贴）、
-5（Release 完整矩阵）已由 #63、MAC-E2E-40、Release 41/41 解决或覆盖，6（升级后重跑）
-仍取决于系统状态。**剩余阻塞是 §4.4 用户项与 SCK/worker/内屏断开三类原生故障**；
-需要用户完成或明确豁免后，才能把本候选标为 V1 放行。
+自动化与代理可驱动项在 `c8abfb9` 上全部通过；#39 原有的阻塞项 1（指针手势证据）、
+4（第三方粘贴）、5（Release 完整矩阵）已由 #63、MAC-E2E-40、Release 41/41 解决或覆盖，
+6（升级后重跑）仍取决于系统状态。用户已明确跳过 §4.4 的真实 IME/TCC/视觉手工项，
+真实 IME 因此保持 **Not tested**；`e20d9a0` 的 IME 修复仍需要一次完整矩阵与真实中文
+提交验证。**剩余未验证项是真实 IME、SCK/worker/内屏断开三类原生故障，以及
+`e20d9a0` 的矩阵重跑**；是否放行由用户决定。
 
 ## 隐私
 
