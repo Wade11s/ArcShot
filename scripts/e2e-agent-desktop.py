@@ -214,6 +214,12 @@ UNITS = [
     Unit("third_party", "full", ("30", "31", "37"), True,
          "the same Scroll path on TextEdit and Safari",
          "opens and moves third-party windows through System Events"),
+    Unit("third_party_paste", "full", ("40",), True,
+         "a real third-party app accepts the PNGf clipboard as an image",
+         "physical Cmd+V into a Safari contenteditable; opens Safari"),
+    Unit("target_loss", "full", ("41",), True,
+         "the Scroll target disappears mid-collection; explicit stop, no output",
+         "opens and force-closes TextEdit"),
     Unit("region_combo", "physical", ("32",), True,
          "Region with all five annotation tools, undo/redo, delete",
          "undo/redo are real cmd+Z key presses and the backdrop needs open/osascript"),
@@ -831,13 +837,23 @@ def foreign_floating_windows() -> list[str]:
 
 
 def require_clean_display(unit: str) -> None:
-    """Stops a capture unit before it starts when the display is not clean."""
-    foreign = foreign_floating_windows()
-    if foreign:
-        fail(
-            f"the display is not clean before {unit!r}; dismiss or quit these and rerun "
-            f"(a precondition, not a product failure): {'; '.join(foreign[:6])}"
-        )
+    """Stops a capture unit before it starts when the display is not clean.
+
+    A system HUD can appear for a moment after a window closes or moves; give a
+    transient overlay a few seconds to clear before treating it as pollution.
+    A real third-party panel or banner that stays on screen still fails the unit.
+    """
+    deadline = time.monotonic() + 5.0
+    while True:
+        foreign = foreign_floating_windows()
+        if not foreign:
+            return
+        if time.monotonic() >= deadline:
+            fail(
+                f"the display is not clean before {unit!r}; dismiss or quit these and rerun "
+                f"(a precondition, not a product failure): {'; '.join(foreign[:6])}"
+            )
+        time.sleep(0.3)
 
 
 def intersects(
@@ -1106,6 +1122,66 @@ def write_safari_fixture(path: pathlib.Path) -> None:
     path.write_text(html, encoding="utf-8")
 
 
+def write_safari_paste_fixture(path: pathlib.Path) -> None:
+    """A local paste target that decodes a pasted PNG and reports its size.
+
+    The page is served from the filesystem and has no network reference. The
+    paste handler keeps the decoded image in a blob URL and writes its natural
+    size into the document title, which the harness reads from the Safari
+    window title. This proves a real third-party app accepted the PNGf
+    clipboard payload as an image, not merely that a pasteboard type existed.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    html = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>ArcShot40 Paste Target</title>
+<link rel="icon" href="data:,">
+<style>
+html,body{margin:0;padding:0;background:#101418;color:#e8edf2;
+font-family:Menlo,monospace;font-size:16px;}
+#target{box-sizing:border-box;width:100vw;height:100vh;padding:24px;outline:none;}
+#target:focus{background:#141a20;}
+#preview{position:fixed;right:24px;bottom:24px;padding:8px 12px;
+background:#1f2a33;color:#8fd3ff;font-size:14px;}
+</style></head><body>
+<div id="target" contenteditable="true" spellcheck="false">ArcShot paste target — click here, then Cmd+V</div>
+<div id="preview">waiting for paste</div>
+<script>
+const target = document.getElementById('target');
+const preview = document.getElementById('preview');
+target.addEventListener('paste', (event) => {
+  const data = event.clipboardData;
+  const items = data ? Array.from(data.items) : [];
+  const png = items.find((item) => item.type === 'image/png');
+  if (!png) {
+    const types = data ? Array.from(data.types).join(',') : 'none';
+    document.title = 'pasted no-png ' + types;
+    preview.textContent = document.title;
+    return;
+  }
+  const file = png.getAsFile();
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.onload = () => {
+    const report = 'pasted ' + image.naturalWidth + 'x' + image.naturalHeight;
+    document.title = report;
+    preview.textContent = report;
+  };
+  image.onerror = () => {
+    document.title = 'pasted decode-failed';
+    preview.textContent = document.title;
+  };
+  image.src = url;
+  event.preventDefault();
+});
+</script>
+</body></html>
+"""
+    for token in ("http://", "https://"):
+        if token in html:
+            fail(f"the Safari paste fixture unexpectedly contains {token!r}")
+    path.write_text(html, encoding="utf-8")
+
+
 def wait_target_window(app: str, title_part: str, timeout: float = 15.0) -> None:
     """Waits for exactly one window whose title contains the fixture name."""
     deadline = time.monotonic() + timeout
@@ -1139,8 +1215,19 @@ def open_textedit_backdrop(fixture: pathlib.Path) -> None:
         agent("close-app", "TextEdit", "--force")
     except Exception:
         pass
-    run(["open", str(fixture)])
-    wait_target_window("TextEdit", "e2e-36-textedit")
+    # macOS can restore the previous document when TextEdit relaunches; wait
+    # for the forced instance to leave and launch fresh so exactly the requested
+    # fixture is on screen.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        try:
+            if not windows("TextEdit"):
+                break
+        except Failure:
+            break
+        time.sleep(0.3)
+    run(["open", "-F", "-a", "TextEdit", str(fixture)])
+    wait_target_window("TextEdit", fixture.stem)
     set_window_geometry("TextEdit", 150, 150, 1250, 780)
     time.sleep(0.5)
 
@@ -1403,10 +1490,16 @@ def clipboard_png_sha() -> str | None:
 
 
 def press_global_hotkey(log: pathlib.Path, config: str, before: int) -> int:
-    """Presses the registered global combo (non-headed) until one new capture."""
-    for _ in range(4):
+    """Presses the registered global combo (non-headed) until one new capture.
+
+    The press is synthetic and agent-desktop reports it as delivered_unverified,
+    so a miss is a delivery retry rather than a product failure. Six attempts
+    also cover the short window in which a Scroll restart defers behind an
+    in-flight frame.
+    """
+    for _ in range(6):
         press(hotkey_combo(config), headed=False)
-        deadline = time.monotonic() + 2.5
+        deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             if count_log(log, "capture_request_us=") >= before + 1:
                 return before + 1
@@ -3378,7 +3471,15 @@ def main() -> int:
                 press_until_log(
                     "escape", log, "from=Collecting to=Inactive action=CancelScroll", timeout=4.0
                 )
-                wait_log(log, "scroll_input_retired", 10.0, after=mark)
+                try:
+                    wait_log(log, "scroll_input_retired", 3.0, after=mark)
+                except Failure:
+                    # A synthetic keyup can be lost at the Quartz injection
+                    # boundary. The still-installed tap owns Escape, so a second
+                    # full press is swallowed and its release clears the held bit;
+                    # the product's "retire only when drained" rule stays intact.
+                    press("escape", headed=True)
+                    wait_log(log, "scroll_input_retired", 10.0, after=mark)
                 # The same frozen document returns: the overlay with its valid
                 # selection is addressable again and exposes the save entry.
                 root = wait_node(
@@ -3736,6 +3837,8 @@ def main() -> int:
             write_textedit_fixture(te_fixture)
             write_safari_fixture(sa_fixture)
 
+            vertical_scroller = {"index": 0}
+
             def textedit_scroll_fraction():
                 """The TextEdit vertical scroller value (0.0 top .. 1.0 bottom)."""
                 tree = snapshot_tree("TextEdit")
@@ -3746,14 +3849,11 @@ def main() -> int:
                 return values
 
             def setup_textedit_30():
-                try:
-                    agent("close-app", "TextEdit", "--force")
-                except Exception:
-                    pass
-                run(["open", str(te_fixture)])
-                wait_target_window("TextEdit", "e2e-36-textedit")
+                # Fresh launch + one fixture window; the shared helper also
+                # waits out a forced previous instance so macOS cannot restore
+                # an older document alongside this one.
+                open_textedit_backdrop(te_fixture)
                 set_window_geometry("TextEdit", 200, 120, 1000, 700)
-                run(["open", "-a", "TextEdit"])
                 time.sleep(1.0)
                 # Land mid-document: a viewport near either end is mostly blank and
                 # therefore ambiguous (white rows match many displacements), which
@@ -3794,16 +3894,28 @@ def main() -> int:
                     fail("the TextEdit scroller never settled mid-document")
                 if not 0.3 <= fraction <= 0.6:
                     fail(f"the TextEdit viewport is not mid-document (scroller={fraction})")
+                vertical_scroller["index"] = vertical_index
+                # The wheel is synthetic and macOS adds inertia; AX exposes the
+                # scroller as a rounded percentage, so a coasting value can look
+                # flat for a few reads. Require a longer still window, then keep
+                # a margin before the click-blocking comparison.
                 stable = []
-                for _ in range(20):
+                for _ in range(24):
                     values = textedit_scroll_fraction()
                     current = values[vertical_index] if len(values) > vertical_index else None
                     stable.append(current)
-                    if len(stable) >= 3 and len(set(stable[-3:])) == 1:
+                    if len(stable) >= 5 and len(set(stable[-5:])) == 1:
                         break
                     time.sleep(0.5)
                 else:
                     fail("the TextEdit scroller never settled before the click check")
+                time.sleep(2.0)
+                settled = textedit_scroll_fraction()
+                if settled[vertical_index] != stable[-1]:
+                    fail(
+                        "the TextEdit scroller moved after the stability window "
+                        f"{stable[-1]!r} -> {settled[vertical_index]!r}"
+                    )
 
             def setup_safari_31():
                 try:
@@ -3841,7 +3953,8 @@ def main() -> int:
             def textedit_state():
                 """The TextEdit vertical scroller value (a blocked click must not move it)."""
                 values = textedit_scroll_fraction()
-                return values[0] if values else "<missing>"
+                index = vertical_scroller["index"]
+                return values[index] if len(values) > index else "<missing>"
 
             def safari_state():
                 tree = snapshot_tree("Safari")
@@ -3872,8 +3985,14 @@ def main() -> int:
                     target_line = wait_log_line(log, "scroll_target window_id=", 15.0, after=entry_mark)
                     if f"owner={owner}" not in target_line:
                         fail(f"{case}: unexpected target identity {target_line!r}")
-                    if frontmost_process() != target_app:
-                        fail(f"{case}: {target_app} is not frontmost during collection")
+                    # Activation via AX/System Events can lag the product's
+                    # own target activation; poll briefly instead of sampling
+                    # one instant. A target that never comes forward still fails.
+                    deadline = time.monotonic() + 3.0
+                    while frontmost_process() != target_app:
+                        if time.monotonic() >= deadline:
+                            fail(f"{case}: {target_app} is not frontmost during collection")
+                        time.sleep(0.2)
                     exclusion = wait_log_line(log, "scroll_exclusion_fixed", 15.0, after=entry_mark)
                     if "preview=" not in exclusion:
                         fail(f"{case}: the fixed preview is not in the exclusion set")
@@ -3897,8 +4016,30 @@ def main() -> int:
                 # Click blocking: a raw click inside the selection never lands.
                 agent("mouse-click", "--xy", wheel_xy, "--headed")
                 time.sleep(1.0)
-                if state_fn() != state_before:
-                    fail(f"{case}: a blocked click changed the target state")
+                after_state = state_fn()
+
+                def same_state(before, after):
+                    """A landed click must not move the target; tiny inertia is not one.
+
+                    TextEdit exposes its scroller as a float that keeps settling
+                    in the sub-percent range after a wheel; a wheel step is an
+                    order of magnitude larger. Safari's state is an address, so
+                    it compares exactly. The authoritative click-blocking proof
+                    is nonetheless the tap's `clicks_blocked` counter below.
+                    """
+                    if target_app == "TextEdit":
+                        try:
+                            return abs(float(before) - float(after)) <= 0.01
+                        except (TypeError, ValueError):
+                            return before == after
+                    return before == after
+
+                if not same_state(state_before, after_state):
+                    fail(
+                        f"{case}: a blocked click changed the target state "
+                        f"{state_before!r} -> {after_state!r} "
+                        f"(frontmost={frontmost_process()!r})"
+                    )
                 def stitch_quiet(after: int, quiet: float = 1.5, limit: float = 10.0):
                     """Waits until extensions stop for `quiet` seconds (flush drains).
 
@@ -4193,6 +4334,174 @@ def main() -> int:
                 f"annotation=1 whole_image={preview_31} fixture={SAFARI_FIXTURE_VERSION} offline=file"
             )
             unit_done("third_party")
+
+        if want("third_party_paste"):
+            # MAC-E2E-40: a real third-party app pastes the PNGf clipboard as an
+            # image. ArcShot copies a Region PNG, Safari's contenteditable
+            # receives a physical Cmd+V, decodes the pasted blob and reports its
+            # natural size in the page (and therefore window) title.
+            paste_fixture = ROOT / "target" / "e2e-40-paste.html"
+            write_safari_paste_fixture(paste_fixture)
+            try:
+                try:
+                    agent("close-app", "Safari", "--force")
+                except Exception:
+                    pass
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline:
+                    try:
+                        if not windows("Safari"):
+                            break
+                    except Failure:
+                        break
+                    time.sleep(0.3)
+                run(["open", "-a", "Safari"])
+                for _ in range(40):
+                    try:
+                        if windows("Safari"):
+                            break
+                    except Failure:
+                        pass
+                    time.sleep(0.5)
+                else:
+                    fail("Safari did not launch for the paste fixture")
+                run(["open", "-F", "-a", "Safari", str(paste_fixture)])
+                wait_target_window("Safari", "ArcShot40", timeout=25.0)
+                set_window_geometry("Safari", 200, 120, 1000, 700)
+                time.sleep(1.0)
+
+                log_mark = len(read_log(log))
+                click(app, "开始截图")
+                wait_frozen_active(log, log_mark)
+                selection = select_region(
+                    app, log, drag_from="300,300", drag_to="800,600", mark=log_mark
+                )
+                mark = len(read_log(log))
+                ax_click(app, "arcshot.overlay.finish")
+                wait_log(log, "a11y_action=arcshot.overlay.finish action=Click", 10.0, after=mark)
+                publish = wait_log_line(log, "output_publish target=Clipboard", 10.0, after=mark)
+                expected = f"pasted {int(selection[2] * 2)}x{int(selection[3] * 2)}"
+                if f"pixels={int(selection[2] * 2)}x{int(selection[3] * 2)}" not in publish:
+                    fail(f"paste smoke source output was {publish!r}")
+                wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark)
+
+                run(["open", "-a", "Safari"])
+                deadline = time.monotonic() + 10.0
+                while frontmost_process() != "Safari":
+                    if time.monotonic() >= deadline:
+                        fail("Safari did not come forward for the paste")
+                    time.sleep(0.2)
+                time.sleep(0.5)
+                agent("mouse-click", "--xy", "500,400", "--headed")
+                time.sleep(0.5)
+                press("cmd+v", headed=True)
+
+                deadline = time.monotonic() + 10.0
+                title = ""
+                while time.monotonic() < deadline:
+                    entries = windows("Safari")
+                    title = str(entries[0].get("title") or "") if entries else ""
+                    if title == expected:
+                        break
+                    time.sleep(0.3)
+                if title != expected:
+                    fail(f"the third-party paste did not decode the PNG: title={title!r}")
+                note(
+                    f"mac_e2e_40=pass target=Safari paste=cmd_v png={expected} "
+                    "decoded=true offline=file"
+                )
+            finally:
+                try:
+                    agent("close-app", "Safari", "--force")
+                except Exception:
+                    pass
+            unit_done("third_party_paste")
+
+        if want("target_loss"):
+            # MAC-E2E-41: a real target window disappears during collection.
+            # The product's public re-check must classify the loss, refuse or
+            # offer only the verified part, produce no output, and return the
+            # pre-scroll selection to the overlay. This is native target-loss
+            # evidence, not an injected policy branch.
+            fixture = ROOT / "target" / "e2e-41-target-loss.txt"
+            write_textedit_fixture(fixture)
+            open_textedit_backdrop(fixture)
+            set_window_geometry("TextEdit", 200, 120, 1000, 700)
+            time.sleep(0.5)
+            try:
+                log_mark = len(read_log(log))
+                click(app, "开始截图")
+                wait_frozen_active(log, log_mark)
+                select_region(
+                    app, log, drag_from="400,350", drag_to="1000,650", mark=log_mark
+                )
+                mark = len(read_log(log))
+                click_scroll_entry(app, denied=False)
+                wait_log(log, "scroll_collecting", 15.0, after=mark)
+                agent("close-app", "TextEdit", "--force")
+                # The loss can be classified by the slow target-integrity check
+                # or by the next frame's verifier (Gap/ContentChanged) first;
+                # both are known-state stops. The single observable that always
+                # follows is the partial-choice line: available=false is a plain
+                # refusal, available=true keeps the verified part behind the
+                # explicit abandon choice. Neither may produce output.
+                deadline = time.monotonic() + 8.0
+                choice_line = ""
+                while time.monotonic() < deadline:
+                    for line in read_log(log)[mark:]:
+                        if "scroll_partial_choice available=" in line:
+                            choice_line = line
+                            break
+                    if choice_line:
+                        break
+                    time.sleep(0.2)
+                if not choice_line:
+                    fail("target loss produced neither a refusal nor a partial choice")
+                target_line = next(
+                    (
+                        line
+                        for line in read_log(log)[mark:]
+                        if "scroll_target_intact=false" in line
+                    ),
+                    "",
+                )
+                if "available=true" in choice_line:
+                    # Closing the target can leave another app frontmost; a
+                    # GPUI window that never became active only exposes its
+                    # AppKit frame, so activate ArcShot before reading the
+                    # control view's partial buttons.
+                    osascript(f'tell application id "{identifier}" to activate')
+                    time.sleep(0.5)
+                    abandon = ax_click(app, "arcshot.scroll.partial.abandon")
+                    if not abandon.get("ref_id"):
+                        fail("the verified-part abandon control is not addressable")
+                    wait_log(log, "action=AbandonScrollPartial", 10.0, after=mark)
+                if any("output_publish" in line for line in read_log(log)[mark:]):
+                    fail("target loss produced output")
+                root = wait_node(
+                    app,
+                    lambda tree: (
+                        find_nodes(tree, role="group", name="ArcShot 截图覆盖层")
+                        or [None]
+                    )[0],
+                    10.0,
+                )
+                if not find_nodes(root, native_id="arcshot.overlay.cancel", require_ref=True):
+                    fail("target loss did not return the frozen overlay")
+                ax_click(app, "arcshot.overlay.cancel")
+                wait_log(log, "from=Frozen to=Resident action=CancelAttempt", 10.0, after=mark)
+                reason = choice_line.split("reason=", 1)[1].split(" ", 1)[0]
+                note(
+                    "mac_e2e_41=pass target=TextEdit loss=closed "
+                    f"reason={reason} target_check={'fired' if target_line else 'raced'} "
+                    "output=none overlay_returned=true"
+                )
+            finally:
+                try:
+                    agent("close-app", "TextEdit", "--force")
+                except Exception:
+                    pass
+            unit_done("target_loss")
 
         if want("region_combo"):
             # MAC-E2E-32: region combination (ticket #37). Every annotation tool

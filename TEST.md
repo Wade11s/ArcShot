@@ -613,6 +613,8 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-37 | TextEdit/Safari 各一轮：单帧完成→缩略图→AX 进入标注→a11y 矩形→AX 完成 | `AddDefaultRectangle annotations=1`；`output_publish pixels=1200x600 annotations=1`；内存 PNG 解码整图 sRGB | 真机滚轮手感、视觉观感 |
 | MAC-E2E-38 | 冻结后 `snapshot --app`；`set-value` 写 `arcshot.overlay.selection` 建选区，再依次写八个 `arcshot.overlay.selection.handle.*`、`arcshot.overlay.selection.body`、`arcshot.overlay.object.new`、`arcshot.overlay.object.0` 与其 `.handle.*`、`arcshot.overlay.object.1.endpoint.*`；AX 点击对象节点选中；AX 取消 | 选区节点在无选区时 value=`none` 且可写；每次写出现 `a11y_action=<id> action=SetValue value=<载荷>` 与对应 `capture_edit`（`SelectRegion`/`PointerPressed`+`PointerReleased`），几何逐项等于预期（选区 `200,200,700,600`→`200,200,800,700`→移动→`20,30,320,330`；矩形 `40,50,140,120`→`40,50,180,150`→`60,70,200,170`；直线端点 `110,120`→`120,130`）；八个选区控制点与八个对象控制点各有稳定 id 与中心值；对象节点 `Click` 写 `a11y_action=arcshot.overlay.object.<i> action=Click` 且 `selected=Some(i)`；取消后 `from=Frozen to=Resident action=CancelAttempt` | 真实指针的按下—移动—释放动态与手感、命中容差（core 单测覆盖）、长图上非矩形工具的创建（无 AX 锚点，见 §4.5） |
 | MAC-E2E-39 | 冻结后 AX 写选区 `200,200,700,600`，AX 激活 Text 工具与 `arcshot.overlay.object.new`（在选区中心打开编辑器），`set-value` 写 `中文 😀`，AX 切到 Select 提交，AX 完成；从 AppKit 剪贴板读 PNG 并在内存解码 | `a11y_action=arcshot.overlay.text.input action=SetValue` 与 `capture_edit action=TextEdited`；切换工具后 `capture_edit action=SelectTool … annotations=1`；`output_publish target=Clipboard pixels=1000x800 annotations=1`；PNG 的 CJK 红色覆盖率 ≥80 且某行最长连续段 ≥8（排除旧空心方框），emoji 区域暖色像素 ≥20；临时 PNG 解码后删除 | IME 候选窗、真实键盘组合过程、屏幕上的视觉观感 |
+| MAC-E2E-40 | Region 选区 `300,300→800,600` AX 完成后，Safari 的 `e2e-40-paste.html` contenteditable 获得物理单击与 `cmd+v`；页面的 paste 处理器解码 `image/png` 并把自然尺寸写进标题 | 源输出 `output_publish … pixels=1000x600`；Safari 窗口标题变为 `pasted 1000x600`（第三方应用真正接受并解码 PNG） | 剪贴板粘贴到非浏览器应用、富文本/PDF 粘贴形态 |
+| MAC-E2E-41 | TextEdit 滚动采集开始后强制关闭目标；产品以目标完整性检查或下一帧验证停止，不输出；若提供已验证部分则经 AX abandon，覆盖层返回 | `scroll_target_intact=false` 或 `scroll_refused reason=Stitch Gap`、`scroll_partial_choice available=…`；采集期无 `output_publish`；覆盖层可 AX 取消；`mac_e2e_41=pass … output=none overlay_returned=true` | SCK 错误/超时、worker panic、内屏断开；真实用户关闭窗口的时序差异 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release] [--tier … --only … --skip … --no-build]`（见 §4.3.1）：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -635,7 +637,7 @@ agent-desktop press escape --headed
 
 ### 4.3.1 单元、分档与重跑
 
-39 个用例按源码顺序切成 22 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
+41 个用例按源码顺序切成 24 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
 （`identity` 结束时应用仍在驻留，`sound_prefs`、`density_prefs` 以退出应用结束），因此可单独运行；
 有连续冻结会话的用例（12/13/14/18/19/20/21/23/25）同属
 `overlay_tools`，15/08/16 同属 `sound_prefs`。每个单元标注一个**档位**，说明它对与人共用的桌面做什么：
@@ -644,8 +646,8 @@ agent-desktop press escape --headed
 | --- | --- | --- |
 | `quiet` | 无窗口、无覆盖层、不改前台、无真实键鼠 | `identity`（09/01/17/02）、`sound_prefs`（15/08/16） |
 | `ax` | 可出现自有窗口或覆盖层并取得焦点，但只用语义（AX）动作 | `notice_ax`（10）、`selection_ax`（38）、`text_system`（39）、`scroll_gate`（24） |
-| `physical` | 需要真实按键/指针（`--headed`、全局热键、拖拽、悬停）或自有夹具窗口 | 其余 16 个单元 |
-| `full` | 另外打开并移动 TextEdit/Safari 窗口 | `third_party`（30/31/37） |
+| `physical` | 需要真实按键/指针（`--headed`、全局热键、拖拽、悬停）或自有夹具窗口 | 其余 15 个单元 |
+| `full` | 另外打开、移动或关闭 TextEdit/Safari 窗口，或按键粘贴 | `third_party`（30/31/37）、`third_party_paste`（40）、`target_loss`（41） |
 
 档位**由脚本强制**：低于 `physical` 时，`agent()` 与 `run()` 拒绝 `press`/`hover`/`drag`/`mouse-*`、
 任何 `--headed`、窗口移动/聚焦命令、`osascript` 与 `open`，也拒绝 `batch`（内容藏在 JSON 里，无法逐条
@@ -662,8 +664,8 @@ scripts/e2e-agent-desktop.py --only 36 --no-build        # 单元 id 或用例�
 scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可省略第三方目标
 ```
 
-- 部分运行打印 `mac_e2e=partial … cases=n/39 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
-  覆盖 39 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=39`。
+- 部分运行打印 `mac_e2e=partial … cases=n/41 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
+  覆盖 41 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=41`。
 - 任何失败都以非零退出并打印 `mac_e2e=fail … cases=n/38 acceptance=false`；失败发生在单元内时，
   其前另有一条 `e2e_timing unit=… failed=true`。参数与选择错误（如 `--only` 超出 `--tier`）在运行开始前退出，
   不带汇总行。
@@ -801,6 +803,9 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   动态或手感；后者仍属物理输入，不作为验收证据。控制点落在选区外时与指针一致地开始
   新框选（MAC-E2E-38 的几何因此必须落在选区内）。长图表面不注册选区与创建节点，
   非矩形工具在长图上仍只能拖拽创建，保持 **Not tested**。
+- 已落地（#39）：采集期目标关闭后的部分选择可见性。若停止时已有已验证帧，产品激活
+  ArcShot 并把控制窗前置，`arcshot.scroll.partial.use` / `.abandon` 仍可 AX 驱动；
+  无已验证帧时直接退回冻结覆盖层。MAC-E2E-41 覆盖强制关闭 TextEdit 的路径。
 - 已落地（#62）：文字编辑器的语义整值写入。`arcshot.overlay.text.input` 注册
   `SetValue`，把整段草稿作为一次 `TextEdited` 送进权威文档（与键入走同一
   `TextInput::sync` 度量路径），并写一行 `a11y_action=…text.input action=SetValue`；
@@ -864,9 +869,9 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 部分（#36）：内侧预览在 TextEdit/Safari 各一次（`placed=inner`、`scroll_exclusion_fixed` 预览 id、AX `arcshot.scroll.preview` 可寻址）；右/左仍只由自有夹具证实，第三方取内侧以固定几何覆盖，目标不被浮层污染由排除集与解码图证实 |
 | MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分（#36）：MAC-E2E-30/31 在两第三方目标各完成单帧/Enter/双击（TextEdit/Safari 滚动区）/单击拦截/原始滚动达目标/前台与 hit-test/Esc/清理；预览上滚动仍只由自有夹具内侧例证实，第三方未单独投轮于预览区；采集期热键重启仍仅注入式（CORE-SESSION-56） |
 | MAC-SCROLL-NEGATIVE | 动态、固定浮层、重复/低纹理、无重叠跳变、横向/对角/嵌套滚动；无法验证即停止 | 否：判定依赖视觉结果，需 `screenshot` 或人工（§4.4） |
-| MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分：目标应用侧可用 `agent-desktop` 窗口命令制造，产品侧判定仍靠日志 |
+| MAC-TARGET-FAIL | 目标移动/关闭/前台变化、几何/尺度变化、遮挡、输入保护/权限失效、内屏失效 | 部分（#39）：MAC-E2E-41 在采集期强制关闭 TextEdit，产品明确停止、无输出并返回覆盖层；目标移动/几何变化/遮挡、输入保护失效与内屏断开仍靠注入式证据 |
 | MAC-NATIVE-FAIL | 资源上限、SCK 错误/超时、worker 异常；普通失败与禁止输出/重启的不确定终态分离 | 否：现有 Rust/原生接缝覆盖，E2E 无法注入 |
-| MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分（#36）：两第三方目标各经命名 sRGB display-filter 接纳后解码 PNG 校验尺寸/不透明/sRGB 块/行纹理（`decode_png_metrics`），剪贴板 `PNGf` 由 osascript 回读证实；非 ArcShot 应用粘贴与显式保存字节一致仍 **Not tested** |
+| MAC-COLOR-OUTPUT | 命名 sRGB 全链路、PNGf 剪贴板、内存解码尺寸/像素/颜色、第三方粘贴 smoke、显式保存字节一致 | 部分（#36/#39）：两第三方目标各经命名 sRGB display-filter 接纳后解码 PNG 校验尺寸/不透明/sRGB 块/行纹理（`decode_png_metrics`），剪贴板 `PNGf` 由 osascript 回读证实；MAC-E2E-40 把 Region PNG 实际粘贴进 Safari 并读回 `pasted 1000x600`；显式保存字节一致由 MAC-E2E-34 覆盖；非浏览器第三方应用的粘贴形态仍 **Not tested** |
 | MAC-RECOVERY | 保存取消/失败、复制失败/重试/放弃、3 秒预览、长图整图标注、取消保留旧剪贴板 | 部分（#37）：原生保存面板的取消与选定（AX 驱动，文件内存解码后删除）、剪贴板不变见 MAC-E2E-34；保存失败/覆盖写原生形态仍 Not tested；复制失败/重试/放弃由自动化覆盖；#35/#37 的 MAC-E2E-29/35/37 驱动确认复制→缩略图→点击进入→标注→重新完成与 Esc 取消保留旧剪贴板；三秒停留的动画观感与悬停不延长属 §4.4，保持 Not tested |
 | MAC-LIFETIME-PRIVACY | 不重复输出/污染会话；回调/窗口/tap/图像引用清理；无自动截图落盘、无运行期联网 | 部分（#37）：无新增 PNG 落盘与剪贴板不变见 MAC-E2E-32/34，重启不污染新会话见 MAC-E2E-36，退出清理见 MAC-E2E-08，联网见 PRIVACY-01；资源引用仍需进程级检查 |
 
