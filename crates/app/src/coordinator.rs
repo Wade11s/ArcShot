@@ -1125,6 +1125,7 @@ impl Coordinator {
                 | CaptureAction::ArrowOption { .. }
                 | CaptureAction::BlurOption { .. }
                 | CaptureAction::TextOption { .. }
+                | CaptureAction::TextEdited { .. }
                 | CaptureAction::TextCommit { .. }
                 | CaptureAction::DeleteSelected { .. }
                 | CaptureAction::DeselectSelected { .. }
@@ -1449,9 +1450,14 @@ impl Coordinator {
         let frame = document.frame().clone();
         let annotations = key.1.clone();
         self.preview.in_flight = Some(key.clone());
-        let composed = cx
-            .background_executor()
-            .spawn(async move { arcshot_image::compose_document(&frame, crop, &annotations) });
+        let composed = cx.background_executor().spawn(async move {
+            arcshot_image::compose_document_with_font(
+                &frame,
+                crop,
+                &annotations,
+                crate::text_font::system_font(),
+            )
+        });
         let entity = cx.entity();
         cx.spawn(async move |_, cx| {
             let result = composed.await;

@@ -96,11 +96,12 @@ AppKit 对象；原生冒烟通过不等于完整 macOS 发布矩阵通过。
 | CORE-SESSION | core 语义动作：会话转换、选区、Finish、分层 Esc、拖动、快捷键重启/互斥 | I-05/I-09/I-10/I-11 状态一致；取消/重启清理；无操作无历史 |
 | CORE-EDIT | core 文档动作：对象创建/命中/编辑/删除/样式、文字提交与历史 | 几何、内容、层叠、选区、撤销/重做；不要求恢复选中态 |
 | CORE-COORD | 屏幕/图像/视图/物理输出转换，2x 与畸形尺寸 | 无重复缩放/取整、越界或溢出；视图不改变完整输出 |
-| IMAGE-COMPOSE | 固定图像/文档与明确字体：全部工具、层叠、裁剪、SDR sRGB | 固定参考/像素真值；文字 golden 使用可复现字体，原生字体/IME 另验 |
+| IMAGE-COMPOSE | 固定图像/文档与明确字体：全部工具、层叠、裁剪、SDR sRGB | 固定参考/像素真值；文字 golden 使用可复现字体，产品系统字体桥另由 APP-TEXT 与 MAC-E2E-39 验证 |
 | IMAGE-BLUR | 三档 Blur、移动/调整、边缘与上下层 | 4/8/12 点语义、无色罩、不采样选区外、后建对象清晰、预览/输出一致 |
 | IMAGE-STITCH | 固定帧序列：上下追加、反向、单帧、歧义/变化/缺口 | 仅严格验证后扩展；无重复/缺行/猜补；无法验证即显式失败 |
 | IMAGE-LIMIT | 尺寸、总像素、预览、编码与预算输入 | 分配前检查；失败不超预算分配、不生成损坏输出 |
 | APP-EFFECT | 注入权限、捕获、合成、编码、剪贴板、保存结果 | 成功/失败/取消/重试/放弃符合 I-04/I-10/I-11；同版本复用 PNG 字节 |
+| APP-TEXT | app 的系统字体桥：CJK/emoji 度量、物理框、字形方向、彩色 emoji、提交输出 | 系统无衬线字体经 Core Text 栅格化；IME 候选窗与视觉观感仍属 MAC-TEXT |
 | APP-ASYNC | 可控调度：单在途、2 帧队列、背压、取消/重启、迟到结果、worker 异常 | 不重复任务/输出、不污染新会话；不确定原生状态禁止部分输出与会话内重启 |
 | APP-FRAME | 注入宽高/stride/字节数/alpha/溢出与迟到帧 | 接纳前拒绝；保持命名 sRGB、不透明中性帧合同；不污染新文档 |
 
@@ -212,17 +213,18 @@ GPUI tooltip/`aria_description`，`--headed` 坐标拖拽不能作为验收证�
 ### #28 的稳定自动化入口
 
 Text 只覆盖已确认接缝：core 的创建/重编/删除/字号取整/历史，固定文档的可复现字体
-栅格化，app 的编辑器/IME 键优先级与 Esc 分层，以及覆盖层第六个工具、色板与字号步进
-的真实 AX 激活。真实指针绘制、原生系统字体/IME 候选框/焦点、直接输入字号与预览观感仍属
-MAC-TEXT，保持 **Not tested**：系统字体适配与 IME 候选窗位置需原生验证，`--headed`
-坐标拖拽不能作为验收证据。
+栅格化，app 的编辑器/IME 键优先级与 Esc 分层，覆盖层第六个工具、色板与字号步进的
+真实 AX 激活，以及 #62 的系统无衬线字体桥（CJK/emoji 经 Core Text 进入预览与 PNG）。
+真实指针绘制、IME 候选框/组合过程、直接输入字号与预览观感仍属
+MAC-TEXT，保持 **Not tested**；`--headed` 坐标拖拽不能作为验收证据。
 
 | 文件 | 稳定 ID 与覆盖 | 不覆盖 |
 | --- | --- | --- |
 | `crates/core/tests/text.rs` | CORE-EDIT-35～39：创建一步、空文本丢弃、重编一步、编辑变空删除且可撤销、字号 6–64/0.5 取整、命中/移动/层叠/工具切换提交；CORE-SESSION-44～45：TextBegin/TextEdited/TextCommit/TextOption 共用编辑栅栏、Finish 先提交、输出在途忽略、TextCancel 丢弃、过期 ticket 不改新会话 | 真实指针、IME 组合文字 |
-| `crates/image/tests/text.rs` | IMAGE-COMPOSE-26～34：可复现 5x7 字形的固定 golden、字号/颜色整对象生效、选区裁剪、文字位于模糊层之上、多行与未知字形确定、可插拔字体输入、预览与 PNG 字节一致、逻辑度量与物理位图一致 | 原生系统字体、中文/emoji 真实字形、大图压力 |
+| `crates/image/tests/text.rs` | IMAGE-COMPOSE-26～34：可复现 5x7 字形的固定 golden、字号/颜色整对象生效、选区裁剪、文字位于模糊层之上、多行与未知字形确定、可插拔字体输入、预览与 PNG 字节一致、逻辑度量与物理位图一致 | 原生系统字体（见 APP-TEXT）、大图压力 |
+| `crates/app/tests/text_font.rs` | APP-TEXT-01～05：CJK/emoji 度量、逻辑度量与物理位图一致且覆盖率非二值、T 字形方向与旧空心方框区分、彩色 emoji 保留自身颜色、提交输出与固定字体不同且样式颜色到达合成面 | IME 候选窗、屏幕上的视觉观感 |
 | `crates/app/tests/key_policy.rs` | APP-KEY-17：编辑期间 Enter/Delete/Backspace/撤销/重做归编辑器与 IME，Esc 先结束编辑保留内容，拖动/输出期优先，双击文字对象重编 | 真实焦点与 IME 候选框 |
-| `scripts/e2e-agent-desktop.py` | MAC-E2E-25：第六个工具可寻址且 checked 互换；悬停出现色板与字号步进；默认红 16；AX 步进写 `capture_edit action=TextOption … size=16.5`、色板写 `stroke=#007AFF`；创建后文字输入可寻址，点击别处提交为一次创建 | 选区绘制、真实文字创建/拖动、直接输入字号、原生字体/IME |
+| `scripts/e2e-agent-desktop.py` | MAC-E2E-25：第六个工具可寻址且 checked 互换；悬停出现色板与字号步进；默认红 16；AX 步进写 `capture_edit action=TextOption … size=16.5`、色板写 `stroke=#007AFF`；创建后文字输入可寻址，点击别处提交为一次创建。MAC-E2E-39（ax）：创建节点在选区中心打开编辑器，`set-value` 写入 `中文 😀`，工具切换提交，Finish 复制 PNG；解码后 CJK 笔画的红色覆盖率与行内最长连续段、emoji 的暖色像素数都超过空心方框的下限 | 选区绘制、真实文字创建/拖动、直接输入字号、IME 候选窗、视觉观感 |
 
 `docs/validation/28-text-ime.md` 记录实测。创建前置使用 `--headed` 拖拽/点击（选区与
 对象没有 AX 节点）；验收证据是 AX 激活行与产品诊断行。字号直接输入由 core 的
@@ -610,6 +612,7 @@ E2E 的观察合同因此是**双通道**：
 | MAC-E2E-36 | Region 建对象后全局热键重启；工具激活时 Esc；自有夹具采集中全局热键重启 | 重启后无旧选区且 `SelectRegion annotations=0`；首 Esc 只回 Select 工具且会话保留；采集中重启后 `scroll_input_retired` 且无旧票输出、新会话需重选 | 迟到结果原生注入（仅注入式 APP-ASYNC）、目标关闭原生复现 |
 | MAC-E2E-37 | TextEdit/Safari 各一轮：单帧完成→缩略图→AX 进入标注→a11y 矩形→AX 完成 | `AddDefaultRectangle annotations=1`；`output_publish pixels=1200x600 annotations=1`；内存 PNG 解码整图 sRGB | 真机滚轮手感、视觉观感 |
 | MAC-E2E-38 | 冻结后 `snapshot --app`；`set-value` 写 `arcshot.overlay.selection` 建选区，再依次写八个 `arcshot.overlay.selection.handle.*`、`arcshot.overlay.selection.body`、`arcshot.overlay.object.new`、`arcshot.overlay.object.0` 与其 `.handle.*`、`arcshot.overlay.object.1.endpoint.*`；AX 点击对象节点选中；AX 取消 | 选区节点在无选区时 value=`none` 且可写；每次写出现 `a11y_action=<id> action=SetValue value=<载荷>` 与对应 `capture_edit`（`SelectRegion`/`PointerPressed`+`PointerReleased`），几何逐项等于预期（选区 `200,200,700,600`→`200,200,800,700`→移动→`20,30,320,330`；矩形 `40,50,140,120`→`40,50,180,150`→`60,70,200,170`；直线端点 `110,120`→`120,130`）；八个选区控制点与八个对象控制点各有稳定 id 与中心值；对象节点 `Click` 写 `a11y_action=arcshot.overlay.object.<i> action=Click` 且 `selected=Some(i)`；取消后 `from=Frozen to=Resident action=CancelAttempt` | 真实指针的按下—移动—释放动态与手感、命中容差（core 单测覆盖）、长图上非矩形工具的创建（无 AX 锚点，见 §4.5） |
+| MAC-E2E-39 | 冻结后 AX 写选区 `200,200,700,600`，AX 激活 Text 工具与 `arcshot.overlay.object.new`（在选区中心打开编辑器），`set-value` 写 `中文 😀`，AX 切到 Select 提交，AX 完成；从 AppKit 剪贴板读 PNG 并在内存解码 | `a11y_action=arcshot.overlay.text.input action=SetValue` 与 `capture_edit action=TextEdited`；切换工具后 `capture_edit action=SelectTool … annotations=1`；`output_publish target=Clipboard pixels=1000x800 annotations=1`；PNG 的 CJK 红色覆盖率 ≥80 且某行最长连续段 ≥8（排除旧空心方框），emoji 区域暖色像素 ≥20；临时 PNG 解码后删除 | IME 候选窗、真实键盘组合过程、屏幕上的视觉观感 |
 
 入口是 `scripts/e2e-agent-desktop.py [--release] [--tier … --only … --skip … --no-build]`（见 §4.3.1）：它先门禁 `agent-desktop status`
 与在跑实例，再用 `scripts/build-app.sh` 构建、启动被测可执行文件并把 stderr 写入
@@ -632,7 +635,7 @@ agent-desktop press escape --headed
 
 ### 4.3.1 单元、分档与重跑
 
-38 个用例按源码顺序切成 21 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
+39 个用例按源码顺序切成 22 个**单元**（`scripts/e2e-agent-desktop.py --list`）。每个单元自带启动与收尾
 （`identity` 结束时应用仍在驻留，`sound_prefs`、`density_prefs` 以退出应用结束），因此可单独运行；
 有连续冻结会话的用例（12/13/14/18/19/20/21/23/25）同属
 `overlay_tools`，15/08/16 同属 `sound_prefs`。每个单元标注一个**档位**，说明它对与人共用的桌面做什么：
@@ -640,7 +643,7 @@ agent-desktop press escape --headed
 | 档位 | 对桌面的影响 | 当前单元 |
 | --- | --- | --- |
 | `quiet` | 无窗口、无覆盖层、不改前台、无真实键鼠 | `identity`（09/01/17/02）、`sound_prefs`（15/08/16） |
-| `ax` | 可出现自有窗口或覆盖层并取得焦点，但只用语义（AX）动作 | `notice_ax`（10）、`selection_ax`（38）、`scroll_gate`（24） |
+| `ax` | 可出现自有窗口或覆盖层并取得焦点，但只用语义（AX）动作 | `notice_ax`（10）、`selection_ax`（38）、`text_system`（39）、`scroll_gate`（24） |
 | `physical` | 需要真实按键/指针（`--headed`、全局热键、拖拽、悬停）或自有夹具窗口 | 其余 16 个单元 |
 | `full` | 另外打开并移动 TextEdit/Safari 窗口 | `third_party`（30/31/37） |
 
@@ -659,8 +662,8 @@ scripts/e2e-agent-desktop.py --only 36 --no-build        # 单元 id 或用例�
 scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可省略第三方目标
 ```
 
-- 部分运行打印 `mac_e2e=partial … cases=n/38 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
-  覆盖 38 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=38`。
+- 部分运行打印 `mac_e2e=partial … cases=n/39 acceptance=false`，**不是**完整矩阵的验收证据；所选用例
+  覆盖 39 条全部用例时（默认不带参数即如此）才打印 `mac_e2e=pass … cases=39`。
 - 任何失败都以非零退出并打印 `mac_e2e=fail … cases=n/38 acceptance=false`；失败发生在单元内时，
   其前另有一条 `e2e_timing unit=… failed=true`。参数与选择错误（如 `--only` 超出 `--tier`）在运行开始前退出，
   不带汇总行。
@@ -798,6 +801,13 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   动态或手感；后者仍属物理输入，不作为验收证据。控制点落在选区外时与指针一致地开始
   新框选（MAC-E2E-38 的几何因此必须落在选区内）。长图表面不注册选区与创建节点，
   非矩形工具在长图上仍只能拖拽创建，保持 **Not tested**。
+- 已落地（#62）：文字编辑器的语义整值写入。`arcshot.overlay.text.input` 注册
+  `SetValue`，把整段草稿作为一次 `TextEdited` 送进权威文档（与键入走同一
+  `TextInput::sync` 度量路径），并写一行 `a11y_action=…text.input action=SetValue`；
+  `capture_edit action=TextEdited` 补齐实时编辑的文本诊断。Text 工具的创建节点
+  `arcshot.overlay.object.new` 在 `Click` 时于选区中心打开编辑器，因此 MAC-E2E-39
+  全程不需要指针或按键。预览/输出/编辑器度量共用 `arcshot-app` 的 `SystemFont`
+  （Core Text）；旧 5x7 字体只保留给 image 的 golden 与默认入口。
 - 已落地（agent-desktop 1.2.0）：启动与激活接缝。1.2.0 对“从未成为前台”的应用窗口只返回
   AppKit 边框按钮，GPUI 子树不出现；应用被激活过一次之后子树才发布，并在失去前台后保持。
   因此 `start_product` 在直接启动被测二进制后，用一次 `osascript` 把该 pid 设为
@@ -849,7 +859,7 @@ MAC-START-01、PRIVACY-01 与 §4.3 的窄范围 E2E 通过，其余不得继承
 | MAC-PERMISSION | Region Screen Recording 引导；Scroll 三权限预检、设置返回重检、运行中失效；拒启/失效不输出 | 部分：提示窗口出现/关闭与 AX 驱动见 MAC-E2E-07/10；Scroll 三权限预检诊断与入口闸门见 MAC-E2E-24；本机三项权限均已授权，缺失通知/设置返回重检/运行中失效属 §4.4，保持 **Not tested** |
 | MAC-REGION | 单内屏框选、移动/调整、重选/撤销、完成/保存/取消、Esc、快捷键重启、2x 几何 | 部分（#63）：冻结/取消、菜单/热键、选区创建/移动/八向调整/重选、撤销/重做/删除、AX 完成与 2x 输出几何见 §4.3（MAC-E2E-24/32/34/36/38）；真实指针拖拽动态属物理输入，保持 Not tested |
 | MAC-ANNOTATION | 全工具、命中/控制点、层叠/历史、越界、Blur、密度、悬停/焦点与贴边布局 | 部分（#63）：五工具在 Region 与长图上各建一对象、对象选中/移动/调整/端点编辑、对象历史与裁剪输出、密度/悬停与文字焦点见 MAC-E2E-13～25/32/33/35/38；真实指针拖拽动态与长图非矩形创建属物理输入，保持 Not tested |
-| MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 部分（#37）：拉丁文字创建/提交/撤销在 Region 与长图上见 MAC-E2E-25/32/33/35；中文 IME 组合/候选窗与 emoji 原生字形属 §4.4，保持 Not tested |
+| MAC-TEXT | 中文 IME、拉丁文字、emoji、多行；提交/Finish/保存不丢组合文字；空文本与撤销 | 部分（#37/#62）：拉丁文字创建/提交/撤销在 Region 与长图上见 MAC-E2E-25/32/33/35；MAC-E2E-39 以 `set-value` 写入 `中文 😀`，解码 PNG 断言系统字体的 CJK 笔画与彩色 emoji 像素，APP-TEXT-01～05 守护度量/字形/颜色；IME 候选窗与真实键盘组合过程仍属 §4.4，保持 Not tested |
 | MAC-SCROLL-POSITIVE | 自有 GPUI 夹具、TextEdit 固定文档、Safari `file://` 静态页分别完成启动、慢速双向、反向去重、完成/取消/输出 | 部分（#37）：MAC-E2E-30/31 在两第三方目标各完成启动/目标身份/内侧预览/拦截/慢速双向扩展与反向去重/单帧/Enter/双击/Esc/PNG，MAC-E2E-37 补齐两目标的成功预览与长图标注组合，MAC-E2E-35 在自有夹具补齐扩展长图的五工具标注；真机滚轮手感保持 **Not tested** |
 | MAC-SCROLL-UI | 右/左/选区内预览、目标内容不被浮层污染、多自有窗口全部精确排除 | 部分（#36）：内侧预览在 TextEdit/Safari 各一次（`placed=inner`、`scroll_exclusion_fixed` 预览 id、AX `arcshot.scroll.preview` 可寻址）；右/左仍只由自有夹具证实，第三方取内侧以固定几何覆盖，目标不被浮层污染由排除集与解码图证实 |
 | MAC-SCROLL-INPUT | 单帧、Enter、双击首击/完成、单击拦截、预览上滚动、前台/hit-test、Esc/重启/清理 | 部分（#36）：MAC-E2E-30/31 在两第三方目标各完成单帧/Enter/双击（TextEdit/Safari 滚动区）/单击拦截/原始滚动达目标/前台与 hit-test/Esc/清理；预览上滚动仍只由自有夹具内侧例证实，第三方未单独投轮于预览区；采集期热键重启仍仅注入式（CORE-SESSION-56） |

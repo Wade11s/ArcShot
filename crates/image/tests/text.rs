@@ -222,8 +222,26 @@ fn image_compose_31_the_font_input_is_pluggable() {
     /// A tiny font that renders every glyph as one opaque 2x2 block.
     struct BlockFont;
     impl TextFont for BlockFont {
-        fn rasterize(&self, _content: &str, _size: f64, _scale: f64) -> Option<TextGlyphs> {
-            TextGlyphs::new(2, 2, vec![255; 2 * 2 * 4])
+        fn measure(&self, _content: &str, _size: f64) -> Option<arcshot_image::TextMetrics> {
+            Some(arcshot_image::TextMetrics {
+                line_count: 1,
+                max_line_width: 2.0,
+                line_height: 2.0,
+            })
+        }
+
+        fn rasterize(
+            &self,
+            _content: &str,
+            _size: f64,
+            _scale: f64,
+            color: [u8; 3],
+        ) -> Option<TextGlyphs> {
+            let mut rgba = Vec::with_capacity(2 * 2 * 4);
+            for _ in 0..4 {
+                rgba.extend_from_slice(&[color[0], color[1], color[2], 255]);
+            }
+            TextGlyphs::new(2, 2, rgba)
         }
     }
     let background = [0_u8, 0, 0, 255];
@@ -288,7 +306,7 @@ fn image_compose_33_logical_metrics_match_the_physical_bitmap() {
     assert_eq!(metrics.line_height, 16.0);
     assert_eq!(metrics.max_line_width, 2.0 * 6.0 * (size / 8.0));
     let glyphs = BitmapFont
-        .rasterize(content, size, scale)
+        .rasterize(content, size, scale, [0xFF, 0x3B, 0x30])
         .expect("renderable");
     let size_px = size * scale;
     let expected_height = (metrics.line_count as f64 * size_px).round() as u32;

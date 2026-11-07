@@ -13,7 +13,9 @@ pub use stitch::{
     MAX_PREVIEW_PIXELS, StitchBuilder, StitchDecision, StitchPlacement, StitchPreview,
     StitchRefusal,
 };
-pub use text::{BitmapFont, TextFont, TextGlyphs, TextMetrics, measure_text, tint};
+pub use text::{
+    BitmapFont, TextFont, TextGlyphs, TextMetrics, measure_text, measure_text_with_font, tint,
+};
 
 use arcshot_core::StatusItemIcon;
 

@@ -3,7 +3,7 @@
 //! Region capture and scroll output use this single crop/composite/encode path.
 //! The input frame is immutable and never modified; no intermediate image is
 //! written to disk.
-use crate::text::{BitmapFont, TextFont, tint};
+use crate::text::{BitmapFont, TextFont};
 use arcshot_core::{
     Annotation, AnnotationStyle, ArrowStyle, BlurStyle, CapturedFrame, LineStyle, MAX_EDGE,
     MAX_PIXELS, MAX_PNG_BYTES, PixelRect, RectangleStyle, Selection,
@@ -210,6 +210,8 @@ fn draw_annotation(
 /// The anchor is the display-local top-left of the text box; the glyph bitmap
 /// already contains the line leading and baseline. Pixels outside the crop are
 /// dropped, so retained text may leave the selection without being resampled.
+/// The font returns premultiplied RGBA, which keeps antialiased edges and colour
+/// emoji intact.
 fn draw_text(
     image: &mut ComposedImage,
     crop: PixelRect,
@@ -218,10 +220,14 @@ fn draw_text(
     style: arcshot_core::TextStyle,
     font: &dyn TextFont,
 ) {
-    let Some(glyphs) = font.rasterize(text.content(), style.size_points(), scale) else {
+    let Some(glyphs) = font.rasterize(
+        text.content(),
+        style.size_points(),
+        scale,
+        style.color().rgb(),
+    ) else {
         return;
     };
-    let tinted = tint(&glyphs, style);
     let origin_x = physical_f(text.anchor()[0], scale, crop.x()).round() as i64;
     let origin_y = physical_f(text.anchor()[1], scale, crop.y()).round() as i64;
     for row in 0..i64::from(glyphs.height()) {
@@ -231,18 +237,23 @@ fn draw_text(
         }
         for column in 0..i64::from(glyphs.width()) {
             let index = (row as usize * glyphs.width() as usize + column as usize) * 4;
-            if tinted[index + 3] == 0 {
+            if glyphs.rgba()[index + 3] == 0 {
                 continue;
             }
             let x = origin_x + column;
             if x < 0 || x >= i64::from(image.width) {
                 continue;
             }
-            set_pixel(
+            blend_premultiplied(
                 image,
                 x as usize,
                 y as usize,
-                [tinted[index], tinted[index + 1], tinted[index + 2]],
+                [
+                    glyphs.rgba()[index],
+                    glyphs.rgba()[index + 1],
+                    glyphs.rgba()[index + 2],
+                    glyphs.rgba()[index + 3],
+                ],
             );
         }
     }
@@ -590,6 +601,27 @@ fn fill_polygon(image: &mut ComposedImage, vertices: &[[f64; 2]], color: [u8; 3]
 fn set_pixel(image: &mut ComposedImage, x: usize, y: usize, color: [u8; 3]) {
     let index = (y * image.width as usize + x) * 4;
     image.rgba[index..index + 3].copy_from_slice(&color);
+    image.rgba[index + 3] = 255;
+}
+
+/// Composites one premultiplied source pixel over the opaque base.
+///
+/// `out = src + base * (1 - alpha)`, already in premultiplied form, so an opaque
+/// source replaces the base exactly and a zero-alpha source is a no-op.
+fn blend_premultiplied(image: &mut ComposedImage, x: usize, y: usize, source: [u8; 4]) {
+    let index = (y * image.width as usize + x) * 4;
+    let alpha = u32::from(source[3]);
+    if alpha == 255 {
+        image.rgba[index..index + 3].copy_from_slice(&source[..3]);
+        image.rgba[index + 3] = 255;
+        return;
+    }
+    let inverse = 255 - alpha;
+    for (channel, source) in source.iter().take(3).enumerate() {
+        let base = u32::from(image.rgba[index + channel]);
+        let value = u32::from(*source) + (base * inverse + 127) / 255;
+        image.rgba[index + channel] = value.min(255) as u8;
+    }
     image.rgba[index + 3] = 255;
 }
 

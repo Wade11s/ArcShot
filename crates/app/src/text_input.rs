@@ -8,9 +8,9 @@
 use crate::ui::{UiCommand, UiQueue};
 use arcshot_core::{CaptureTicket, Selection};
 use gpui::{
-    App, Bounds, Context, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, Pixels, Point, Role, ShapedLine, SharedString,
-    TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px, size,
+    AccessibleAction, App, Bounds, Context, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Pixels, Point, Role, ShapedLine,
+    SharedString, TextRun, UTF16Selection, Window, div, fill, point, prelude::*, px, size,
 };
 use std::ops::Range;
 
@@ -49,7 +49,7 @@ impl TextInput {
     }
 
     pub(crate) fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let metrics = arcshot_image::measure_text(&self.content, self.size_points);
+        let metrics = crate::text_font::measure(&self.content, self.size_points);
         let width = metrics.max_line_width;
         let height = metrics.line_count as f64 * metrics.line_height;
         let bounds = Selection::try_new(
@@ -69,6 +69,24 @@ impl TextInput {
         });
         window.notify_text_input_changed(&self.focus_handle);
         cx.notify();
+    }
+
+    /// Replaces the whole draft through an accessibility SetValue.
+    ///
+    /// This is the semantic equivalent of selecting all and typing: the
+    /// authoritative document receives one TextEdited command with the new
+    /// measured bounds, so assistive technology and a screen reader can fill
+    /// the field without synthesising keystrokes.
+    pub(crate) fn set_content(
+        &mut self,
+        content: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.content = content;
+        self.selected_range = self.content.len()..self.content.len();
+        self.marked_range = None;
+        self.sync(window, cx);
     }
 
     fn replace(
@@ -267,6 +285,7 @@ pub(crate) struct Prepaint {
     lines: Vec<ShapedLine>,
     cursor_line: usize,
     cursor_x: Pixels,
+    line_height: Pixels,
 }
 
 impl Element for TextElement {
@@ -289,7 +308,7 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
         let input = self.input.read(cx);
-        let metrics = arcshot_image::measure_text(&input.content, input.size_points);
+        let metrics = crate::text_font::measure(&input.content, input.size_points);
         let width = (metrics.max_line_width as f32).max(1.0);
         let height = (metrics.line_count as f32 * metrics.line_height as f32).max(1.0);
         let mut style = gpui::Style::default();
@@ -310,6 +329,8 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let font_size = px(input.size_points as f32);
+        let metrics = crate::text_font::measure(&input.content, input.size_points);
+        let line_height = px((metrics.line_height as f32).max(1.0));
         let cursor_byte = input.selected_range.start;
         let mut lines = Vec::new();
         let mut cursor_line = 0;
@@ -357,6 +378,7 @@ impl Element for TextElement {
             lines,
             cursor_line,
             cursor_x,
+            line_height,
         }
     }
 
@@ -376,7 +398,7 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        let line_height = window.line_height();
+        let line_height = prepaint.line_height;
         for (index, line) in prepaint.lines.iter().enumerate() {
             let origin = point(bounds.left(), bounds.top() + line_height * index as f32);
             let _ = line.paint(origin, line_height, gpui::TextAlign::Left, None, window, cx);
@@ -402,11 +424,20 @@ pub(crate) fn text_editor(
     height: f32,
     focus: FocusHandle,
 ) -> impl IntoElement {
+    let set_input = input.clone();
     div()
         .id("arcshot.overlay.text.input")
         .role(Role::TextInput)
         .aria_label("文字输入")
         .accessibility_id("arcshot.overlay.text.input")
+        .on_a11y_action(AccessibleAction::SetValue, move |data, window, cx| {
+            let Some(gpui::accesskit::ActionData::Value(value)) = data else {
+                return;
+            };
+            let content = value.to_string();
+            log::info!("a11y_action=arcshot.overlay.text.input action=SetValue");
+            set_input.update(cx, |input, cx| input.set_content(content, window, cx));
+        })
         .track_focus(&focus)
         .absolute()
         .left(px(anchor[0] as f32))

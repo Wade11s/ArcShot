@@ -9,6 +9,7 @@ mod preferences;
 mod save;
 mod scroll;
 mod scroll_input;
+mod text;
 
 pub use capture::{
     CaptureError, DisplaySnapshot, NativeCapture, builtin_display, capture_builtin,
@@ -42,6 +43,7 @@ pub use scroll_input::{
     GlobalRect, ScrollInputTap, ScrollTapError, TapEvent, TapEventKind, TapGate, TapGateCommand,
     TapStats,
 };
+pub use text::{TextMeasure, TextRaster, measure_text, rasterize_text};
 
 use std::{cell::RefCell, error::Error, fmt};
 
