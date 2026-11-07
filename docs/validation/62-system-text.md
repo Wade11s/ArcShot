@@ -54,6 +54,7 @@ cargo test --locked --offline --workspace --all-features
 scripts/check-all.sh
 scripts/e2e-agent-desktop.py --tier quiet --no-build
 scripts/e2e-agent-desktop.py --tier ax --only text_system
+scripts/e2e-agent-desktop.py --tier ax --no-build
 ```
 
 - `cargo fmt --all`：exit 0。
@@ -77,6 +78,10 @@ startup_smoke=pass activation_policy=Accessory quit_action=terminate:
 - `scripts/e2e-agent-desktop.py --tier ax --only text_system`：exit 0，
   `mac_e2e_39=pass text='中文 😀' source=ax_set_value commit=1 pixels=1000x800 cjk_ink=627 run=26 emoji_ink=473`，
   `e2e_timing unit=text_system seconds=7.0`。
+- `scripts/e2e-agent-desktop.py --tier ax --no-build`（全部 ax 单元）：exit 0，
+  `mac_e2e=partial … tier=ax units=identity,notice_ax,selection_ax,text_system,scroll_gate,sound_prefs cases=11/39 acceptance=false`，
+  `e2e_timing total_s=38.6 agent_desktop_calls=122`。同一树上 MAC-E2E-38（选区/对象手势）
+  与 MAC-E2E-24（滚动入口）继续通过，说明字体/编辑器改动没有破坏 #63 的 AX 词表。
 
 ### MAC-E2E-39 引用的日志行
 
@@ -114,6 +119,7 @@ capture_phase from=Frozen to=Resident action=OutputCompleted
 | APP-TEXT-04（彩色 emoji） | 自动化 | Pass | alpha>128 的暖色像素 >10 |
 | APP-TEXT-05（提交输出用系统字体） | 自动化 | Pass | 系统字体合成与固定字体字节不同；样式红到达合成面；框外像素不变 |
 | MAC-E2E-39（AX 写入 CJK/emoji 并解码 PNG） | `ax` | Pass | 上节日志行与 `mac_e2e_39=pass …` |
+| MAC-E2E-38/24（#63 手势与滚动入口） | `ax` | Pass | 同一轮 `mac_e2e_38=pass … gestures=8`、`mac_e2e_24=pass … missing=none` |
 | MAC-E2E-25（Text 工具与选项） | `physical` | Not tested | 本轮只跑 `quiet`/`ax`；编辑器行高改由系统字体度量后未重跑该物理单元 |
 | 其余 MAC-E2E-01…38 | `physical`/`full` | Not tested | 既有结论不因本票改变；完整矩阵待发布候选重跑 |
 | 中文 IME 候选窗、真实键盘组合、视觉观感 | — | Not tested | 属 §4.4 用户项；本票只证明 AX 整值写入与系统字体栅格化 |
