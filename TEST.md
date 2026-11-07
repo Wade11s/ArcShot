@@ -548,8 +548,11 @@ E2E 的观察合同因此是**双通道**：
    Text 工具为 `BeginText`），因此证明的是 core 手势逻辑与结果文档状态，不是真实
    拖拽动态。每次激活写一行 `a11y_action=<id> action=SetValue value=<载荷>`，随后
    的 `capture_edit` 行描述结果；两者缺一不可。`value` 与载荷同形，未被钳制时回读
-   逐字相等。
-6. **懒激活**：Accessibility 在第一个辅助技术客户端连接时才建立，窗口刚打开的第一
+   逐字相等。选区体节点取“选区内未被对象覆盖的点”（优先中心），因此它移动的是选区
+   而不是压在中心的对象；文字对象另有 `arcshot.overlay.object.<i>.edit`，Click 等价
+   于指针在 Select 下双击重编。文字编辑中激活任一节点与指针一致：先提交草稿，本身
+   不再开始新动作。
+7. **懒激活**：Accessibility 在第一个辅助技术客户端连接时才建立，窗口刚打开的第一
    次 `snapshot --app` 可能是空树；必须先重读再下结论（脚本里的 `wait_node`）。
 
 ### 4.3 稳定用例
@@ -773,15 +776,17 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   | `accessibility_id` | 存在条件 | 载荷 | 动作 |
   | --- | --- | --- | --- |
   | `arcshot.overlay.selection` | 冻结且非长图（无选区时 value=`none`） | 两角 | 框选/重选 |
-  | `arcshot.overlay.selection.body` | 有选区、Select 工具 | 目标中心点 | 移动选区 |
+  | `arcshot.overlay.selection.body` | 有选区、Select 工具 | 选区内未被对象覆盖的点（优先中心，否则向内探测） | 移动选区 |
   | `arcshot.overlay.selection.handle.{top_left,top,top_right,right,bottom_right,bottom,bottom_left,left}` | 同可见控制点 | 目标点 | 调整选区 |
   | `arcshot.overlay.object.new` | 有选区、标注工具激活 | 两角（value 报最后一个对象的范围） | 创建对象（Text 工具为 `BeginText`） |
   | `arcshot.overlay.object.<i>` | 第 i 个对象（含长图表面） | 两角 | Click 选中；SetValue 移动 |
+  | `arcshot.overlay.object.<i>.edit` | 第 i 个对象是文字 | 两角 | Click 重编（等价于指针双击） |
   | `arcshot.overlay.object.<i>.handle.<八名>` | 矩形/模糊对象被选中 | 目标点 | 调整对象 |
   | `arcshot.overlay.object.<i>.endpoint.{start,end}` | 直线/箭头被选中 | 目标点 | 编辑端点 |
 
   每次激活写 `a11y_action=<id> action=SetValue value=<载荷>`（或 `action=Click`），随后
-  的 `capture_edit` 行描述结果文档状态。证据边界：这证明 core 手势逻辑（命中、钳制、
+  的 `capture_edit` 行描述结果文档状态。文字编辑中激活任一节点与指针一致：先
+  `commit_editor` 提交草稿，本身不再开始新动作。证据边界：这证明 core 手势逻辑（命中、钳制、
   最小尺寸、单条历史步）经权威入口执行并改变文档，**不**证明真实指针的按下—移动—释放
   动态或手感；后者仍属物理输入，不作为验收证据。控制点落在选区外时与指针一致地开始
   新框选（MAC-E2E-38 的几何因此必须落在选区内）。长图表面不注册选区与创建节点，

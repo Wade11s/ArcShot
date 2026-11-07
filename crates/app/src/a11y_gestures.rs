@@ -7,7 +7,10 @@
 //! and release at the same points would enqueue — the same authoritative
 //! capture path, never a second editor (#63).
 
-use arcshot_app::{CapturePressAction, capture_long_image_press_action, capture_press_action};
+use arcshot_app::{
+    CapturePressAction, capture_long_image_press_action, capture_press_action,
+    capture_text_press_action,
+};
 use arcshot_core::{Annotation, CaptureTicket, Endpoint, ResizeHandle, Selection, Tool};
 
 use crate::ui::UiCommand;
@@ -65,6 +68,8 @@ pub(crate) enum A11yAffordance {
     Click(A11yAnchor),
     /// `SetValue` carries corners: move the object's center to their middle.
     MoveObject(usize),
+    /// `Click`: re-open a text object's editor, the select-tool double-click.
+    ReeditText(usize),
 }
 
 /// The stable `accessibility_id` suffix of one selection or object control point.
@@ -125,12 +130,9 @@ pub(crate) fn annotation_corners(annotation: &Annotation) -> Option<([f64; 2], [
 #[must_use]
 pub(crate) fn anchor_point(context: &GestureContext<'_>, anchor: A11yAnchor) -> Option<[f64; 2]> {
     match anchor {
-        A11yAnchor::SelectionCenter => context.selection.map(|selection| {
-            [
-                selection.x() + selection.width() / 2.0,
-                selection.y() + selection.height() / 2.0,
-            ]
-        }),
+        A11yAnchor::SelectionCenter => context
+            .selection
+            .map(|selection| selection_body_point(selection, context.annotations)),
         A11yAnchor::SelectionHandle(handle) => context
             .selection
             .map(|selection| selection.handle_center(handle)),
@@ -148,6 +150,37 @@ pub(crate) fn anchor_point(context: &GestureContext<'_>, anchor: A11yAnchor) -> 
             .segment()
             .map(|segment| segment.endpoint_center(endpoint)),
     }
+}
+
+/// A point inside the selection that no annotation covers.
+///
+/// The selection body node must press somewhere the core resolves as a
+/// selection move: a press on an object moves that object instead, so an object
+/// covering the centre would turn "移动选区" into an object drag. The centre is
+/// preferred, then a coarse inset grid, then the centre as a last resort.
+fn selection_body_point(selection: Selection, annotations: &[Annotation]) -> [f64; 2] {
+    let at = |fx: f64, fy: f64| {
+        [
+            selection.x() + selection.width() * fx,
+            selection.y() + selection.height() * fy,
+        ]
+    };
+    let free = |point: [f64; 2]| {
+        selection.contains(point) && arcshot_core::annotation_at(annotations, point).is_none()
+    };
+    let center = at(0.5, 0.5);
+    if free(center) {
+        return center;
+    }
+    for fy in [0.5, 0.25, 0.75, 0.1, 0.9, 0.02, 0.98] {
+        for fx in [0.5, 0.25, 0.75, 0.1, 0.9, 0.02, 0.98] {
+            let point = at(fx, fy);
+            if free(point) {
+                return point;
+            }
+        }
+    }
+    center
 }
 
 /// Parses a comma-separated AX value payload into document points.
@@ -289,6 +322,21 @@ pub(crate) fn affordance_commands(
         A11yAffordance::Click(anchor) => anchor_point(context, anchor)
             .map(|point| press_drag_release(context, ticket, point, point))
             .unwrap_or_default(),
+        A11yAffordance::ReeditText(index) => {
+            let Some(point) = anchor_point(context, A11yAnchor::ObjectCenter(index)) else {
+                return Vec::new();
+            };
+            let is_text = context
+                .annotations
+                .get(index)
+                .and_then(|annotation| annotation.style().text())
+                .is_some();
+            if capture_text_press_action(true, context.tool, is_text, point).is_some() {
+                vec![UiCommand::BeginText { ticket, point }]
+            } else {
+                Vec::new()
+            }
+        }
         A11yAffordance::MoveObject(index) => {
             let Some(A11yGeometry::Corners(a, b)) = parse_geometry(payload) else {
                 return Vec::new();
@@ -915,5 +963,74 @@ mod tests {
     fn the_two_endpoint_names_are_stable() {
         assert_eq!(endpoint_name(arcshot_core::Endpoint::Start), "start");
         assert_eq!(endpoint_name(arcshot_core::Endpoint::End), "end");
+    }
+
+    #[test]
+    fn the_selection_body_presses_a_point_no_object_covers() {
+        // An object covering the selection centre must not turn "移动选区" into
+        // an object drag: the body anchor resolves to a free interior point.
+        let covering = [rectangle_at(120.0, 120.0, 360.0, 260.0)];
+        let live = context(Tool::Select, Some(selection()), &covering);
+        let point = anchor_point(&live, A11yAnchor::SelectionCenter).expect("a body point");
+        assert!(
+            arcshot_core::annotation_at(&covering, point).is_none(),
+            "the body press must not land on an object"
+        );
+        assert!(selection().contains(point), "the body press stays inside");
+        assert_ne!(point, [300.0, 250.0], "the covered centre is not used");
+
+        // With the centre free the anchor stays exactly at the centre.
+        let clear = [rectangle_at(150.0, 150.0, 20.0, 20.0)];
+        let live = context(Tool::Select, Some(selection()), &clear);
+        assert_eq!(
+            anchor_point(&live, A11yAnchor::SelectionCenter),
+            Some([300.0, 250.0])
+        );
+
+        // A selection fully covered by objects still yields a point, so the
+        // node never disappears; the core then decides what that press means.
+        let all = [rectangle_at(100.0, 100.0, 400.0, 300.0)];
+        let live = context(Tool::Select, Some(selection()), &all);
+        assert_eq!(
+            anchor_point(&live, A11yAnchor::SelectionCenter),
+            Some([300.0, 250.0])
+        );
+    }
+
+    #[test]
+    fn a_text_object_exposes_the_select_tool_re_edit() {
+        let ticket = ticket();
+        let text = Annotation::text(
+            arcshot_core::TextGeometry::new(
+                [120.0, 120.0],
+                "Hello",
+                Selection::try_new(120.0, 120.0, 60.0, 20.0).expect("bounds"),
+            ),
+            arcshot_core::TextStyle::default(),
+        );
+        let annotations = [text];
+        let live = context(Tool::Select, Some(selection()), &annotations);
+        assert_eq!(
+            affordance_commands(&live, ticket, A11yAffordance::ReeditText(0), ""),
+            vec![UiCommand::BeginText {
+                ticket,
+                point: [150.0, 130.0],
+            }]
+        );
+
+        // Outside the select tool the pointer has no re-edit either.
+        let rectangle_tool = context(Tool::Rectangle, Some(selection()), &annotations);
+        assert_eq!(
+            affordance_commands(&rectangle_tool, ticket, A11yAffordance::ReeditText(0), ""),
+            Vec::new()
+        );
+
+        // A non-text object has nothing to re-edit.
+        let shapes = [rectangle_at(150.0, 150.0, 80.0, 60.0)];
+        let live = context(Tool::Select, Some(selection()), &shapes);
+        assert_eq!(
+            affordance_commands(&live, ticket, A11yAffordance::ReeditText(0), ""),
+            Vec::new()
+        );
     }
 }

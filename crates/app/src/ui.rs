@@ -1170,7 +1170,13 @@ fn a11y_gesture(
                 _ => String::new(),
             };
             log::info!("a11y_action={set_id} action=SetValue value={payload}");
-            let commands = set_view.update(cx, |view, _| {
+            let commands = set_view.update(cx, |view, cx| {
+                // A press while editing commits the draft first, exactly as the
+                // pointer handler does; the same press starts nothing else.
+                if view.text_edit.is_some() {
+                    view.commit_editor(cx);
+                    return Vec::new();
+                }
                 let context = view.gesture_context();
                 affordance_commands(&context, ticket, affordance, &payload)
             });
@@ -1181,7 +1187,12 @@ fn a11y_gesture(
         let click_queue = Rc::clone(queue);
         node = node.on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
             log::info!("a11y_action={click_id} action=Click");
-            let commands = click_view.update(cx, |view, _| {
+            let commands = click_view.update(cx, |view, cx| {
+                // Same rule for a bare activation: commit, then do nothing else.
+                if view.text_edit.is_some() {
+                    view.commit_editor(cx);
+                    return Vec::new();
+                }
                 let context = view.gesture_context();
                 affordance_commands(&context, ticket, click_affordance, "")
             });
@@ -1842,6 +1853,30 @@ impl Render for CaptureView {
                         .w(px(width))
                         .h(px(height)),
                 );
+                // A text object also exposes the select-tool double-click, the
+                // only pointer path into re-editing. Without it the AX surface
+                // could move text but never edit it again (#63).
+                if annotation.style().text().is_some() {
+                    let node = a11y_gesture(
+                        A11yGesture {
+                            id: format!("arcshot.overlay.object.{index}.edit"),
+                            label: format!("编辑文字对象 {index}"),
+                            value: Self::object_value(annotation),
+                            affordance: A11yAffordance::ReeditText(index),
+                            click: None,
+                        },
+                        ticket,
+                        cx.entity(),
+                        &self.queue,
+                    );
+                    root = root.child(
+                        node.absolute()
+                            .left(px(x + width - 8.0))
+                            .top(px(y + height - 8.0))
+                            .w(px(8.0))
+                            .h(px(8.0)),
+                    );
+                }
             }
         }
 

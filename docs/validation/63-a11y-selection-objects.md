@@ -61,7 +61,7 @@ scripts/e2e-agent-desktop.py --list
 # 只跑不打扰使用者的两档（用户在用这台 Mac）
 scripts/e2e-agent-desktop.py --tier ax --no-build > target/e2e-63-ax.log 2>&1
 # → exit 0；mac_e2e=partial … cases=10/38 acceptance=false（部分运行，非完整矩阵证据）
-# → e2e_timing total_s=25.8 agent_desktop_calls=108
+# → e2e_timing total_s=23.1 agent_desktop_calls=108
 ```
 
 `target/e2e-63-ax.log` 的逐用例结果：
@@ -188,3 +188,25 @@ cargo test --workspace
 - **`arcshot.overlay.object.new` 的 value 是派生值**（最后一个对象的范围），不是独立
   状态；撤销/重做后会指向另一个对象。它只作为“上一次创建产生了什么”的提示，载荷才是
   权威输入。
+
+## 审查后的修复（本机未重跑 E2E）
+
+两轴审查（Standards / Spec）在本票提出后指出三项缺陷，已修复并有单元证据：
+
+| 缺陷 | 修复 | 证据 |
+| --- | --- | --- |
+| `arcshot.overlay.selection.body` 按选区中心取值；对象覆盖中心时该节点移动的是对象而不是选区 | 选区体锚点改为“选区内未被对象覆盖的点”（优先中心，否则向内探测，全被覆盖时回退中心） | `the_selection_body_presses_a_point_no_object_covers` |
+| Select 下双击已有文字重编没有 AX 路径 | 文字对象新增 `arcshot.overlay.object.<i>.edit`，Click 走 `capture_text_press_action` | `a_text_object_exposes_the_select_tool_re_edit` |
+| AX 动作在文字编辑中只入队 `TextCommit`，不调用 `commit_editor`，实时编辑器要等下一个 tick 才消失 | 两个 AX 闭包与指针一致：先 `commit_editor`，本身不再开始新动作 | 代码路径对齐 `ui.rs` 指针处理器；无无头测试 |
+
+另修正本文件的 `total_s` 笔误（25.8 → 23.1）与 `TEST.md` §4.2 的重复编号（两个 6 → 6/7）。
+
+### 未重跑 E2E 的原因
+
+`scripts/e2e-agent-desktop.py --tier ax` 在本机无法完成，两个原因都与本票代码无关：
+
+1. **显示前置不满足**：`selection_ax` 之前报 `the display is not clean`，列出 Notification Center 与 `loginwindow` layer 2001/2004 —— 录制期间本机已锁屏。这是前置条件，不是产品失败。
+2. **`notice_ax` 在未改动的基线上同样失败**：在 `e2edb74`（本票上一提交，未含上述修复）上跑 `--only notice_ax`，得到完全相同的
+   `ACTION_NOT_SUPPORTED: Window 'w-…' exists but is not exposed through accessibility`。本机 `agent-desktop` 已是 1.2.0（本票原记录为 1.1.0），因此这是工具或环境变化，不是本票回归。
+
+**因此本文件的 E2E 证据仍属于 `e2edb74`**，上述三项修复只有单元证据，没有新的 `mac_e2e` 记录。`mac_e2e=partial … acceptance=false` 的结论不变；全矩阵与物理输入项仍为 Not tested。合并前若要求 E2E 覆盖这三项，须在解锁且显示干净的机器上重跑 `--tier ax` 与 `--tier physical`。
