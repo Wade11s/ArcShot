@@ -2017,6 +2017,14 @@ impl Coordinator {
             Some(PARTIAL_INCOMPLETE_WARNING),
             cx,
         );
+        // The user must choose accept or abandon, and the target may be the
+        // reason collection stopped (closed or moved). Make the control window
+        // frontmost so its buttons stay reachable and accessible instead of
+        // leaving the choice behind a deactivated app.
+        cx.activate(true);
+        if let Some(control) = self.scroll_control.as_ref() {
+            let _ = control.update(cx, |_, window, _| window.activate_window());
+        }
     }
 
     /// Drives the Scroll permission notice policy and its native effects.
