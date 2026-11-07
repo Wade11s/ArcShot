@@ -598,7 +598,7 @@ def click_scroll_entry(app: str, *, denied: bool) -> None:
 
 
 def start(executable: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
-    """Starts the bundle under test with its diagnostics in one fresh log."""
+    """Starts a test binary with its diagnostics in one fresh log."""
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("")
     stderr = log.open("w")
@@ -606,6 +606,47 @@ def start(executable: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
         [str(executable)], stdout=subprocess.DEVNULL, stderr=stderr, cwd=ROOT
     )
     stderr.close()
+    return process
+
+
+def activate_app(app: str, process: subprocess.Popen) -> None:
+    """Brings the app under test to the front once, so GPUI publishes its AX tree.
+
+    `agent-desktop` 1.2.0 answers accessibility queries for a window whose app
+    has never been active with the AppKit frame only: the GPUI subtree is
+    missing until the app has been frontmost at least once. It stays published
+    afterwards, so one activation per launch is enough.
+
+    This is the only `osascript` the tier rule allows below `physical`. It
+    injects no input and sends no keys; it sets `frontmost` for the process this
+    harness started itself. Launching through LaunchServices would avoid the
+    activation but needs its own Screen Recording grant, which is a user TCC
+    decision, and a directly executed binary inherits the launching terminal's
+    grant instead.
+    """
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and process.poll() is None:
+        result = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of '
+                f"(first process whose unix id is {process.pid}) to true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        if result.returncode == 0:
+            return
+        time.sleep(POLL)
+    fail(f"could not activate {app} for accessibility")
+
+
+def start_product(executable: pathlib.Path, app: str, log: pathlib.Path) -> subprocess.Popen:
+    """Starts the product under test and makes its AX subtree observable."""
+    process = start(executable, log)
+    activate_app(app, process)
     return process
 
 
@@ -1668,7 +1709,7 @@ def main() -> int:
         fail(f"bundle identity mismatch: {actual} / {actual_name}, expected {identifier} / {app}")
 
     log = ROOT / "target" / f"e2e-agent-desktop-{configuration}.log"
-    process = start(executable, log)
+    process = start_product(executable, app, log)
     restart_logs = [
         ROOT / "target" / f"e2e-agent-desktop-{configuration}-restart-{index}.log"
         # 1-2: MAC-E2E-16 completion-sound restarts; 3-5: MAC-E2E-22 density.
@@ -4683,7 +4724,7 @@ def main() -> int:
 
             # MAC-E2E-16: the stored preference survives a real restart and is then
             # restored to the value the user had before this run.
-            process = start(executable, restart_logs[0])
+            process = start_product(executable, app, restart_logs[0])
             wait_log(
                 restart_logs[0], f"preferences_launch completion_sound={flipped_sound}", 10.0
             )
@@ -4692,7 +4733,7 @@ def main() -> int:
                 restart_logs[0], f"completion_sound enabled={original_sound} persisted=true", 10.0
             )
             quit_app(app, process, expect_status_item_removed=False)
-            process = start(executable, restart_logs[1])
+            process = start_product(executable, app, restart_logs[1])
             wait_log(
                 restart_logs[1], f"preferences_launch completion_sound={original_sound}", 10.0
             )
@@ -4711,7 +4752,7 @@ def main() -> int:
             # MAC-E2E-22: 选项密度 switches through AX, keeps the same option set
             # and the active tool/styles, survives a restart, and is restored to the
             # value the user had before this run. No pixels, no coordinate clicks.
-            process = start(executable, restart_logs[2])
+            process = start_product(executable, app, restart_logs[2])
             original_density = launch_density(restart_logs[2])
             flipped_density = "Standard" if original_density == "Compact" else "Compact"
 
@@ -4801,7 +4842,7 @@ def main() -> int:
             # The flipped value survives a real restart, then is restored through
             # the same AX path; a final restart confirms the user's original value.
             quit_app(app, process, expect_status_item_removed=False)
-            process = start(executable, restart_logs[3])
+            process = start_product(executable, app, restart_logs[3])
             if launch_density(restart_logs[3]) != flipped_density:
                 fail("option density did not survive a real restart")
             click(app, "选项密度")
@@ -4811,7 +4852,7 @@ def main() -> int:
                 10.0,
             )
             quit_app(app, process, expect_status_item_removed=False)
-            process = start(executable, restart_logs[4])
+            process = start_product(executable, app, restart_logs[4])
             if launch_density(restart_logs[4]) != original_density:
                 fail("the user's original option density was not restored")
             quit_app(app, process, expect_status_item_removed=False)

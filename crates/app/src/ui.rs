@@ -1809,7 +1809,10 @@ impl Render for CaptureView {
                             label: format!("新建{:?}标注", self.tool),
                             value,
                             affordance: A11yAffordance::CornersGesture,
-                            click: None,
+                            // The text tool opens an editor instead of dragging,
+                            // so its creation is a bare activation: `SetValue`
+                            // would leave the reported value unchanged.
+                            click: (self.tool == Tool::Text).then_some(A11yAffordance::BeginText),
                         },
                         ticket,
                         cx.entity(),

@@ -210,3 +210,35 @@ cargo test --workspace
    `ACTION_NOT_SUPPORTED: Window 'w-…' exists but is not exposed through accessibility`。本机 `agent-desktop` 已是 1.2.0（本票原记录为 1.1.0），因此这是工具或环境变化，不是本票回归。
 
 **因此本文件的 E2E 证据仍属于 `e2edb74`**，上述三项修复只有单元证据，没有新的 `mac_e2e` 记录。`mac_e2e=partial … acceptance=false` 的结论不变；全矩阵与物理输入项仍为 Not tested。合并前若要求 E2E 覆盖这三项，须在解锁且显示干净的机器上重跑 `--tier ax` 与 `--tier physical`。
+
+## agent-desktop 1.2.0 适配后的重跑
+
+本机 `agent-desktop` 由 1.1.0 升到 1.2.0 后，`--tier ax` 在**未改动的基线** `e2edb74` 上
+也失败：`ACTION_NOT_SUPPORTED: Window 'w-…' exists but is not exposed through accessibility`。
+原因是 1.2.0 对从未成为前台的应用窗口只返回 AppKit 边框按钮，GPUI 子树不出现。
+
+接缝改动（`scripts/e2e-agent-desktop.py`）：
+
+- `start_product` 在直接启动被测二进制后用一次 `osascript` 把该 pid 设为 `frontmost`，
+  子树随后发布并在失去前台后保持。这是 ax 档允许的唯一 `osascript`：不注入按键或指针。
+- 直接启动保留启动终端的屏幕录制授权；经 `open`（LaunchServices）启动需要该 bundle
+  自己的 TCC 授权，属于用户决定，因此没有采用。
+- 代价：MAC-E2E-01 的“不要求 ArcShot 在前台”不再是独立证明，`TEST.md` §4.5 已记录。
+
+重跑结果（同一候选，`--tier ax`，Debug）：
+
+```
+scripts/e2e-agent-desktop.py --tier ax
+# → exit 0；mac_e2e=partial … cases=10/38 acceptance=false
+# → mac_e2e_10=pass notice_texts=2 action=arcshot.notice.close
+# → mac_e2e_38=pass selection=ax handles=8 object=ax object_handles=8 endpoints=2
+#              annotations=2 gestures=8
+# → mac_e2e_24=pass entry_gate=ax selection_precondition=ax_set_value missing=none
+```
+
+`scripts/check-all.sh` 同时重跑（fmt、clippy `-D warnings`、全部测试、doc、依赖/架构/文字
+后端/启动/禁网、Release 启动），exit 0。
+
+仍未覆盖：`physical` / `full` 档（真实指针与键盘），以及文字内容写入——编辑器不提供
+`AXValue` 写回，`type` 在 ax 档报 `POLICY_DENIED`，所以 `object.new` 的 Click 与
+`object.<i>.edit` 只有单元证据，端到端仍记 Not tested。

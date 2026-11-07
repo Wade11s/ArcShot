@@ -70,6 +70,8 @@ pub(crate) enum A11yAffordance {
     MoveObject(usize),
     /// `Click`: re-open a text object's editor, the select-tool double-click.
     ReeditText(usize),
+    /// `Click`: open a new text editor at the selection centre (text tool).
+    BeginText,
 }
 
 /// The stable `accessibility_id` suffix of one selection or object control point.
@@ -322,6 +324,20 @@ pub(crate) fn affordance_commands(
         A11yAffordance::Click(anchor) => anchor_point(context, anchor)
             .map(|point| press_drag_release(context, ticket, point, point))
             .unwrap_or_default(),
+        A11yAffordance::BeginText => {
+            let Some(selection) = context.selection else {
+                return Vec::new();
+            };
+            let point = [
+                selection.x() + selection.width() / 2.0,
+                selection.y() + selection.height() / 2.0,
+            ];
+            if context.tool == Tool::Text && selection.contains(point) {
+                vec![UiCommand::BeginText { ticket, point }]
+            } else {
+                Vec::new()
+            }
+        }
         A11yAffordance::ReeditText(index) => {
             let Some(point) = anchor_point(context, A11yAnchor::ObjectCenter(index)) else {
                 return Vec::new();
@@ -1030,6 +1046,33 @@ mod tests {
         let live = context(Tool::Select, Some(selection()), &shapes);
         assert_eq!(
             affordance_commands(&live, ticket, A11yAffordance::ReeditText(0), ""),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn the_text_tool_opens_an_editor_from_a_bare_activation() {
+        let ticket = ticket();
+        let annotations: [Annotation; 0] = [];
+        let live = context(Tool::Text, Some(selection()), &annotations);
+        assert_eq!(
+            affordance_commands(&live, ticket, A11yAffordance::BeginText, ""),
+            vec![UiCommand::BeginText {
+                ticket,
+                point: [300.0, 250.0],
+            }]
+        );
+
+        // Only the text tool creates an editor; a drag tool keeps its gesture.
+        let rectangle = context(Tool::Rectangle, Some(selection()), &annotations);
+        assert_eq!(
+            affordance_commands(&rectangle, ticket, A11yAffordance::BeginText, ""),
+            Vec::new()
+        );
+        // Without a selection there is nowhere to place the editor.
+        let empty = context(Tool::Text, None, &annotations);
+        assert_eq!(
+            affordance_commands(&empty, ticket, A11yAffordance::BeginText, ""),
             Vec::new()
         );
     }

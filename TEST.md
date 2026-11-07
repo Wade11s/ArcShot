@@ -552,6 +552,13 @@ E2E 的观察合同因此是**双通道**：
    而不是压在中心的对象；文字对象另有 `arcshot.overlay.object.<i>.edit`，Click 等价
    于指针在 Select 下双击重编。文字编辑中激活任一节点与指针一致：先提交草稿，本身
    不再开始新动作。
+
+  文字内容无法在 ax 档写入：编辑器不提供 `AXValue` 写回，`type` 报
+  `POLICY_DENIED`（语义动作不可用），而 `--headed` 按键属物理输入。因此
+  `object.new` 的 Click 与 `object.<i>.edit` 只有单元证据
+  （`the_text_tool_opens_an_editor_from_a_bare_activation`、
+  `a_text_object_exposes_the_select_tool_re_edit`），端到端仍须物理按键，记为
+  Not tested。
 7. **懒激活**：Accessibility 在第一个辅助技术客户端连接时才建立，窗口刚打开的第一
    次 `snapshot --app` 可能是空树；必须先重读再下结论（脚本里的 `wait_node`）。
 
@@ -778,7 +785,7 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   | `arcshot.overlay.selection` | 冻结且非长图（无选区时 value=`none`） | 两角 | 框选/重选 |
   | `arcshot.overlay.selection.body` | 有选区、Select 工具 | 选区内未被对象覆盖的点（优先中心，否则向内探测） | 移动选区 |
   | `arcshot.overlay.selection.handle.{top_left,top,top_right,right,bottom_right,bottom,bottom_left,left}` | 同可见控制点 | 目标点 | 调整选区 |
-  | `arcshot.overlay.object.new` | 有选区、标注工具激活 | 两角（value 报最后一个对象的范围） | 创建对象（Text 工具为 `BeginText`） |
+  | `arcshot.overlay.object.new` | 有选区、标注工具激活 | 两角（value 报最后一个对象的范围） | 创建对象；Text 工具为 Click 打开编辑器（`SetValue` 不改变 value，工具的写后校验会拒绝） |
   | `arcshot.overlay.object.<i>` | 第 i 个对象（含长图表面） | 两角 | Click 选中；SetValue 移动 |
   | `arcshot.overlay.object.<i>.edit` | 第 i 个对象是文字 | 两角 | Click 重编（等价于指针双击） |
   | `arcshot.overlay.object.<i>.handle.<八名>` | 矩形/模糊对象被选中 | 目标点 | 调整对象 |
@@ -791,6 +798,13 @@ scripts/e2e-agent-desktop.py --skip third_party          # 发布候选之外可
   动态或手感；后者仍属物理输入，不作为验收证据。控制点落在选区外时与指针一致地开始
   新框选（MAC-E2E-38 的几何因此必须落在选区内）。长图表面不注册选区与创建节点，
   非矩形工具在长图上仍只能拖拽创建，保持 **Not tested**。
+- 已落地（agent-desktop 1.2.0）：启动与激活接缝。1.2.0 对“从未成为前台”的应用窗口只返回
+  AppKit 边框按钮，GPUI 子树不出现；应用被激活过一次之后子树才发布，并在失去前台后保持。
+  因此 `start_product` 在直接启动被测二进制后，用一次 `osascript` 把该 pid 设为
+  `frontmost`。这是 ax 档允许的唯一 `osascript`：不注入按键或指针，只切换前台；直接启动
+  还能沿用启动终端的屏幕录制授权，而经 LaunchServices（`open`）启动需要该 bundle 自己
+  的 TCC 授权，那属于用户决定。代价是 MAC-E2E-01 的“不要求 ArcShot 在前台”不再是独立
+  证明——应用在启动时已被激活一次，该断言降级为“后续菜单命令不依赖前台”。
 - 仍缺：登录项切换（注册/注销）与失败提示窗口的可驱动证据。它会改动用户系统登录项
   并可能要求系统设置批准，E2E 与冒烟都不执行；成功/失败/不可读分支由 APP-EFFECT-28～32
   的注入结果覆盖，MAC-START 的人工项保持 **Not tested**。
