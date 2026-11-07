@@ -193,6 +193,9 @@ UNITS = [
     Unit("selection_ax", "ax", ("38",), True,
          "selection and object gestures through AX geometry values",
          "the overlay takes focus; every gesture is a semantic SetValue"),
+    Unit("text_system", "ax", ("39",), True,
+         "system-font text: CJK and emoji reach the composed PNG through AX",
+         "the editor is filled through the overlay's own SetValue action"),
     Unit("scroll_gate", "ax", ("24",), True,
          "Scroll entry gate and permission preflight",
          "the selection precondition is an AX SetValue, not a drag"),
@@ -1050,6 +1053,7 @@ def decode_png_metrics(data: bytes) -> dict:
         "alpha_ok": alpha_ok,
         "distinct_rows": len(set(rows)),
         "sha256": hashlib.sha256(data).hexdigest(),
+        "rows": rows,
     }
 
 
@@ -1207,6 +1211,38 @@ def decode_clipboard_expect(selection: tuple[float, float, float, float]) -> dic
     if metrics["distinct_rows"] < 100:
         fail(f"the decoded PNG looks uniform ({metrics['distinct_rows']} distinct rows)")
     return metrics
+
+
+def glyph_ink(rows: list[bytes], box: tuple[int, int, int, int], predicate) -> tuple[int, int]:
+    """Counts matching pixels and the longest horizontal run inside one box.
+
+    The run length separates real glyph strokes from the old 5x7 hollow box:
+    a box's interior rows carry only its two vertical edges.
+    """
+    x0, y0, x1, y1 = box
+    count = 0
+    longest = 0
+    for row in rows[y0:y1]:
+        run = 0
+        for x in range(x0, x1):
+            index = x * 4
+            if predicate(row[index], row[index + 1], row[index + 2]):
+                count += 1
+                run += 1
+                longest = max(longest, run)
+            else:
+                run = 0
+    return count, longest
+
+
+def is_red_text(red: int, green: int, blue: int) -> bool:
+    """The default text colour #FF3B30, allowing antialiased edges."""
+    return red > 150 and green < 120 and blue < 120
+
+
+def is_emoji_colour(red: int, green: int, blue: int) -> bool:
+    """Warm saturated colour glyphs (Apple Color Emoji), not the red text fill."""
+    return red > 170 and green > 100 and red - blue > 70 and green - blue > 40
 
 
 def select_region(
@@ -2702,6 +2738,90 @@ def main() -> int:
                 "endpoints=2 annotations=2 gestures=8"
             )
             unit_done("selection_ax")
+
+        if want("text_system"):
+            # MAC-E2E-39: the Text tool's creation node opens the editor at the
+            # selection centre, the editor accepts a full CJK + emoji draft
+            # through a semantic SetValue, and Finish copies a PNG whose glyph
+            # strokes sit at that anchor (#62). The evidence is the AX
+            # activations, the TextEdited/TextCommit diagnostics and the
+            # decoded clipboard pixels, never a coordinate click or key press.
+            log_mark = len(read_log(log))
+            click(app, "开始截图")
+            wait_frozen_active(log, log_mark)
+            ax_set_value(app, "arcshot.overlay.selection", "200,200,700,600")
+            wait_log(log, "capture_edit action=SelectRegion", 10.0, after=log_mark)
+            ax_click(app, "arcshot.overlay.tool.text")
+            wait_log(log, "capture_edit action=SelectTool", 10.0, after=log_mark)
+
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.object.new")
+            wait_log(log, "a11y_action=arcshot.overlay.object.new action=Click", 10.0, after=mark)
+            wait_node(
+                app,
+                lambda tree: (
+                    find_nodes(tree, native_id="arcshot.overlay.text.input", require_ref=True)
+                    or [None]
+                )[0],
+                10.0,
+            )
+
+            mark = len(read_log(log))
+            draft = "中文 😀"
+            ax_set_value(app, "arcshot.overlay.text.input", draft)
+            wait_log(log, "a11y_action=arcshot.overlay.text.input action=SetValue", 10.0, after=mark)
+            wait_log(log, "capture_edit action=TextEdited", 10.0, after=mark)
+
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.tool.select")
+            # A tool change commits the live editor (the coordinator's own
+            # commit path) and the SelectTool diagnostic reports the new count.
+            commit = wait_log_line(log, "capture_edit action=SelectTool", 10.0, after=mark)
+            if "annotations=1" not in commit:
+                fail(f"system-font text commit was {commit!r}")
+
+            mark = len(read_log(log))
+            ax_click(app, "arcshot.overlay.finish")
+            wait_log(log, "a11y_action=arcshot.overlay.finish action=Click", 10.0, after=mark)
+            publish = wait_log_line(log, "output_publish target=Clipboard", 10.0, after=mark)
+            if "pixels=1000x800" not in publish or "annotations=1" not in publish:
+                fail(f"system-font output was {publish!r}")
+            wait_log(log, "from=Frozen to=Resident action=OutputCompleted", 10.0, after=mark)
+
+            # The clipboard is read through AppKit directly (not osascript,
+            # which the ax tier forbids); the transient PNG is deleted at once.
+            name = "39-text-system.png"
+            _hash, _size, width, height = pasteboard_png(name)
+            png_path = ROOT / "target" / name
+            metrics = decode_png_metrics(png_path.read_bytes())
+            png_path.unlink(missing_ok=True)
+            if (width, height) != (1000, 800) or (metrics["width"], metrics["height"]) != (
+                1000,
+                800,
+            ):
+                fail(f"system-font output PNG is {width}x{height}, want 1000x800")
+            if not metrics["alpha_ok"]:
+                fail("the system-font output PNG is not fully opaque")
+            rows = metrics["rows"]
+            # The editor anchors at the selection centre (450,400), which is
+            # physical (500,400) in the cropped PNG. The draft stays inside the
+            # 160x60 physical box below; the row-run floor rejects the old
+            # 5x7 hollow box, whose interior rows carry only two edge pixels.
+            cjk_pixels, cjk_run = glyph_ink(rows, (495, 395, 660, 450), is_red_text)
+            if cjk_pixels < 80 or cjk_run < 8:
+                fail(
+                    f"system-font CJK ink was {cjk_pixels} pixels, longest run {cjk_run}; "
+                    "a hollow-box fallback or misaligned anchor"
+                )
+            emoji_pixels, _ = glyph_ink(rows, (550, 395, 660, 450), is_emoji_colour)
+            if emoji_pixels < 20:
+                fail(f"emoji colour glyph pixels were {emoji_pixels}")
+            note(
+                f"mac_e2e_39=pass text={draft!r} source=ax_set_value commit=1 "
+                f"pixels={metrics['width']}x{metrics['height']} "
+                f"cjk_ink={cjk_pixels} run={cjk_run} emoji_ink={emoji_pixels}"
+            )
+            unit_done("text_system")
 
         if want("scroll_gate"):
             # MAC-E2E-24: the Scroll entry gate is addressable, is not activatable
