@@ -1,17 +1,18 @@
-//! Deterministic text rasterization input shared by preview and output.
+//! Text rasterization input shared by preview and output.
 //!
-//! The compositor draws text from a [`TextFont`] so the golden tests can supply
-//! a reproducible built-in font while the native macOS system-font path can be
-//! plugged in later without a second rasterizer. [`BitmapFont`] is a fixed 5x7
-//! monospace face; unknown characters render as a hollow box, so every input is
-//! deterministic and no glyph is ever silently dropped.
+//! The compositor draws text from a [`TextFont`]. [`BitmapFont`] is a fixed 5x7
+//! monospace face used by the golden tests and by the default entry point:
+//! unknown characters render as a hollow box, so every input is deterministic.
+//! The product supplies the macOS system-face font from `arcshot-app`; measurement
+//! and rasterization go through the same font input so the committed box and the
+//! drawn glyphs cannot drift apart.
 
-use arcshot_core::TextStyle;
-
-/// One rasterized text box: coverage alpha plus white RGB, in physical pixels.
+/// One rasterized text box in premultiplied RGBA, in physical pixels.
 ///
-/// The bitmap's top-left is the text box top-left. Coverage is binary (0 or 255)
-/// for the built-in font; the compositor applies the style colour.
+/// The bitmap's top-left is the text box top-left. The font applies the style
+/// colour itself, so colour glyphs (emoji) keep their own colours; alpha carries
+/// coverage for antialiased text edges. Coverage is binary (0 or 255) for
+/// [`BitmapFont`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextGlyphs {
     width: u32,
@@ -45,7 +46,7 @@ impl TextGlyphs {
     pub const fn height(&self) -> u32 {
         self.height
     }
-    /// White RGB with coverage in the alpha channel, row-major.
+    /// Premultiplied RGBA in the font's final colours, row-major.
     #[must_use]
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
@@ -57,7 +58,7 @@ impl TextGlyphs {
 pub struct TextMetrics {
     /// Number of lines after splitting on `\n`.
     pub line_count: usize,
-    /// Widest line in logical points, using the monospace cell advance.
+    /// Widest line in logical points.
     pub max_line_width: f64,
     /// Logical line height.
     pub line_height: f64,
@@ -79,9 +80,28 @@ impl TextMetrics {
 /// Measures multi-line text in logical points with the built-in font metrics.
 ///
 /// The text never wraps: each `\n` starts a new line and the width is the widest
-/// line's monospace advance.
+/// line's monospace advance. Product call sites measure with the same font input
+/// they later rasterize with; this entry point stays on [`BitmapFont`] for the
+/// reproducible golden tests.
 #[must_use]
 pub fn measure_text(content: &str, size_points: f64) -> TextMetrics {
+    bitmap_metrics(content, size_points)
+}
+
+/// Measures multi-line text with an explicit font input.
+///
+/// Returns `None` when the font cannot render the requested size.
+#[must_use]
+pub fn measure_text_with_font(
+    font: &dyn TextFont,
+    content: &str,
+    size_points: f64,
+) -> Option<TextMetrics> {
+    font.measure(content, size_points)
+}
+
+/// Built-in 5x7 monospace metrics in logical points.
+fn bitmap_metrics(content: &str, size_points: f64) -> TextMetrics {
     let line_count = content.split('\n').count();
     let max_chars = content
         .split('\n')
@@ -96,13 +116,25 @@ pub fn measure_text(content: &str, size_points: f64) -> TextMetrics {
     }
 }
 
-/// A font input the shared compositor can rasterize text with.
+/// A font input the shared compositor can measure and rasterize text with.
 pub trait TextFont: Send + Sync {
+    /// Measures one multi-line text box in logical points.
+    ///
+    /// Returns `None` when the size is not renderable.
+    fn measure(&self, content: &str, size_points: f64) -> Option<TextMetrics>;
+
     /// Rasterizes one multi-line text box at a physical pixel size.
     ///
     /// `size_points` is the logical font size and `scale` is the physical pixels
-    /// per logical point. Returns `None` when the size is not renderable.
-    fn rasterize(&self, content: &str, size_points: f64, scale: f64) -> Option<TextGlyphs>;
+    /// per logical point. `color` is the style colour; colour glyphs may keep
+    /// their own colours. Returns `None` when the size is not renderable.
+    fn rasterize(
+        &self,
+        content: &str,
+        size_points: f64,
+        scale: f64,
+        color: [u8; 3],
+    ) -> Option<TextGlyphs>;
 }
 
 /// The reproducible built-in 5x7 monospace font.
@@ -110,7 +142,20 @@ pub trait TextFont: Send + Sync {
 pub struct BitmapFont;
 
 impl TextFont for BitmapFont {
-    fn rasterize(&self, content: &str, size_points: f64, scale: f64) -> Option<TextGlyphs> {
+    fn measure(&self, content: &str, size_points: f64) -> Option<TextMetrics> {
+        if !size_points.is_finite() || size_points <= 0.0 {
+            return None;
+        }
+        Some(bitmap_metrics(content, size_points))
+    }
+
+    fn rasterize(
+        &self,
+        content: &str,
+        size_points: f64,
+        scale: f64,
+        color: [u8; 3],
+    ) -> Option<TextGlyphs> {
         let size_px = size_points * scale;
         if !size_px.is_finite() || size_px <= 0.0 {
             return None;
@@ -156,10 +201,14 @@ impl TextFont for BitmapFont {
                 }
             }
         }
-        Some(TextGlyphs {
+        let glyphs = TextGlyphs {
             width,
             height,
             rgba,
+        };
+        Some(TextGlyphs {
+            rgba: tint(&glyphs, color),
+            ..glyphs
         })
     }
 }
@@ -401,19 +450,25 @@ fn glyph_bits(character: char) -> u64 {
     }
 }
 
-/// Applies one text style's colour to a coverage mask for compositing.
+/// Applies one colour to a coverage mask, producing premultiplied RGBA.
 ///
-/// The returned RGBA bytes are the style colour where coverage is opaque and
-/// fully transparent elsewhere, so the compositor can blit them directly.
+/// A zero-alpha pixel stays fully transparent; every other pixel multiplies the
+/// colour by its coverage so the compositor can blend it without unpremultiplying.
 #[must_use]
-pub fn tint(glyphs: &TextGlyphs, style: TextStyle) -> Vec<u8> {
-    let [red, green, blue] = style.color().rgb();
+pub fn tint(glyphs: &TextGlyphs, color: [u8; 3]) -> Vec<u8> {
     let mut tinted = Vec::with_capacity(glyphs.rgba.len());
     for pixel in glyphs.rgba.as_chunks::<4>().0 {
-        if pixel[3] == 0 {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 {
             tinted.extend_from_slice(&[0, 0, 0, 0]);
         } else {
-            tinted.extend_from_slice(&[red, green, blue, 255]);
+            let channel = |value: u8| ((u32::from(value) * alpha + 127) / 255) as u8;
+            tinted.extend_from_slice(&[
+                channel(color[0]),
+                channel(color[1]),
+                channel(color[2]),
+                pixel[3],
+            ]);
         }
     }
     tinted

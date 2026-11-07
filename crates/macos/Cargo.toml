@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 arcshot-core.workspace = true
+core-foundation = { version = "=0.10.0", default-features = false }
+core-graphics = { version = "=0.24.0", default-features = false }
+core-text = { version = "=21.0.0", default-features = false, features = ["link"] }
 log = "0.4"
 screencapturekit = { version = "=11.1.1", default-features = false, features = ["macos_15_0"] }
 apple-cf = { version = "=0.11.7", default-features = false, features = ["cg"] }

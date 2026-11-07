@@ -2197,7 +2197,7 @@ impl Render for CaptureView {
             && let Some(edit) = self.text_edit.as_ref()
             && let Some(focus) = self.text_focus.clone()
         {
-            let metrics = arcshot_image::measure_text(&edit.content, edit.style.size_points());
+            let metrics = crate::text_font::measure(&edit.content, edit.style.size_points());
             let width = (metrics.max_line_width as f32).max(1.0);
             let height = (metrics.line_count as f32 * metrics.line_height as f32).max(1.0);
             // The live editor shell follows the view transform; the measured

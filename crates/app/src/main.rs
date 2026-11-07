@@ -3,6 +3,7 @@
 mod a11y_gestures;
 mod coordinator;
 mod logging;
+mod text_font;
 mod text_input;
 mod ui;
 

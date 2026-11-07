@@ -34,6 +34,8 @@ pub use scroll_partial_flow::{
 };
 mod output_publish;
 pub use output_publish::{PendingSave, encode_document, publish_output};
+mod text_font;
+pub use text_font::{SystemFont, measure as measure_system_text, system_font};
 mod completion_preview;
 pub use completion_preview::{MARGIN, MAX_HEIGHT, MAX_WIDTH, PreviewLayout, preview_layout};
 mod key_policy;

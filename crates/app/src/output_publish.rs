@@ -3,6 +3,7 @@
 //! The encoder is the single compose/encode route for both actions; the target
 //! carried by [`OutputJob`] decides the one side effect that may follow. A
 //! save destination is held for exactly the snapshot the user chose it for.
+use crate::text_font::system_font;
 use arcshot_core::{CapturedFrame, MAX_PNG_BYTES, OutputFailure, OutputJob, OutputTarget};
 use std::path::{Path, PathBuf};
 
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// Returns [`OutputFailure::ResourceLimit`] for the export budget and
 /// [`OutputFailure::Encode`] for any compose/encode failure.
 pub fn encode_document(frame: &CapturedFrame, job: OutputJob) -> Result<Vec<u8>, OutputFailure> {
-    arcshot_image::compose_document(frame, job.crop(), job.annotations())
+    arcshot_image::compose_document_with_font(frame, job.crop(), job.annotations(), system_font())
         .and_then(|composed| arcshot_image::encode_png(&composed))
         .map_err(|error| match error {
             arcshot_image::ComposeError::ResourceLimit => OutputFailure::ResourceLimit,
